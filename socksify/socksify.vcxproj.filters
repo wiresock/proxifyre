@@ -1,0 +1,199 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="Header Files\.net">
+      <UniqueIdentifier>{a6b06d6c-5a8d-4bc7-86a3-dddcf7b99ea5}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\netlib">
+      <UniqueIdentifier>{c9fae8d2-b328-49af-ac3a-f453ade8f3fb}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\native">
+      <UniqueIdentifier>{1722b784-012f-48e5-99a7-2f806a45c887}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\netlib\dhcp">
+      <UniqueIdentifier>{d50bf446-ae0f-468d-a795-60eeba0f5fb3}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\netlib\iphelper">
+      <UniqueIdentifier>{7291f13e-fa59-4648-9253-4c145ca5d9b6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\netlib\log">
+      <UniqueIdentifier>{244e268e-2f97-4672-8e4b-42e802f0ea9f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\netlib\ndisapi">
+      <UniqueIdentifier>{93c2ffa3-afb3-4792-a070-f6ca677fd52c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\netlib\net">
+      <UniqueIdentifier>{e550927a-b098-4fd8-9e16-9736b91bada8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\netlib\pcap">
+      <UniqueIdentifier>{b9ee197a-ded6-4372-8c51-e3e57f461ba9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\netlib\proxy">
+      <UniqueIdentifier>{82d90ccc-1f05-453a-8068-b791e9166aca}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\netlib\tools">
+      <UniqueIdentifier>{142864fb-64ff-4178-b404-567942748f18}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\netlib\winsys">
+      <UniqueIdentifier>{48ac607f-70ff-49fa-8f03-6a30aabf3e82}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\.net">
+      <UniqueIdentifier>{e945cb21-0a12-4cd5-b5b4-fbe503d3fdc1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\native">
+      <UniqueIdentifier>{8d0a41c4-83ad-41d1-ad87-04c6303811bb}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\netlib\dhcp\dhcp.h">
+      <Filter>Header Files\netlib\dhcp</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\dhcp\dhcp_service.h">
+      <Filter>Header Files\netlib\dhcp</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\iphelper\network_adapter_info.h">
+      <Filter>Header Files\netlib\iphelper</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\log\log.h">
+      <Filter>Header Files\netlib\log</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\ndisapi\network_adapter.h">
+      <Filter>Header Files\netlib\ndisapi</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\net\ip_address.h">
+      <Filter>Header Files\netlib\net</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\net\ip_endpoint.h">
+      <Filter>Header Files\netlib\net</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\net\ip_subnet.h">
+      <Filter>Header Files\netlib\net</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\net\ipv4_ip_config.h">
+      <Filter>Header Files\netlib\net</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\net\ipv6_helper.h">
+      <Filter>Header Files\netlib\net</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\net\mac_address.h">
+      <Filter>Header Files\netlib\net</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\winsys\event.h">
+      <Filter>Header Files\netlib\winsys</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\winsys\io_completion_port.h">
+      <Filter>Header Files\netlib\winsys</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\winsys\object.h">
+      <Filter>Header Files\netlib\winsys</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\tools\generic.h">
+      <Filter>Header Files\netlib\tools</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\proxy\packet_pool.h">
+      <Filter>Header Files\netlib\proxy</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\proxy\proxy_common.h">
+      <Filter>Header Files\netlib\proxy</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\proxy\tcp_proxy_server.h">
+      <Filter>Header Files\netlib\proxy</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\proxy\tcp_proxy_socket.h">
+      <Filter>Header Files\netlib\proxy</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\pcap\pcap.h">
+      <Filter>Header Files\netlib\pcap</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\pcap\pcap_file_storage.h">
+      <Filter>Header Files\netlib\pcap</Filter>
+    </ClInclude>
+    <ClInclude Include="unmanaged.h">
+      <Filter>Header Files\native</Filter>
+    </ClInclude>
+    <ClInclude Include="socksify_unmanaged.h">
+      <Filter>Header Files\native</Filter>
+    </ClInclude>
+    <ClInclude Include="mixed_types.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="logger.h">
+      <Filter>Header Files\native</Filter>
+    </ClInclude>
+    <ClInclude Include="Resource.h">
+      <Filter>Header Files\.net</Filter>
+    </ClInclude>
+    <ClInclude Include="pch.h">
+      <Filter>Header Files\.net</Filter>
+    </ClInclude>
+    <ClInclude Include="Socksifier.h">
+      <Filter>Header Files\.net</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\proxy\socks_local_router.h">
+      <Filter>Header Files\netlib\proxy</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\proxy\socks5_tcp_proxy_socket.h">
+      <Filter>Header Files\netlib\proxy</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\proxy\socks5_local_udp_proxy_server.h">
+      <Filter>Header Files\netlib\proxy</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\proxy\socks5_udp_proxy_socket.h">
+      <Filter>Header Files\netlib\proxy</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\proxy\socks5_common.h">
+      <Filter>Header Files\netlib\proxy</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\ndisapi\queued_packet_filter.h">
+      <Filter>Header Files\netlib\ndisapi</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\ndisapi\tcp_local_redirect.h">
+      <Filter>Header Files\netlib\ndisapi</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\ndisapi\socks5_udp_local_redirect.h">
+      <Filter>Header Files\netlib\ndisapi</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\iphelper\process_lookup.h">
+      <Filter>Header Files\netlib\iphelper</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\ndisapi\static_filters.h">
+      <Filter>Header Files\netlib\ndisapi</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="AssemblyInfo.cpp">
+      <Filter>Source Files\.net</Filter>
+    </ClCompile>
+    <ClCompile Include="Socksifier.cpp">
+      <Filter>Source Files\.net</Filter>
+    </ClCompile>
+    <ClCompile Include="pch.cpp">
+      <Filter>Source Files\.net</Filter>
+    </ClCompile>
+    <ClCompile Include="socksify_unmanaged.cpp">
+      <Filter>Source Files\native</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="app.rc">
+      <Filter>Resource Files</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="app.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+  </ItemGroup>
+</Project>
