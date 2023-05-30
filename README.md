@@ -1,6 +1,34 @@
 # Local SOCKS5 Proxy Router
 
-This project is an advanced version of the Windows Packet Filter [socksify](https://github.com/wiresock/ndisapi/tree/master/examples/cpp/socksify) demo. It enhances the base version with added support for UDP and multiple proxy instances.
+This project is an advanced version of the Windows Packet Filter [socksify](https://github.com/wiresock/ndisapi/tree/master/examples/cpp/socksify) demo. It enhances the base version with added support for UDP and multiple proxy instances. Additionally, it now reads its configuration from an `app-config.json` file.
+
+## Configuration
+
+The application now uses a configuration file named `app-config.json`. This JSON file should contain an array of configurations for different applications. Each configuration object should have the following properties:
+
+- `appNames`: An array of strings representing the names of applications this configuration applies to.
+- `socks5ProxyEndpoint`: A string that specifies the SOCKS5 proxy endpoint.
+- `username`: A string that specifies the username for the proxy.
+- `password`: A string that specifies the password for the proxy.
+
+Here is an example configuration:
+
+```json
+[
+    {
+        "appNames": ["chrome", "chrome_canary"],
+        "socks5ProxyEndpoint": "158.101.205.51:1080",
+        "username": "username1",
+        "password": "password1"
+    },
+    {
+        "appNames": ["firefox", "firefox_dev"],
+        "socks5ProxyEndpoint": "159.101.205.52:1080",
+        "username": "username2",
+        "password": "password2"
+    }
+]
+```
 
 ## Build Prerequisites 
 
@@ -11,7 +39,7 @@ Before starting the build process, ensure the following requirements are met:
 2. **Install Microsoft GSL library via vcpkg:** Once vcpkg is installed, use it to download and install the Microsoft GSL library. Run the following commands in your terminal:
 
     ```
-   vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows ms-gsl:x86-windows-static ms-gsl:x64-windows-static ms-gsl:arm64-windows-static
+   vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows
     ```
 
 3. **Add online NuGet Package Source:** In some cases, you may need to add an online NuGet Package Source. To do this, navigate to `Visual Studio->Tools->Options->NuGet Package Manager->Package Sources` and add `https://nuget.org/api/v2`.
