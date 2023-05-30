@@ -30,6 +30,26 @@ Here is an example configuration:
 ]
 ```
 
+## Quick Start Guide
+
+This guide provides step-by-step instructions on how to set up and run the Local SOCKS5 Proxy Router application. 
+
+### Pre-installation Steps
+
+1. **Download and Install Windows Packet Filter (WinpkFilter)**: This is a critical dependency for our project. Please visit the [Windows Packet Filter Github page](https://github.com/wiresock/ndisapi/releases) to download and install the latest version.
+
+### Installation Steps
+
+2. **Download the Latest Release**: Visit our [GitHub page](https://github.com/wiresock/socksify/releases) to download the latest release of the Local SOCKS5 Proxy Router software.
+
+3. **Unzip the Software**: After downloading, extract the contents of the .zip file to your preferred location.
+
+4. **Create `app-config.json` File**: Following the template provided in the Configuration section of this document, create an `app-config.json` file. This file is crucial for the software to function properly. Save this file in the main application folder.
+
+### Running the Application
+
+5. **Run the Application**: Navigate to the directory where you extracted the software. Find the main application executable (`.exe` file) and run it. It's recommended to run the application as an administrator to ensure all functionalities work as expected.
+
 ## Build Prerequisites 
 
 Before starting the build process, ensure the following requirements are met:
