@@ -27,6 +27,7 @@ jobs:
         uses: microsoft/setup-msbuild@v1
 
       - name: Install vcpkg
+        shell: bash
         run: |
           git clone https://github.com/Microsoft/vcpkg.git
           cd vcpkg
