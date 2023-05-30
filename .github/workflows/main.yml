@@ -46,14 +46,10 @@ jobs:
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
       - name: Build ndisapi.lib
-        run: |
-          cd ndisapi.lib/ndisapilib.vcxproj
-          msbuild /p:Configuration=Release /p:Platform="${{ matrix.platform }}"
+        run: msbuild ndisapi.lib/ndisapilib.vcxproj /p:Configuration=Release /p:Platform="${{ matrix.platform }}"
 
       - name: Build socksify.dll
-        run: |
-          cd socksify/socksify.vcxproj
-          msbuild /p:Configuration=Release /p:Platform="${{ matrix.platform }}"
+        run: msbuild socksify/socksify.vcxproj /p:Configuration=Release /p:Platform="${{ matrix.platform }}"
 
       - name: Build
         run: msbuild dotNetSocksProxy/dotNetSocksProxy.csproj -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=${{ matrix.platform }} -property:Version=${{ env.VERSION }} -property:Repository=${{ github.repository }}
