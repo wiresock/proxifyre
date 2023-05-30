@@ -253,6 +253,25 @@ namespace iphelper
 			return oss.str();
 		}
 
+		/**
+		* Retrieve TCP sessions that belong to a process matching a regular expression.
+		*
+		* @param process Regular expression pattern to match process name.
+		*
+		* @return A vector of ip_session objects of type T.
+		*/
+		std::vector<net::ip_session<T>> get_tcp_sessions_for_process(const std::wregex& process)
+		{
+			std::vector<net::ip_session<T>> sessions;
+			std::shared_lock<std::shared_mutex> lock(tcp_to_app_lock_);
+			std::for_each(tcp_to_app_.begin(), tcp_to_app_.end(), [&sessions, &process](auto&& entry)
+			{
+				if (std::regex_match(std::wstring(entry.second->name.begin(), entry.second->name.end()), process))
+					sessions.push_back(entry.first);
+			});
+			return sessions;
+		}
+
 		/// <summary>
 		/// Returns current UDP hash table string representation
 		/// </summary>
@@ -397,8 +416,9 @@ namespace iphelper
 							tcp_to_app_[net::ip_session<T>(T{table->table[i].ucLocalAddr},
 							                               T{table->table[i].ucRemoteAddr},
 							                               ntohs(static_cast<uint16_t>(table->table[i].dwLocalPort)),
-							                               ntohs(static_cast<uint16_t>(table->table[i].dwRemotePort)))]
-								= std::move(process_ptr);
+							                               ntohs(static_cast<uint16_t>(table->table[i].dwRemotePort)),
+							                               table->table[i].dwLocalScopeId,
+							                               table->table[i].dwRemoteScopeId)] = std::move(process_ptr);
 						}
 					}
 				}
@@ -519,7 +539,7 @@ namespace iphelper
 						{
 							udp_to_app_[net::ip_endpoint<T>(
 								T{table->table[i].ucLocalAddr},
-								ntohs(static_cast<uint16_t>(table->table[i].dwLocalPort)))] = std::move(process_ptr);
+								ntohs(static_cast<uint16_t>(table->table[i].dwLocalPort)), 0)] = std::move(process_ptr);
 						}
 					}
 				}

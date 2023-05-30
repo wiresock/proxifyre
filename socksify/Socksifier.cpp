@@ -154,7 +154,7 @@ bool Socksifier::Socksifier::AssociateProcessNameToProxy(String^ processName, In
 		return false;
 #if _WIN64
 	return unmanaged_ptr_->associate_process_name_to_proxy(msclr::interop::marshal_as<std::wstring>(processName),
-															proxy.ToInt64());
+	                                                       proxy.ToInt64());
 #else
 	return unmanaged_ptr_->associate_process_name_to_proxy(msclr::interop::marshal_as<std::wstring>(processName),
 															proxy.ToInt32());

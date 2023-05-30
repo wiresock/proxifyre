@@ -28,6 +28,7 @@
 #include <charconv>
 #include <unordered_set>
 #include <queue>
+#include <regex>
 #include <gsl/gsl>
 
 #include "../include/common.h"

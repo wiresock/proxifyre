@@ -19,10 +19,16 @@ namespace net
 		/// <summary>
 		/// Constructs endpoint from provided IP address and port
 		/// </summary>
-		/// <param name="ip"></param>
-		/// <param name="port"></param>
-		ip_endpoint(const T& ip, const unsigned short port) : ip(ip), port(port)
+		/// <param name="ip">IP address</param>
+		/// <param name="port">TCP/UDP port number</param>
+		/// <param name="scope">interface scope ID</param>
+		ip_endpoint(const T& ip, const unsigned short port,
+		            const std::optional<uint32_t> scope = std::nullopt) : ip(ip), port(port)
 		{
+			if (scope)
+			{
+				scope_id = scope;
+			}
 		}
 
 		/// <summary>
@@ -48,14 +54,20 @@ namespace net
 		/// </summary>
 		/// <param name="rhs">endpoint to compare to</param>
 		/// <returns>true if endpoints are equal</returns>
-		bool operator ==(const ip_endpoint& rhs) const noexcept { return (ip == rhs.ip) && (port == rhs.port); }
+		bool operator ==(const ip_endpoint& rhs) const noexcept
+		{
+			return (ip == rhs.ip) && (port == rhs.port) && (scope_id == rhs.scope_id);
+		}
 
 		/// <summary>
 		/// Non-equality operator
 		/// </summary>
 		/// <param name="rhs">endpoint to compare to</param>
 		/// <returns>true if endpoints are not equal</returns>
-		bool operator !=(const ip_endpoint& rhs) const { return (ip != rhs.ip) || (port != rhs.port); }
+		bool operator !=(const ip_endpoint& rhs) const
+		{
+			return (ip != rhs.ip) || (port != rhs.port) || (scope_id != rhs.scope_id);
+		}
 
 		/// <summary>
 		/// Endpoint IP address
@@ -66,6 +78,11 @@ namespace net
 		/// Endpoint port value
 		/// </summary>
 		uint16_t port{0};
+
+		/// <summary>
+		/// Optional interface scope ID
+		/// </summary>
+		std::optional<uint32_t> scope_id;
 	};
 
 	// --------------------------------------------------------------------------------
@@ -84,13 +101,17 @@ namespace net
 		/// <param name="remote_ip">remote IP address</param>
 		/// <param name="local_port">local port</param>
 		/// <param name="remote_port">remote port</param>
+		/// <param name="local_scope">local scope ID</param>
+		/// <param name="remote_scope">remote scope ID</param>
 		ip_session(
 			const T& local_ip,
 			const T& remote_ip,
 			const unsigned short local_port,
-			const unsigned short remote_port) :
-			local(local_ip, local_port),
-			remote(remote_ip, remote_port)
+			const unsigned short remote_port,
+			const std::optional<uint32_t> local_scope = std::nullopt,
+			const std::optional<uint32_t> remote_scope = std::nullopt) :
+			local(local_ip, local_port, local_scope),
+			remote(remote_ip, remote_port, remote_scope)
 		{
 		}
 
@@ -152,7 +173,8 @@ namespace std
 		{
 			const auto h1(std::hash<std::size_t>{}(
 				std::hash<T>{}(endpoint.ip) ^
-				static_cast<unsigned long>(endpoint.port)
+				static_cast<unsigned long>(endpoint.port) ^
+				std::hash<std::optional<uint32_t>>{}(endpoint.scope_id.value_or(0))
 			));
 
 			return h1;
@@ -175,7 +197,9 @@ namespace std
 				std::hash<net::ip_endpoint<T>>{}(endpoint.local) ^
 				static_cast<unsigned long>(endpoint.local.port) ^
 				std::hash<net::ip_endpoint<T>>{}(endpoint.remote) ^
-				static_cast<unsigned long>(endpoint.remote.port)
+				static_cast<unsigned long>(endpoint.remote.port) ^
+				std::hash<std::optional<uint32_t>>{}(endpoint.local.scope_id.value_or(0)) ^
+				std::hash<std::optional<uint32_t>>{}(endpoint.remote.scope_id.value_or(0))
 			));
 
 			return h1;

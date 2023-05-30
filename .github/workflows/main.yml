@@ -1,0 +1,80 @@
+name: 'Build and publish release'
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build-and-package:
+    strategy:
+      matrix:
+        include:
+          - platform: 'x86'
+            build_configuration: 'Release'
+          - platform: 'x64'
+            build_configuration: 'Release'
+          - platform: 'ARM64'
+            build_configuration: 'Release'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout from GitHub
+        uses: actions/checkout@v3
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v1
+
+      - name: Parse Version
+        shell: bash
+        run: |
+          # Strip "v" prefix from tag name 
+          VERSION=$(echo ${{ github.ref_name }} | sed -e 's/^v//') 
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Build
+        run: msbuild dotNetSocksProxy/dotNetSocksProxy.csproj -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=${{ matrix.platform }} -property:Version=${{ env.VERSION }} -property:Repository=${{ github.repository }}
+
+      - name: Package Release
+        uses: thedoctor0/zip-release@0.7.1
+        with:
+          type: 'zip'
+          filename: 'dotNetSocksProxy-${{ github.ref_name }}-${{ matrix.platform }}.zip'
+          directory: 'bin\exe\${{ matrix.platform }}\${{ matrix.build_configuration }}'
+          exclusions: '*.pdb'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: ${{ matrix.platform }}-artifact
+          path: 'bin\exe\${{ matrix.platform }}\${{ matrix.build_configuration }}\dotNetSocksProxy-${{ github.ref_name }}-${{ matrix.platform }}.zip'
+
+  upload-release:
+    if: ${{ always() }}
+    needs: build-and-package
+    runs-on: windows-latest
+    steps:
+      - name: Checkout from GitHub
+        uses: actions/checkout@v3
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v2
+        with:
+          path: 'artifacts'
+
+      - name: Parse Version
+        shell: bash
+        run: |
+          # Strip "v" prefix from tag name 
+          VERSION=$(echo ${{ github.ref_name }} | sed -e 's/^v//') 
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Upload Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: 'artifacts/**/*.zip'
+          name: 'dotNetSocksProxy-${{ github.ref_name }}'
+          tag: ${{ github.ref_name }}
+          token: ${{ secrets.MY_GITHUB_PAT }}
+          skipIfReleaseExists: true

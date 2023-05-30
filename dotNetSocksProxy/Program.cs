@@ -1,5 +1,8 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using Newtonsoft.Json;
 using Socksifier;
 
 namespace dotNetSocksProxy
@@ -7,23 +10,37 @@ namespace dotNetSocksProxy
     // Main class for the SOCKS proxy application
     internal class Program
     {
+        //[
+        //{
+        //    "appNames": ["chrome", "chrome_canary"],
+        //    "socks5ProxyEndpoint": "158.101.205.51:1080",
+        //    "username": "username1",
+        //    "password": "password1"
+        //},
+        //{
+        //    "appNames": ["firefox", "firefox_dev"],
+        //    "socks5ProxyEndpoint": "159.101.205.52:1080",
+        //    "username": "username2",
+        //    "password": "password2"
+        //}
+        //]
+
+        private class AppSettings
+        {
+            public List<string> AppNames { get; set; }
+            public string Socks5ProxyEndpoint { get; set; }
+            public string Username { get; set; }
+            public string Password { get; set; }
+        }
+
         // Entry point of the application
         private static void Main()
         {
             // Setting the level of logging for the application
             const LogLevel logLevel = LogLevel.None;
 
-            // Define the names of the applications to be proxied
-            const string appName1 = "chrome";
-            const string appName2 = "firefox";
-
-            // Define the SOCKS5 proxy endpoints, e.g. 158.101.205.51:1080
-            const string socks5ProxyEndpoint1 = "PUT-YOUR-SOCKS5-PROXY-ENDPOINT-HERE";
-            const string socks5ProxyEndpoint2 = "PUT-YOUR-SOCKS5-PROXY-ENDPOINT-HERE";
-
-            // Define the username and password for the proxy, assumes that both proxies above use the same credentials
-            const string username = "PUT-YOUR-SOCKS5-PROXY-USERNAME-HERE";
-            const string password = "PUT-YOUR-SOCKS5-PROXY-PASSWORD-HERE";
+            // Load the configuration from JSON
+            var appSettingsList = JsonConvert.DeserializeObject<List<AppSettings>>(File.ReadAllText("app-config.json"));
 
             // Get an instance of the Socksifier
             var wiresock = Socksifier.Socksifier.GetInstance(logLevel);
@@ -35,16 +52,17 @@ namespace dotNetSocksProxy
             wiresock.LogLimit = 100;
             wiresock.LogEventInterval = 1000;
 
-            // Add the defined SOCKS5 proxies
-            var oracle = wiresock.AddSocks5Proxy(socks5ProxyEndpoint1, username, password, true);
-            var oracle2 = wiresock.AddSocks5Proxy(socks5ProxyEndpoint2, username, password, true);
+            foreach (var appSettings in appSettingsList)
+            {
+                // Add the defined SOCKS5 proxies
+                var oracle = wiresock.AddSocks5Proxy(appSettings.Socks5ProxyEndpoint, appSettings.Username,
+                    appSettings.Password, true);
 
-            // Associate the defined application names to the proxies
-            if (oracle2.ToInt64() != -1 && wiresock.AssociateProcessNameToProxy(appName1, oracle2))
-                Console.WriteLine("Successfully associated {0} to SOCKS5 proxy!", appName1);
-
-            if (oracle.ToInt64() != -1 && wiresock.AssociateProcessNameToProxy(appName2, oracle))
-                Console.WriteLine("Successfully associated {0} to SOCKS5 proxy!", appName2);
+                foreach (var appName in appSettings.AppNames)
+                    // Associate the defined application names to the proxies
+                    if (oracle.ToInt64() != -1 && wiresock.AssociateProcessNameToProxy(appName, oracle))
+                        Console.WriteLine($"Successfully associated {appName} to {appSettings.Socks5ProxyEndpoint} SOCKS5 proxy!");
+            }
 
             // Start the Socksifier, if it fails, dispose and exit
             if (!wiresock.Start())
