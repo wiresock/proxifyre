@@ -26,16 +26,16 @@ jobs:
       - name: Add msbuild to PATH
         uses: microsoft/setup-msbuild@v1
 
-        - name: Install vcpkg
-          run: |
-            git clone https://github.com/Microsoft/vcpkg.git
-            cd vcpkg
-            ./bootstrap-vcpkg.sh
-            ./vcpkg integrate install
+      - name: Install vcpkg
+        run: |
+          git clone https://github.com/Microsoft/vcpkg.git
+          cd vcpkg
+          ./bootstrap-vcpkg.sh
+          ./vcpkg integrate install
 
       - name: Install Microsoft GSL
         run: |
-          vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows ms-gsl:x86-windows-static ms-gsl:x64-windows-static ms-gsl:arm64-windows-static
+          ./vcpkg/vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows ms-gsl:x86-windows-static ms-gsl:x64-windows-static ms-gsl:arm64-windows-static
 
       - name: Parse Version
         shell: bash
