@@ -26,12 +26,33 @@ jobs:
       - name: Add msbuild to PATH
         uses: microsoft/setup-msbuild@v1
 
+        - name: Install vcpkg
+          run: |
+            git clone https://github.com/Microsoft/vcpkg.git
+            cd vcpkg
+            ./bootstrap-vcpkg.sh
+            ./vcpkg integrate install
+
+      - name: Install Microsoft GSL
+        run: |
+          vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows ms-gsl:x86-windows-static ms-gsl:x64-windows-static ms-gsl:arm64-windows-static
+
       - name: Parse Version
         shell: bash
         run: |
           # Strip "v" prefix from tag name 
           VERSION=$(echo ${{ github.ref_name }} | sed -e 's/^v//') 
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Build ndisapi.lib
+        run: |
+          cd ndisapi.lib/ndisapilib.vcxproj
+          msbuild /p:Configuration=Release /p:Platform="${{ matrix.platform }}"
+
+      - name: Build socksify.dll
+        run: |
+          cd socksify/socksify.vcxproj
+          msbuild /p:Configuration=Release /p:Platform="${{ matrix.platform }}"
 
       - name: Build
         run: msbuild dotNetSocksProxy/dotNetSocksProxy.csproj -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=${{ matrix.platform }} -property:Version=${{ env.VERSION }} -property:Repository=${{ github.repository }}
