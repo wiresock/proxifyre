@@ -45,14 +45,8 @@ jobs:
           VERSION=$(echo ${{ github.ref_name }} | sed -e 's/^v//') 
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
-      - name: Build ndisapi.lib
-        run: msbuild ndisapi.lib/ndisapilib.vcxproj /p:Configuration=Release /p:Platform="${{ matrix.platform }}"
-
-      - name: Build socksify.dll
-        run: msbuild socksify/socksify.vcxproj /p:Configuration=Release /p:Platform="${{ matrix.platform }}"
-
       - name: Build
-        run: msbuild dotNetSocksProxy/dotNetSocksProxy.csproj -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=${{ matrix.platform }} -property:Version=${{ env.VERSION }} -property:Repository=${{ github.repository }}
+        run: msbuild socksify.sln -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=${{ matrix.platform }} -property:Version=${{ env.VERSION }} -property:Repository=${{ github.repository }}
 
       - name: Package Release
         uses: thedoctor0/zip-release@0.7.1
