@@ -52,7 +52,7 @@ jobs:
         uses: thedoctor0/zip-release@0.7.1
         with:
           type: 'zip'
-          filename: 'ProxiFyre${{ github.ref_name }}-${{ matrix.platform }}.zip'
+          filename: 'ProxiFyre-${{ github.ref_name }}-${{ matrix.platform }}.zip'
           directory: 'bin\exe\${{ matrix.platform }}\${{ matrix.build_configuration }}'
           exclusions: '*.pdb'
 
