@@ -5,13 +5,13 @@ using System.Runtime.InteropServices;
 // General Information about an assembly is controlled through the following
 // set of attributes. Change these attribute values to modify the information
 // associated with an assembly.
-[assembly: AssemblyTitle("dotNetSocksProxy")]
+[assembly: AssemblyTitle("ProxiFyre")]
 [assembly: AssemblyDescription("")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("")]
-[assembly: AssemblyProduct("dotNetSocksProxy")]
+[assembly: AssemblyProduct("ProxiFyre")]
 [assembly: AssemblyCopyright("Copyright NT KERNEL© 2023")]
-[assembly: AssemblyTrademark("")]
+[assembly: AssemblyTrademark("ProxiFyre")]
 [assembly: AssemblyCulture("")]
 
 // Setting ComVisible to false makes the types in this assembly not visible

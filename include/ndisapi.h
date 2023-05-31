@@ -30,7 +30,7 @@
 #endif //NDISAPI_EXPORTS
 #endif //_LIB
 
-#if _MSC_VER >= 1700 
+#if _MSC_VER >= 1700
 #ifdef _USING_V110_SDK71_
 #define _USE_LEGACY_VERSION_INFO
 #endif //_USING_V110_SDK71_
@@ -49,7 +49,7 @@ enum
 	FILE_NAME_SIZE = 1000
 };
 
-typedef BOOL (__stdcall *IsWow64ProcessPtr)(HANDLE hProcess, PBOOL Wow64Process);
+using IsWow64ProcessPtr = BOOL(__stdcall *)(HANDLE hProcess, PBOOL Wow64Process);
 
 /**
  * @struct CVersionInfo
@@ -140,13 +140,13 @@ struct NDISAPI_API CVersionInfo : private OSVERSIONINFO
 #endif //  _MSC_VER >= 1700
 };
 
-class NDISAPI_API CNdisApi 
+class NDISAPI_API CNdisApi
 {
 	class CWow64Helper;
 
 public:
-	CNdisApi (const TCHAR* pszFileName = _T(DRIVER_NAME_A));
-	virtual ~CNdisApi ();
+	CNdisApi(const TCHAR* pszFileName = _T(DRIVER_NAME_A));
+	virtual ~CNdisApi();
 
 #if _MSC_VER >= 1800 && !defined(_USING_V110_SDK71_)
 	CNdisApi(const CNdisApi& other) = delete;
@@ -157,102 +157,104 @@ public:
 
 private:
 	// Private member functions
-	BOOL DeviceIoControl (DWORD dwService, void *BuffIn, int SizeIn, void *BuffOut, int SizeOut, unsigned long *SizeRet = NULL, LPOVERLAPPED povlp = NULL) const;
+	BOOL DeviceIoControl(DWORD dwService, void* BuffIn, int SizeIn, void* BuffOut, int SizeOut,
+	                     unsigned long* SizeRet = NULL, LPOVERLAPPED povlp = NULL) const;
 
 	// Private static functions
-	static BOOL	IsNdiswanInterface (LPCSTR adapterName, LPCSTR ndiswanName);
+	static BOOL IsNdiswanInterface(LPCSTR adapterName, LPCSTR ndiswanName);
 
 public:
 	// Driver services
-	ULONG	GetVersion () const;
-	BOOL	GetTcpipBoundAdaptersInfo ( PTCP_AdapterList pAdapters ) const;
-	BOOL	SendPacketToMstcp ( PETH_REQUEST pPacket ) const;
-	BOOL	SendPacketToAdapter ( PETH_REQUEST pPacket ) const;
-	BOOL	ReadPacket ( PETH_REQUEST pPacket ) const;
-	BOOL	SendPacketsToMstcp (PETH_M_REQUEST pPackets) const;
-	BOOL	SendPacketsToAdapter(PETH_M_REQUEST pPackets) const;
-	BOOL	ReadPackets(PETH_M_REQUEST pPackets) const;
-	BOOL	SetAdapterMode ( PADAPTER_MODE pMode ) const;
-	BOOL	GetAdapterMode ( PADAPTER_MODE pMode ) const;
-	BOOL	FlushAdapterPacketQueue ( HANDLE hAdapter ) const;
-	BOOL	GetAdapterPacketQueueSize ( HANDLE hAdapter, PDWORD pdwSize ) const;
-	BOOL	SetPacketEvent ( HANDLE hAdapter, HANDLE hWin32Event ) const;
-	BOOL	SetWANEvent ( HANDLE hWin32Event ) const;
-	BOOL	SetAdapterListChangeEvent ( HANDLE hWin32Event ) const;
-	BOOL	NdisrdRequest ( PPACKET_OID_DATA OidData, BOOL Set ) const;
-	BOOL	GetRasLinks (HANDLE hAdapter, PRAS_LINKS pLinks) const;
-	BOOL	SetHwPacketFilter ( HANDLE hAdapter, DWORD Filter ) const;
-	BOOL	GetHwPacketFilter ( HANDLE hAdapter, PDWORD pFilter ) const;
-	BOOL	SetHwPacketFilterEvent(HANDLE hAdapter, HANDLE hWin32Event) const;
-	BOOL	SetPacketFilterTable (PSTATIC_FILTER_TABLE pFilterList ) const;
-	BOOL	ResetPacketFilterTable () const;
-	BOOL	GetPacketFilterTableSize ( PDWORD pdwTableSize ) const;
-	BOOL	GetPacketFilterTable ( PSTATIC_FILTER_TABLE pFilterList ) const;
-	BOOL	GetPacketFilterTableResetStats ( PSTATIC_FILTER_TABLE pFilterList ) const;
-	BOOL	IsDriverLoaded () const;
-	BOOL	InitializeFastIo(PFAST_IO_SECTION pFastIo, DWORD dwSize) const;
-	BOOL	AddSecondaryFastIo(PFAST_IO_SECTION pFastIo, DWORD dwSize) const;
-	BOOL	ReadPacketsUnsorted(PINTERMEDIATE_BUFFER* Packets, DWORD dwPacketsNum, PDWORD pdwPacketsSuccess) const;
-	BOOL	SendPacketsToAdaptersUnsorted(PINTERMEDIATE_BUFFER* Packets, DWORD dwPacketsNum, PDWORD pdwPacketSuccess) const;
-	BOOL	SendPacketsToMstcpUnsorted(PINTERMEDIATE_BUFFER* Packets, DWORD dwPacketsNum, PDWORD pdwPacketSuccess) const;
-	BOOL	GetIntermediateBufferPoolSize(PDWORD pdwSize) const;
-	DWORD	GetBytesReturned () const;
-	
+	ULONG GetVersion() const;
+	BOOL GetTcpipBoundAdaptersInfo(PTCP_AdapterList pAdapters) const;
+	BOOL SendPacketToMstcp(PETH_REQUEST pPacket) const;
+	BOOL SendPacketToAdapter(PETH_REQUEST pPacket) const;
+	BOOL ReadPacket(PETH_REQUEST pPacket) const;
+	BOOL SendPacketsToMstcp(PETH_M_REQUEST pPackets) const;
+	BOOL SendPacketsToAdapter(PETH_M_REQUEST pPackets) const;
+	BOOL ReadPackets(PETH_M_REQUEST pPackets) const;
+	BOOL SetAdapterMode(PADAPTER_MODE pMode) const;
+	BOOL GetAdapterMode(PADAPTER_MODE pMode) const;
+	BOOL FlushAdapterPacketQueue(HANDLE hAdapter) const;
+	BOOL GetAdapterPacketQueueSize(HANDLE hAdapter, PDWORD pdwSize) const;
+	BOOL SetPacketEvent(HANDLE hAdapter, HANDLE hWin32Event) const;
+	BOOL SetWANEvent(HANDLE hWin32Event) const;
+	BOOL SetAdapterListChangeEvent(HANDLE hWin32Event) const;
+	BOOL NdisrdRequest(PPACKET_OID_DATA OidData, BOOL Set) const;
+	BOOL GetRasLinks(HANDLE hAdapter, PRAS_LINKS pLinks) const;
+	BOOL SetHwPacketFilter(HANDLE hAdapter, DWORD Filter) const;
+	BOOL GetHwPacketFilter(HANDLE hAdapter, PDWORD pFilter) const;
+	BOOL SetHwPacketFilterEvent(HANDLE hAdapter, HANDLE hWin32Event) const;
+	BOOL SetPacketFilterTable(PSTATIC_FILTER_TABLE pFilterList) const;
+	BOOL ResetPacketFilterTable() const;
+	BOOL GetPacketFilterTableSize(PDWORD pdwTableSize) const;
+	BOOL GetPacketFilterTable(PSTATIC_FILTER_TABLE pFilterList) const;
+	BOOL GetPacketFilterTableResetStats(PSTATIC_FILTER_TABLE pFilterList) const;
+	BOOL IsDriverLoaded() const;
+	BOOL InitializeFastIo(PFAST_IO_SECTION pFastIo, DWORD dwSize) const;
+	BOOL AddSecondaryFastIo(PFAST_IO_SECTION pFastIo, DWORD dwSize) const;
+	BOOL ReadPacketsUnsorted(PINTERMEDIATE_BUFFER* Packets, DWORD dwPacketsNum, PDWORD pdwPacketsSuccess) const;
+	BOOL SendPacketsToAdaptersUnsorted(PINTERMEDIATE_BUFFER* Packets, DWORD dwPacketsNum,
+	                                   PDWORD pdwPacketSuccess) const;
+	BOOL SendPacketsToMstcpUnsorted(PINTERMEDIATE_BUFFER* Packets, DWORD dwPacketsNum, PDWORD pdwPacketSuccess) const;
+	BOOL GetIntermediateBufferPoolSize(PDWORD pdwSize) const;
+	DWORD GetBytesReturned() const;
+
 	// Static helper routines
 
-	static BOOL		SetMTUDecrement ( DWORD dwMTUDecrement );
-	static DWORD	GetMTUDecrement ();
+	static BOOL SetMTUDecrement(DWORD dwMTUDecrement);
+	static DWORD GetMTUDecrement();
 
-	static BOOL		SetAdaptersStartupMode ( DWORD dwStartupMode );
-	static DWORD	GetAdaptersStartupMode ();
+	static BOOL SetAdaptersStartupMode(DWORD dwStartupMode);
+	static DWORD GetAdaptersStartupMode();
 
-	static BOOL		SetPoolSize(DWORD dwPoolSize);
-	static DWORD	GetPoolSize();
+	static BOOL SetPoolSize(DWORD dwPoolSize);
+	static DWORD GetPoolSize();
 
-	static BOOL		IsNdiswanIp ( LPCSTR adapterName );
-	static BOOL		IsNdiswanIpv6 ( LPCSTR adapterName );
-	static BOOL		IsNdiswanBh ( LPCSTR adapterName );
-
-	static BOOL
-		ConvertWindowsNTAdapterName (
-			LPCSTR szAdapterName,
-			LPSTR szUserFriendlyName,
-			DWORD dwUserFriendlyNameLength
-			);
+	static BOOL IsNdiswanIp(LPCSTR adapterName);
+	static BOOL IsNdiswanIpv6(LPCSTR adapterName);
+	static BOOL IsNdiswanBh(LPCSTR adapterName);
 
 	static BOOL
-		ConvertWindows2000AdapterName (
-			LPCSTR szAdapterName,
-			LPSTR szUserFriendlyName,
-			DWORD dwUserFriendlyNameLength
-			);
+	ConvertWindowsNTAdapterName(
+		LPCSTR szAdapterName,
+		LPSTR szUserFriendlyName,
+		DWORD dwUserFriendlyNameLength
+	);
 
 	static BOOL
-		ConvertWindows9xAdapterName (
-			LPCSTR szAdapterName,
-			LPSTR szUserFriendlyName,
-			DWORD dwUserFriendlyNameLength
-			);
+	ConvertWindows2000AdapterName(
+		LPCSTR szAdapterName,
+		LPSTR szUserFriendlyName,
+		DWORD dwUserFriendlyNameLength
+	);
+
+	static BOOL
+	ConvertWindows9xAdapterName(
+		LPCSTR szAdapterName,
+		LPSTR szUserFriendlyName,
+		DWORD dwUserFriendlyNameLength
+	);
 
 	static void
-		RecalculateIPChecksum(
-			PINTERMEDIATE_BUFFER pPacket
-		);
+	RecalculateIPChecksum(
+		PINTERMEDIATE_BUFFER pPacket
+	);
 
 	static void
-		RecalculateICMPChecksum(
-			PINTERMEDIATE_BUFFER pPacket
-		);
+	RecalculateICMPChecksum(
+		PINTERMEDIATE_BUFFER pPacket
+	);
 
 	static void
-		RecalculateTCPChecksum(
-			PINTERMEDIATE_BUFFER pPacket
-		);
+	RecalculateTCPChecksum(
+		PINTERMEDIATE_BUFFER pPacket
+	);
 
 	static void
-		RecalculateUDPChecksum(
-			PINTERMEDIATE_BUFFER pPacket
-		);
+	RecalculateUDPChecksum(
+		PINTERMEDIATE_BUFFER pPacket
+	);
 
 	static BOOL IsWindowsVistaOrLater()
 	{
@@ -266,105 +268,107 @@ public:
 
 private:
 	// Private member variables
-	mutable OVERLAPPED		m_ovlp;
-	mutable DWORD			m_BytesReturned;
+	mutable OVERLAPPED m_ovlp;
+	mutable DWORD m_BytesReturned;
 
-	HANDLE					m_hFileHandle;
-	BOOL					m_bIsLoadSuccessfully;
+	HANDLE m_hFileHandle;
+	BOOL m_bIsLoadSuccessfully;
 
-	IsWow64ProcessPtr		m_pfnIsWow64Process;
-	BOOL					m_bIsWow64Process;
-	CWow64Helper&			m_Wow64Helper;
+	IsWow64ProcessPtr m_pfnIsWow64Process;
+	BOOL m_bIsWow64Process;
+	CWow64Helper& m_Wow64Helper;
 
-	static	CVersionInfo	ms_Version;
+	static CVersionInfo ms_Version;
 };
 
-extern "C"
-{
-	HANDLE	__stdcall		OpenFilterDriver(const TCHAR* pszFileName = _T(DRIVER_NAME_A));
-	VOID	__stdcall		CloseFilterDriver(HANDLE hOpen);
-	DWORD	__stdcall		GetDriverVersion(HANDLE hOpen);
-	BOOL	__stdcall		GetTcpipBoundAdaptersInfo(HANDLE hOpen, PTCP_AdapterList pAdapters);
-	BOOL	__stdcall		SendPacketToMstcp(HANDLE hOpen, PETH_REQUEST pPacket);
-	BOOL	__stdcall		SendPacketToAdapter(HANDLE hOpen, PETH_REQUEST pPacket);
-	BOOL	__stdcall		ReadPacket(HANDLE hOpen, PETH_REQUEST pPacket);
-	BOOL	__stdcall		SendPacketsToMstcp(HANDLE hOpen, PETH_M_REQUEST pPackets);
-	BOOL	__stdcall		SendPacketsToAdapter(HANDLE hOpen, PETH_M_REQUEST pPackets);
-	BOOL	__stdcall		ReadPackets(HANDLE hOpen, PETH_M_REQUEST pPackets);
-	BOOL	__stdcall		SetAdapterMode(HANDLE hOpen, PADAPTER_MODE pMode);
-	BOOL	__stdcall		GetAdapterMode(HANDLE hOpen, PADAPTER_MODE pMode);
-	BOOL	__stdcall		FlushAdapterPacketQueue(HANDLE hOpen, HANDLE hAdapter);
-	BOOL	__stdcall 		GetAdapterPacketQueueSize(HANDLE hOpen, HANDLE hAdapter, PDWORD pdwSize);
-	BOOL	__stdcall		SetPacketEvent(HANDLE hOpen, HANDLE hAdapter, HANDLE hWin32Event);
-	BOOL	__stdcall		SetWANEvent(HANDLE hOpen, HANDLE hWin32Event);
-	BOOL	__stdcall		SetAdapterListChangeEvent(HANDLE hOpen, HANDLE hWin32Event);
-	BOOL	__stdcall		NdisrdRequest(HANDLE hOpen, PPACKET_OID_DATA OidData, BOOL Set);
-	BOOL	__stdcall		GetRasLinks(HANDLE hOpen, HANDLE hAdapter, PRAS_LINKS pLinks);
-	BOOL	__stdcall		SetHwPacketFilter(HANDLE hOpen, HANDLE hAdapter, DWORD Filter);
-	BOOL	__stdcall		GetHwPacketFilter(HANDLE hOpen, HANDLE hAdapter, PDWORD pFilter);
-	BOOL	__stdcall		SetHwPacketFilterEvent(HANDLE hOpen, HANDLE hAdapter, HANDLE hWin32Event);
-	BOOL	__stdcall		SetPacketFilterTable ( HANDLE hOpen, PSTATIC_FILTER_TABLE pFilterList );
-	BOOL	__stdcall		ResetPacketFilterTable(HANDLE hOpen);
-	BOOL	__stdcall		GetPacketFilterTableSize(HANDLE hOpen, PDWORD pdwTableSize);
-	BOOL	__stdcall		GetPacketFilterTable(HANDLE hOpen, PSTATIC_FILTER_TABLE pFilterList);
-	BOOL	__stdcall		GetPacketFilterTableResetStats(HANDLE hOpen, PSTATIC_FILTER_TABLE pFilterList);
-	BOOL	__stdcall		SetMTUDecrement(DWORD dwMTUDecrement);
-	DWORD	__stdcall		GetMTUDecrement();
-	BOOL	__stdcall		SetAdaptersStartupMode(DWORD dwStartupMode);
-	DWORD	__stdcall		GetAdaptersStartupMode();
-	BOOL	__stdcall		SetPoolSize(DWORD dwPoolSize);
-	DWORD	__stdcall		GetPoolSize();
-	BOOL	__stdcall		IsDriverLoaded(HANDLE hOpen);
-	BOOL	__stdcall		InitializeFastIo(HANDLE hOpen, PFAST_IO_SECTION pFastIo, DWORD dwSize);
-	BOOL	__stdcall		AddSecondaryFastIo(HANDLE hOpen, PFAST_IO_SECTION pFastIo, DWORD dwSize);
-	BOOL	__stdcall		ReadPacketsUnsorted(HANDLE hOpen, PINTERMEDIATE_BUFFER* Packets, DWORD dwPacketsNum, PDWORD pdwPacketsSuccess);
-	BOOL	__stdcall		SendPacketsToAdaptersUnsorted(HANDLE hOpen, PINTERMEDIATE_BUFFER* Packets, DWORD dwPacketsNum, PDWORD pdwPacketSuccess);
-	BOOL	__stdcall		SendPacketsToMstcpUnsorted(HANDLE hOpen, PINTERMEDIATE_BUFFER* Packets, DWORD dwPacketsNum, PDWORD pdwPacketSuccess);
-	BOOL	__stdcall		GetIntermediateBufferPoolSize(HANDLE hOpen, PDWORD pdwSize);
-	DWORD	__stdcall		GetBytesReturned(HANDLE hOpen);
+extern "C" {
+HANDLE __stdcall OpenFilterDriver(const TCHAR* pszFileName = _T(DRIVER_NAME_A));
+VOID __stdcall CloseFilterDriver(HANDLE hOpen);
+DWORD __stdcall GetDriverVersion(HANDLE hOpen);
+BOOL __stdcall GetTcpipBoundAdaptersInfo(HANDLE hOpen, PTCP_AdapterList pAdapters);
+BOOL __stdcall SendPacketToMstcp(HANDLE hOpen, PETH_REQUEST pPacket);
+BOOL __stdcall SendPacketToAdapter(HANDLE hOpen, PETH_REQUEST pPacket);
+BOOL __stdcall ReadPacket(HANDLE hOpen, PETH_REQUEST pPacket);
+BOOL __stdcall SendPacketsToMstcp(HANDLE hOpen, PETH_M_REQUEST pPackets);
+BOOL __stdcall SendPacketsToAdapter(HANDLE hOpen, PETH_M_REQUEST pPackets);
+BOOL __stdcall ReadPackets(HANDLE hOpen, PETH_M_REQUEST pPackets);
+BOOL __stdcall SetAdapterMode(HANDLE hOpen, PADAPTER_MODE pMode);
+BOOL __stdcall GetAdapterMode(HANDLE hOpen, PADAPTER_MODE pMode);
+BOOL __stdcall FlushAdapterPacketQueue(HANDLE hOpen, HANDLE hAdapter);
+BOOL __stdcall GetAdapterPacketQueueSize(HANDLE hOpen, HANDLE hAdapter, PDWORD pdwSize);
+BOOL __stdcall SetPacketEvent(HANDLE hOpen, HANDLE hAdapter, HANDLE hWin32Event);
+BOOL __stdcall SetWANEvent(HANDLE hOpen, HANDLE hWin32Event);
+BOOL __stdcall SetAdapterListChangeEvent(HANDLE hOpen, HANDLE hWin32Event);
+BOOL __stdcall NdisrdRequest(HANDLE hOpen, PPACKET_OID_DATA OidData, BOOL Set);
+BOOL __stdcall GetRasLinks(HANDLE hOpen, HANDLE hAdapter, PRAS_LINKS pLinks);
+BOOL __stdcall SetHwPacketFilter(HANDLE hOpen, HANDLE hAdapter, DWORD Filter);
+BOOL __stdcall GetHwPacketFilter(HANDLE hOpen, HANDLE hAdapter, PDWORD pFilter);
+BOOL __stdcall SetHwPacketFilterEvent(HANDLE hOpen, HANDLE hAdapter, HANDLE hWin32Event);
+BOOL __stdcall SetPacketFilterTable(HANDLE hOpen, PSTATIC_FILTER_TABLE pFilterList);
+BOOL __stdcall ResetPacketFilterTable(HANDLE hOpen);
+BOOL __stdcall GetPacketFilterTableSize(HANDLE hOpen, PDWORD pdwTableSize);
+BOOL __stdcall GetPacketFilterTable(HANDLE hOpen, PSTATIC_FILTER_TABLE pFilterList);
+BOOL __stdcall GetPacketFilterTableResetStats(HANDLE hOpen, PSTATIC_FILTER_TABLE pFilterList);
+BOOL __stdcall SetMTUDecrement(DWORD dwMTUDecrement);
+DWORD __stdcall GetMTUDecrement();
+BOOL __stdcall SetAdaptersStartupMode(DWORD dwStartupMode);
+DWORD __stdcall GetAdaptersStartupMode();
+BOOL __stdcall SetPoolSize(DWORD dwPoolSize);
+DWORD __stdcall GetPoolSize();
+BOOL __stdcall IsDriverLoaded(HANDLE hOpen);
+BOOL __stdcall InitializeFastIo(HANDLE hOpen, PFAST_IO_SECTION pFastIo, DWORD dwSize);
+BOOL __stdcall AddSecondaryFastIo(HANDLE hOpen, PFAST_IO_SECTION pFastIo, DWORD dwSize);
+BOOL __stdcall ReadPacketsUnsorted(HANDLE hOpen, PINTERMEDIATE_BUFFER* Packets, DWORD dwPacketsNum,
+                                   PDWORD pdwPacketsSuccess);
+BOOL __stdcall SendPacketsToAdaptersUnsorted(HANDLE hOpen, PINTERMEDIATE_BUFFER* Packets, DWORD dwPacketsNum,
+                                             PDWORD pdwPacketSuccess);
+BOOL __stdcall SendPacketsToMstcpUnsorted(HANDLE hOpen, PINTERMEDIATE_BUFFER* Packets, DWORD dwPacketsNum,
+                                          PDWORD pdwPacketSuccess);
+BOOL __stdcall GetIntermediateBufferPoolSize(HANDLE hOpen, PDWORD pdwSize);
+DWORD __stdcall GetBytesReturned(HANDLE hOpen);
 
-	BOOL __stdcall			IsNdiswanIp ( LPCSTR adapterName );
-	BOOL __stdcall			IsNdiswanIpv6 ( LPCSTR adapterName );
-	BOOL __stdcall			IsNdiswanBh ( LPCSTR adapterName );
+BOOL __stdcall IsNdiswanIp(LPCSTR adapterName);
+BOOL __stdcall IsNdiswanIpv6(LPCSTR adapterName);
+BOOL __stdcall IsNdiswanBh(LPCSTR adapterName);
 
-	BOOL __stdcall
-		ConvertWindowsNTAdapterName(
-			LPCSTR szAdapterName,
-			LPSTR szUserFriendlyName,
-			DWORD dwUserFriendlyNameLength
-		);
+BOOL __stdcall
+ConvertWindowsNTAdapterName(
+	LPCSTR szAdapterName,
+	LPSTR szUserFriendlyName,
+	DWORD dwUserFriendlyNameLength
+);
 
-	BOOL __stdcall
-		ConvertWindows2000AdapterName(
-			LPCSTR szAdapterName,
-			LPSTR szUserFriendlyName,
-			DWORD dwUserFriendlyNameLength
-		);
+BOOL __stdcall
+ConvertWindows2000AdapterName(
+	LPCSTR szAdapterName,
+	LPSTR szUserFriendlyName,
+	DWORD dwUserFriendlyNameLength
+);
 
-	BOOL __stdcall
-		ConvertWindows9xAdapterName(
-			LPCSTR szAdapterName,
-			LPSTR szUserFriendlyName,
-			DWORD dwUserFriendlyNameLength
-		);
+BOOL __stdcall
+ConvertWindows9xAdapterName(
+	LPCSTR szAdapterName,
+	LPSTR szUserFriendlyName,
+	DWORD dwUserFriendlyNameLength
+);
 
-	void __stdcall
-		RecalculateIPChecksum(
-			PINTERMEDIATE_BUFFER pPacket
-		);
+void __stdcall
+RecalculateIPChecksum(
+	PINTERMEDIATE_BUFFER pPacket
+);
 
-	void __stdcall
-		RecalculateICMPChecksum(
-			PINTERMEDIATE_BUFFER pPacket
-		);
+void __stdcall
+RecalculateICMPChecksum(
+	PINTERMEDIATE_BUFFER pPacket
+);
 
-	void __stdcall
-		RecalculateTCPChecksum(
-			PINTERMEDIATE_BUFFER pPacket
-		);
+void __stdcall
+RecalculateTCPChecksum(
+	PINTERMEDIATE_BUFFER pPacket
+);
 
-	void __stdcall
-		RecalculateUDPChecksum(
-			PINTERMEDIATE_BUFFER pPacket
-		);
+void __stdcall
+RecalculateUDPChecksum(
+	PINTERMEDIATE_BUFFER pPacket
+);
 }

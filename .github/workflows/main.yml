@@ -36,7 +36,7 @@ jobs:
 
       - name: Install Microsoft GSL
         run: |
-          ./vcpkg/vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows ms-gsl:x86-windows-static ms-gsl:x64-windows-static ms-gsl:arm64-windows-static
+          ./vcpkg/vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows
 
       - name: Parse Version
         shell: bash
@@ -52,7 +52,7 @@ jobs:
         uses: thedoctor0/zip-release@0.7.1
         with:
           type: 'zip'
-          filename: 'dotNetSocksProxy-${{ github.ref_name }}-${{ matrix.platform }}.zip'
+          filename: 'ProxiFyre${{ github.ref_name }}-${{ matrix.platform }}.zip'
           directory: 'bin\exe\${{ matrix.platform }}\${{ matrix.build_configuration }}'
           exclusions: '*.pdb'
 
@@ -60,7 +60,7 @@ jobs:
         uses: actions/upload-artifact@v2
         with:
           name: ${{ matrix.platform }}-artifact
-          path: 'bin\exe\${{ matrix.platform }}\${{ matrix.build_configuration }}\dotNetSocksProxy-${{ github.ref_name }}-${{ matrix.platform }}.zip'
+          path: 'bin\exe\${{ matrix.platform }}\${{ matrix.build_configuration }}\ProxiFyre-${{ github.ref_name }}-${{ matrix.platform }}.zip'
 
   upload-release:
     if: ${{ always() }}
@@ -86,7 +86,7 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           artifacts: 'artifacts/**/*.zip'
-          name: 'dotNetSocksProxy-${{ github.ref_name }}'
+          name: 'ProxiFyre-${{ github.ref_name }}'
           tag: ${{ github.ref_name }}
           token: ${{ secrets.MY_GITHUB_PAT }}
           skipIfReleaseExists: true

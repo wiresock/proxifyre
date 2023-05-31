@@ -5,7 +5,7 @@ using System.Linq;
 using Newtonsoft.Json;
 using Socksifier;
 
-namespace dotNetSocksProxy
+namespace ProxiFyre
 {
     // Main class for the SOCKS proxy application
     internal class Program
@@ -61,7 +61,8 @@ namespace dotNetSocksProxy
                 foreach (var appName in appSettings.AppNames)
                     // Associate the defined application names to the proxies
                     if (oracle.ToInt64() != -1 && wiresock.AssociateProcessNameToProxy(appName, oracle))
-                        Console.WriteLine($"Successfully associated {appName} to {appSettings.Socks5ProxyEndpoint} SOCKS5 proxy!");
+                        Console.WriteLine(
+                            $"Successfully associated {appName} to {appSettings.Socks5ProxyEndpoint} SOCKS5 proxy!");
             }
 
             // Start the Socksifier, if it fails, dispose and exit
