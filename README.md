@@ -76,9 +76,9 @@ This is an adopted Windows Packet Filter [NDISAPI](https://github.com/wiresock/n
 
 This project is a .Net C++/CLI class library that implements the local SOCKS5 router functionality.
 
-### 3. dotNetSocksProxy
+### 3. ProxiFyre
 
-This is a .Net Windows console application designed for testing the socksify .Net C++/CLI class library.
+This is a .Net-based Windows console application that employs the functionality provided by the socksify .Net C++/CLI class library.
 
 
 
