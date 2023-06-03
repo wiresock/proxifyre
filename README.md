@@ -1,4 +1,4 @@
-# ProxiFyre: Advanced SOCKS5 Routing Solution
+# ProxiFyre: SOCKS5 Proxifier for Windows
 
 This project is an advanced version of the Windows Packet Filter [socksify](https://github.com/wiresock/ndisapi/tree/master/examples/cpp/socksify) demo. It enhances the base version with added support for UDP and multiple proxy instances. Additionally, it now reads its configuration from an `app-config.json` file.
 
