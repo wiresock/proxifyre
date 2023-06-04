@@ -196,7 +196,7 @@ namespace ndisapi
 						return false;
 
 					if (log_level_ > netlib::log::log_level::info)
-						log_printer(std::string("NEW TCP: ") + std::string{T{ip_header->ip6_src}} + " : " +
+						print_log(std::string("NEW TCP: ") + std::string{T{ip_header->ip6_src}} + " : " +
 							std::to_string(ntohs(tcp_header->th_sport)) + " -> " + std::string{T{ip_header->ip6_dst}} +
 							" : " + std::to_string(ntohs(tcp_header->th_dport)));
 				}

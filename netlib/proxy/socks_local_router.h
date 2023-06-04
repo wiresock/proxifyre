@@ -413,7 +413,7 @@ namespace proxy
 
 			std::lock_guard lock(lock_);
 
-			if (!(proxy_id < proxy_servers_.size()))
+			if (proxy_id >= proxy_servers_.size())
 			{
 				print_log(netlib::log::log_level::error,
 				          "associate_process_name_to_proxy: proxy index is out of range!");

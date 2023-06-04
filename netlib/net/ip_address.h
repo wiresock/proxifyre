@@ -351,7 +351,7 @@ namespace net
 		/// </summary>
 		explicit operator uint32_t() const noexcept
 		{
-			const auto sp = gsl::span(reinterpret_cast<const uint32_t*>(this), 4);
+			const auto sp = gsl::span(reinterpret_cast<const uint32_t*>(this), sizeof(*this) / sizeof(uint32_t));
 			return sp[0] ^ sp[1] ^ sp[2] ^ sp[3];
 		}
 

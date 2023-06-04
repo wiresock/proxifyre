@@ -12,11 +12,11 @@ namespace ndisapi
 		/// <summary>maps client UDP endpoint to the timestamp</summary>
 		std::unordered_map<uint16_t, std::chrono::steady_clock::time_point> endpoints_;
 		/// <summary>proxy port in network byte order</summary>
-		u_short proxy_port_;
+		u_short proxy_port_{};
 		/// <summary>message logging function</summary>
 		std::function<void(const char*)> log_printer_;
 		/// <summary>logging level</summary>
-		netlib::log::log_level log_level_;
+		netlib::log::log_level log_level_{};
 		/// <summary>lock for redirected_connections_ </summary>
 		std::mutex lock_;
 		/// <summary>thread to drop timed out connections </summary>

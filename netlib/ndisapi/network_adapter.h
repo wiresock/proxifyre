@@ -92,8 +92,8 @@ namespace ndisapi
 		/// Specifies the speed of the link, in units of 100 bps.
 		/// </summary>
 		uint32_t link_speed;
-		/// <summary
-		/// >Specifies the maximum number of bytes per packet that the protocol can send over the network.
+		/// <summary>
+		/// Specifies the maximum number of bytes per packet that the protocol can send over the network.
 		/// </summary>
 		uint16_t mtu;
 		/// <summary>
@@ -135,8 +135,8 @@ namespace ndisapi
 		/// <param name="mtu">Network adapter MTU</param>
 		network_adapter(
 			CNdisApi* api,
-			HANDLE adapter_handle,
-			unsigned char* mac_addr,
+			const HANDLE adapter_handle,
+			const unsigned char* mac_addr,
 			std::string internal_name,
 			std::string friendly_name,
 			const uint32_t medium,

@@ -107,7 +107,7 @@ namespace proxy
 
 	public:
 		socks5_udp_proxy_socket(const SOCKET socks_socket, packet_pool& packet_pool, const SOCKET& local_socket,
-		                        SOCKADDR_STORAGE& local_address_sa, const SOCKET remote_socket,
+		                        const SOCKADDR_STORAGE& local_address_sa, const SOCKET remote_socket,
 		                        address_type_t remote_address, const uint16_t remote_port,
 		                        std::unique_ptr<negotiate_context_t> negotiate_ctx,
 		                        std::function<void(const char*)> log_printer, const netlib::log::log_level log_level)
@@ -364,7 +364,7 @@ namespace proxy
 		/// <param name="type">type of operation</param>
 		/// <returns>pre-status of the operation</returns>
 		// ********************************************************************************
-		bool inject_to_local(char* data, const uint32_t length,
+		bool inject_to_local(const char* data, const uint32_t length,
 		                     proxy_io_operation type = proxy_io_operation::inject_io_write)
 		{
 			auto context = new(std::nothrow) per_io_context_t{type, this, true};
@@ -409,7 +409,7 @@ namespace proxy
 		/// <param name="type">type of operation</param>
 		/// <returns>pre-status of the operation</returns>
 		// ********************************************************************************
-		bool inject_to_remote(char* data, const uint32_t length,
+		bool inject_to_remote(const char* data, const uint32_t length,
 		                      proxy_io_operation type = proxy_io_operation::inject_io_write)
 		{
 			auto context = new(std::nothrow) per_io_context_t{type, this, false};

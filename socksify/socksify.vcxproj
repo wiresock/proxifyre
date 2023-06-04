@@ -228,8 +228,6 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="..\netlib\dhcp\dhcp.h" />
-    <ClInclude Include="..\netlib\dhcp\dhcp_service.h" />
     <ClInclude Include="..\netlib\iphelper\network_adapter_info.h" />
     <ClInclude Include="..\netlib\iphelper\process_lookup.h" />
     <ClInclude Include="..\netlib\log\log.h" />
@@ -238,7 +236,6 @@
     <ClInclude Include="..\netlib\ndisapi\network_adapter.h" />
     <ClInclude Include="..\netlib\ndisapi\queued_packet_filter.h" />
     <ClInclude Include="..\netlib\ndisapi\socks5_udp_local_redirect.h" />
-    <ClInclude Include="..\netlib\net\ipv4_ip_config.h" />
     <ClInclude Include="..\netlib\net\ipv6_helper.h" />
     <ClInclude Include="..\netlib\net\ip_address.h" />
     <ClInclude Include="..\netlib\net\ip_endpoint.h" />

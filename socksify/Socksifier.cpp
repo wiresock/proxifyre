@@ -70,9 +70,6 @@ void Socksifier::Socksifier::log_thread()
 						case event_type_mx::address_error:
 							managed_log_list->Add(gcnew LogEntry(fst, ProxyGatewayEvent::AddressError, nullptr));
 							break;
-						case event_type_mx::ndis_error:
-							managed_log_list->Add(gcnew LogEntry(fst, ProxyGatewayEvent::NdisError, nullptr));
-							break;
 						default:
 							break;
 						}

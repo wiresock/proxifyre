@@ -184,8 +184,7 @@ namespace winsys
 
 				if (completion_key)
 				{
-					if (const auto* const handler = reinterpret_cast<std::function<callback_t>*>(completion_key); *
-						handler) // NOLINT(performance-no-int-to-ptr)
+					if (const auto* const handler = reinterpret_cast<std::function<callback_t>*>(completion_key); *handler) // NOLINT(performance-no-int-to-ptr)
 					{
 						(*handler)(num_bytes, overlapped_ptr, ok);
 					}

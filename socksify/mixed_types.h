@@ -21,7 +21,6 @@ enum class event_type_mx : uint32_t
 	connected,
 	disconnected,
 	address_error,
-	ndis_error
 };
 
 struct event_mx

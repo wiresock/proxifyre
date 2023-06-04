@@ -164,7 +164,7 @@ namespace std
 	/// </summary>
 	/// <typeparam name="T">net::ip_address_v4 or net::ip_address_v6</typeparam>
 	template <typename T>
-	struct hash<net::ip_endpoint<T>>
+	struct hash<net::ip_endpoint<T>>  // NOLINT(cert-dcl58-cpp)
 	{
 		using argument_type = net::ip_endpoint<T>;
 		using result_type = std::size_t;
@@ -186,7 +186,7 @@ namespace std
 	/// </summary>
 	/// <typeparam name="T">net::ip_address_v4 or net::ip_address_v6</typeparam>
 	template <typename T>
-	struct hash<net::ip_session<T>>
+	struct hash<net::ip_session<T>>  // NOLINT(cert-dcl58-cpp)
 	{
 		using argument_type = net::ip_session<T>;
 		using result_type = std::size_t;

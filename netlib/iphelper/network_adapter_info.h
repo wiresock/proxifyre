@@ -698,7 +698,7 @@ namespace iphelper
 		/// <param name="address">MIB_UNICASTIPADDRESS_ROW unique pointer</param>
 		/// <returns>true if no error occurs, false otherwise</returns>
 		[[nodiscard]] static bool delete_unicast_address(
-			const std::unique_ptr<MIB_UNICASTIPADDRESS_ROW> address) noexcept
+			const std::unique_ptr<MIB_UNICASTIPADDRESS_ROW>& address) noexcept
 		{
 			SetLastError(ERROR_SUCCESS);
 
@@ -936,7 +936,7 @@ namespace iphelper
 		/// </summary>
 		/// <param name="address">MIB_IPFORWARD_ROW2 unique pointer</param>
 		/// <returns>true if successful, false otherwise</returns>
-		[[nodiscard]] static bool delete_routes(const std::unique_ptr<MIB_IPFORWARD_ROW2> address) noexcept
+		[[nodiscard]] static bool delete_routes(const std::unique_ptr<MIB_IPFORWARD_ROW2>& address) noexcept
 		{
 			SetLastError(ERROR_SUCCESS);
 
@@ -1084,7 +1084,7 @@ namespace iphelper
 		 /// </summary>
 		 /// <param name="address">IPv6 address to remove</param>
 		 /// <returns>true if successful, false otherwise</returns>
-		[[nodiscard]] bool delete_unicast_address(const net::ip_address_v6 address) const
+		[[nodiscard]] bool delete_unicast_address(const net::ip_address_v6& address) const
 		{
 			PMIB_UNICASTIPADDRESS_TABLE table = nullptr;
 
@@ -1189,7 +1189,7 @@ namespace iphelper
 		/// </summary>
 		/// <param name="address">unique pointer to MIB_IPNET_ROW2</param>
 		/// <returns>true if successful, false otherwise</returns>
-		[[nodiscard]] static bool delete_ndp_entry(const std::unique_ptr<MIB_IPNET_ROW2> address) noexcept
+		[[nodiscard]] static bool delete_ndp_entry(const std::unique_ptr<MIB_IPNET_ROW2>& address) noexcept
 		{
 			SetLastError(ERROR_SUCCESS);
 
@@ -1433,7 +1433,7 @@ namespace iphelper
 		/// </summary>
 		/// <param name="luid">LUID to lookup</param>
 		/// <returns>optional network_adapter_info class instance</returns>
-		static std::optional<network_adapter_info> get_connection_by_luid(IF_LUID& luid)
+		static std::optional<network_adapter_info> get_connection_by_luid(const IF_LUID& luid)
 		{
 			unsigned long dw_size = 0;
 			PMIB_IF_TABLE2 mib_table = nullptr;

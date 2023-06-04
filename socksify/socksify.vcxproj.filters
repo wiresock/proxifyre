@@ -22,9 +22,6 @@
     <Filter Include="Header Files\native">
       <UniqueIdentifier>{1722b784-012f-48e5-99a7-2f806a45c887}</UniqueIdentifier>
     </Filter>
-    <Filter Include="Header Files\netlib\dhcp">
-      <UniqueIdentifier>{d50bf446-ae0f-468d-a795-60eeba0f5fb3}</UniqueIdentifier>
-    </Filter>
     <Filter Include="Header Files\netlib\iphelper">
       <UniqueIdentifier>{7291f13e-fa59-4648-9253-4c145ca5d9b6}</UniqueIdentifier>
     </Filter>
@@ -57,12 +54,6 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\netlib\dhcp\dhcp.h">
-      <Filter>Header Files\netlib\dhcp</Filter>
-    </ClInclude>
-    <ClInclude Include="..\netlib\dhcp\dhcp_service.h">
-      <Filter>Header Files\netlib\dhcp</Filter>
-    </ClInclude>
     <ClInclude Include="..\netlib\iphelper\network_adapter_info.h">
       <Filter>Header Files\netlib\iphelper</Filter>
     </ClInclude>
@@ -79,9 +70,6 @@
       <Filter>Header Files\netlib\net</Filter>
     </ClInclude>
     <ClInclude Include="..\netlib\net\ip_subnet.h">
-      <Filter>Header Files\netlib\net</Filter>
-    </ClInclude>
-    <ClInclude Include="..\netlib\net\ipv4_ip_config.h">
       <Filter>Header Files\netlib\net</Filter>
     </ClInclude>
     <ClInclude Include="..\netlib\net\ipv6_helper.h">

@@ -24,7 +24,6 @@ namespace net
 		) noexcept
 		{
 			unsigned char next_proto = 0;
-			void* the_header = nullptr;
 
 			//
 			// Parse IPv6 headers

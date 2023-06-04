@@ -96,7 +96,7 @@ namespace proxy
 
 			if (server_socket_ != INVALID_SOCKET)
 			{
-				if (auto [status, io_key] = completion_port_.associate_socket(
+				if (auto [associate_status, io_key] = completion_port_.associate_socket(
 					server_socket_,
 					[this](const DWORD num_bytes, OVERLAPPED* povlp, const BOOL status)
 					{
@@ -189,7 +189,7 @@ namespace proxy
 						}
 
 						return result;
-					}); status == true)
+					}); associate_status == true)
 				{
 					completion_key_ = io_key;
 					DWORD flags = 0;
@@ -286,8 +286,7 @@ namespace proxy
 
 			if constexpr (address_type_t::af_type == AF_INET)
 			{
-				sockaddr_in service{address_type_t::af_type, htons(proxy_port_), INADDR_ANY};
-				// NOLINT(clang-diagnostic-missing-field-initializers)
+				sockaddr_in service{address_type_t::af_type, htons(proxy_port_), INADDR_ANY};// NOLINT(clang-diagnostic-missing-field-initializers)
 
 				if (const auto status = bind(server_socket_, reinterpret_cast<SOCKADDR*>(&service), sizeof(service));
 					status == SOCKET_ERROR)
