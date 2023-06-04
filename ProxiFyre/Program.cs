@@ -34,10 +34,20 @@ namespace ProxiFyre
         }
 
         // Entry point of the application
-        private static void Main()
+        private static void Main(string[] args)
         {
-            // Setting the level of logging for the application
-            const LogLevel logLevel = LogLevel.None;
+            LogLevel logLevel;
+
+            // Parse the log level from the command line arguments
+            if (args.Length > 0 && Enum.TryParse<LogLevel>(args[0], true, out var parsedLogLevel))
+            {
+                logLevel = parsedLogLevel;
+            }
+            else
+            {
+                // If no valid log level provided, default to LogLevel.None
+                logLevel = LogLevel.None;
+            }
 
             // Load the configuration from JSON
             var appSettingsList = JsonConvert.DeserializeObject<List<AppSettings>>(File.ReadAllText("app-config.json"));
@@ -82,6 +92,7 @@ namespace ProxiFyre
             // Dispose of the Socksifier before exiting
             wiresock.Dispose();
         }
+
 
         // Method to handle logging events
         private static void LogPrinter(object sender, LogEventArgs e)
