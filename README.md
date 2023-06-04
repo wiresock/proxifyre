@@ -32,7 +32,7 @@ Here is an example configuration:
 
 ## Quick Start Guide
 
-This guide provides step-by-step instructions on how to set up and run the Local SOCKS5 Proxy Router application. 
+This guide provides step-by-step instructions on how to set up and run the ProxiFyre application. 
 
 ### Pre-installation Steps
 
@@ -40,7 +40,7 @@ This guide provides step-by-step instructions on how to set up and run the Local
 
 ### Installation Steps
 
-2. **Download the Latest Release**: Visit our [GitHub page](https://github.com/wiresock/socksify/releases) to download the latest release of the Local SOCKS5 Proxy Router software.
+2. **Download the Latest Release**: Visit our [GitHub page](https://github.com/wiresock/socksify/releases) to download the latest release of the ProxiFyre software.
 
 3. **Unzip the Software**: After downloading, extract the contents of the .zip file to your preferred location.
 
