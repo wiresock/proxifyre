@@ -522,8 +522,8 @@ namespace proxy
 					               });
 				}
 
-				const auto event_index = WSAWaitForMultipleEvents(static_cast<DWORD>(wait_events.size()),
-				                                                  wait_events.data(), FALSE, INFINITE, FALSE);
+				const auto event_index = wait_for_multiple_objects(static_cast<DWORD>(wait_events.size()),
+				                                                  wait_events.data(), INFINITE);
 
 				if (end_server_ == true)
 					break;
@@ -602,5 +602,61 @@ namespace proxy
 				log_printer_((std::string("tcp_proxy_server: ") + message).c_str());
 			}
 		}
+
+		/**
+		 * Function that waits for multiple objects (e.g. threads or processes)
+		 * @param count Number of objects to wait for
+		 * @param handles Array of handles to the objects
+		 * @param ms Maximum time to wait for, in milliseconds
+		 * @return WAIT_OBJECT_0 if the function succeeds, WAIT_TIMEOUT if the function times out
+		 */
+		static DWORD wait_for_multiple_objects(const DWORD count, const HANDLE* handles, const DWORD ms)
+		{
+			// Thread local seed for rand_r
+			static thread_local auto seed = static_cast<uint32_t>(time(nullptr));
+
+			// Initial result set to timeout
+			DWORD result = WAIT_TIMEOUT;
+
+			// If the number of objects is greater than the maximum allowed...
+			if (count >= MAXIMUM_WAIT_OBJECTS)
+			{
+				// Loop until a handle is signaled or until the timeout is reached if timeout is infinite
+				do
+				{
+					// Divide the number of handles in half
+					const DWORD split = count / 2;
+
+					// Divide the wait time in half, if timeout is infinite, use a default wait time of 2000ms
+					const DWORD wait = (ms == INFINITE ? 2000 : ms) / 2;
+					const int random = rand_s(&seed);
+
+					// Recurse on both halves in a random order until a handle is signaled or all handles are checked
+					for (short branch = 0; branch < 2 && result == WAIT_TIMEOUT; branch++)
+					{
+						if (random % 2 == branch)
+						{
+							// Wait for the lower half of handles
+							result = wait_for_multiple_objects(split, handles, wait);
+						}
+						else
+						{
+							// Wait for the upper half of handles, adjust result if a handle is signaled
+							result = wait_for_multiple_objects(count - split, handles + split, wait);
+							if (result >= WAIT_OBJECT_0 && result < WAIT_OBJECT_0 + split) result += split;
+						}
+					}
+				} while (ms == INFINITE && result == WAIT_TIMEOUT);
+			}
+			else
+			{
+				// If the number of handles is within limit, use the native win32 function
+				result = ::WaitForMultipleObjects(count, handles, FALSE, ms);
+			}
+
+			// Return the result
+			return result;
+		}
+
 	};
 }

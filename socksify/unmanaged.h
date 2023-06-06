@@ -11,6 +11,7 @@
 #include <Mstcpip.h>
 #include <WinDNS.h>
 #include <conio.h>
+#include <stdlib.h>
 #include <vector>
 #include <array>
 #include <map>
