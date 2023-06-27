@@ -102,7 +102,7 @@ namespace pcap
 					std::chrono::system_clock::now().time_since_epoch()
 				).count());
 
-			std::lock_guard<std::mutex> write_lock(lock);
+			std::lock_guard write_lock(lock);
 
 			const auto milliseconds =
 				std::chrono::duration_cast<std::chrono::milliseconds>(

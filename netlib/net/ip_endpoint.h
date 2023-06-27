@@ -56,7 +56,9 @@ namespace net
 		/// <returns>true if endpoints are equal</returns>
 		bool operator ==(const ip_endpoint& rhs) const noexcept
 		{
-			return (ip == rhs.ip) && (port == rhs.port) && (scope_id == rhs.scope_id);
+			if ((scope_id != std::nullopt && rhs.scope_id != std::nullopt))
+				return (ip == rhs.ip) && (port == rhs.port) && (scope_id.value() == rhs.scope_id.value());
+			return (ip == rhs.ip) && (port == rhs.port);
 		}
 
 		/// <summary>
@@ -66,7 +68,9 @@ namespace net
 		/// <returns>true if endpoints are not equal</returns>
 		bool operator !=(const ip_endpoint& rhs) const
 		{
-			return (ip != rhs.ip) || (port != rhs.port) || (scope_id != rhs.scope_id);
+			if ((scope_id != std::nullopt && rhs.scope_id != std::nullopt))
+				return (ip != rhs.ip) || (port != rhs.port) || (scope_id.value() != rhs.scope_id.value());
+			return (ip != rhs.ip) || (port != rhs.port);
 		}
 
 		/// <summary>
@@ -173,8 +177,7 @@ namespace std
 		{
 			const auto h1(std::hash<std::size_t>{}(
 				std::hash<T>{}(endpoint.ip) ^
-				static_cast<unsigned long>(endpoint.port) ^
-				std::hash<std::optional<uint32_t>>{}(endpoint.scope_id.value_or(0))
+				static_cast<unsigned long>(endpoint.port)
 			));
 
 			return h1;
@@ -197,9 +200,7 @@ namespace std
 				std::hash<net::ip_endpoint<T>>{}(endpoint.local) ^
 				static_cast<unsigned long>(endpoint.local.port) ^
 				std::hash<net::ip_endpoint<T>>{}(endpoint.remote) ^
-				static_cast<unsigned long>(endpoint.remote.port) ^
-				std::hash<std::optional<uint32_t>>{}(endpoint.local.scope_id.value_or(0)) ^
-				std::hash<std::optional<uint32_t>>{}(endpoint.remote.scope_id.value_or(0))
+				static_cast<unsigned long>(endpoint.remote.port)
 			));
 
 			return h1;

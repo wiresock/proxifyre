@@ -155,7 +155,7 @@ namespace iphelper
 			{
 				slock.unlock();
 
-				std::unique_lock<std::shared_mutex> lock(tcp_to_app_lock_);
+				std::unique_lock lock(tcp_to_app_lock_);
 				tcp_to_app_[session] = default_process_;
 				return default_process_;
 			}
@@ -179,7 +179,7 @@ namespace iphelper
 			zero_ip_endpoint.ip = T{};
 
 			// Try to lookup in the current table
-			std::shared_lock<std::shared_mutex> slock(udp_to_app_lock_);
+			std::shared_lock slock(udp_to_app_lock_);
 
 			if (auto it_first = udp_to_app_.find(endpoint); it_first != udp_to_app_.end())
 			{
@@ -198,7 +198,7 @@ namespace iphelper
 				{
 					slock.unlock();
 
-					std::unique_lock<std::shared_mutex> lock(udp_to_app_lock_);
+					std::unique_lock lock(udp_to_app_lock_);
 					udp_to_app_[endpoint] = default_process_;
 					return default_process_;
 				}
@@ -221,13 +221,13 @@ namespace iphelper
 
 			if (tcp)
 			{
-				std::lock_guard<std::shared_mutex> lock(tcp_to_app_lock_);
+				std::lock_guard lock(tcp_to_app_lock_);
 				ret_tcp = initialize_tcp_table();
 			}
 
 			if (udp)
 			{
-				std::lock_guard<std::shared_mutex> lock(udp_to_app_lock_);
+				std::lock_guard lock(udp_to_app_lock_);
 				ret_udp = initialize_udp_table();
 			}
 
@@ -242,7 +242,7 @@ namespace iphelper
 		{
 			std::ostringstream oss;
 
-			std::shared_lock<std::shared_mutex> lock(tcp_to_app_lock_);
+			std::shared_lock lock(tcp_to_app_lock_);
 			std::for_each(tcp_to_app_.begin(), tcp_to_app_.end(), [&oss](auto&& entry)
 			{
 				oss << std::string(entry.first.local.ip) << " : " << entry.first.local.port <<
@@ -263,7 +263,7 @@ namespace iphelper
 		std::vector<net::ip_session<T>> get_tcp_sessions_for_process(const std::wregex& process)
 		{
 			std::vector<net::ip_session<T>> sessions;
-			std::shared_lock<std::shared_mutex> lock(tcp_to_app_lock_);
+			std::shared_lock lock(tcp_to_app_lock_);
 			std::for_each(tcp_to_app_.begin(), tcp_to_app_.end(), [&sessions, &process](auto&& entry)
 			{
 				if (std::regex_match(std::wstring(entry.second->name.begin(), entry.second->name.end()), process))
@@ -280,7 +280,7 @@ namespace iphelper
 		{
 			std::ostringstream oss;
 
-			std::shared_lock<std::shared_mutex> lock(udp_to_app_lock_);
+			std::shared_lock lock(udp_to_app_lock_);
 			std::for_each(udp_to_app_.begin(), udp_to_app_.end(), [&oss](auto&& entry)
 			{
 				oss << std::string(entry.first.ip) << " : " << entry.first.port <<

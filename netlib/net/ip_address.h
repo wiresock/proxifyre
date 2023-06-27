@@ -365,6 +365,31 @@ namespace net
 		}
 
 		/// <summary>
+		/// Checks if IPv6 address is link local
+		/// </summary>
+		/// <returns>true if IPv6 address is link local</returns>
+		[[nodiscard]] bool is_link_local() const noexcept
+		{
+			// FE in hexadecimal is 11111110 in binary
+			// Check the first byte
+			if (u.Byte[0] != 0xFE)
+				return false;
+
+			// 80 in hexadecimal is 10000000 in binary
+			// Check the second byte
+			if (u.Byte[1] != 0x80)
+				return false;
+
+			// All link-local addresses have the next 54 bits set to 0
+			for (int i = 2; i < 8; i++) {
+				if (u.Byte[i] != 0)
+					return false;
+			}
+
+			return true;
+		}
+
+		/// <summary>
 		/// Char stream output operator
 		/// </summary>
 		/// <param name="os">stream instance reference</param>
