@@ -113,7 +113,7 @@ namespace proxy
 								});
 						}
 
-						if (const auto port = get_proxy_port_udp(process->name); port.has_value())
+						if (const auto port = get_proxy_port_udp(process); port.has_value())
 						{
 							if (udp_redirect_->is_new_endpoint(buffer))
 							{
@@ -159,7 +159,7 @@ namespace proxy
 								});
 						}
 
-						if (const auto port = get_proxy_port_tcp(process->name); port.has_value())
+						if (const auto port = get_proxy_port_tcp(process); port.has_value())
 						{
 							if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
 							{
@@ -525,7 +525,7 @@ namespace proxy
 
 			// Associate the given process name to the specified proxy ID. 
 			// If the process_name already exists in the map, its associated proxy ID is updated.
-			name_to_proxy_[process_name] = proxy_id;
+			name_to_proxy_[to_upper(process_name)] = proxy_id;
 
 			return true;  // Return true to indicate the association was successful
 		}
@@ -595,13 +595,41 @@ namespace proxy
 		}
 
 	private:
+		/// <summary>
+		/// Converts std::wstring to upper case
+		/// </summary>
+		/// <param name="str">wide char string to convert</param>
+		/// <returns>resulted wide char string</returns>
+		static std::wstring to_upper(const std::wstring& str)
+		{
+			std::wstring upper_case;
+			std::ranges::transform(str, std::back_inserter(upper_case), toupper);
+			return upper_case;
+		}
+		/**
+		 * @brief Matches an application name pattern against the process details.
+		 *
+		 * The function checks if the application name pattern includes a path (by looking for "/" or "\\").
+		 * If a path is included in the pattern, the function matches against the process's path_name,
+		 * otherwise it matches against the process's name. The matching is done case-insensitively.
+		 *
+		 * @param app The application name or pattern to check against the process details.
+		 * @param process The process details to check against the application pattern.
+		 * @return true if the process details match the application pattern, false otherwise.
+		 */
+		static bool match_app_name(const std::wstring& app, const std::shared_ptr<iphelper::network_process>& process)
+		{
+			return (app.find(L'\\') != std::wstring::npos || app.find(L'/') != std::wstring::npos)
+				? (to_upper(process->path_name).find(app) != std::wstring::npos)
+				: (to_upper(process->name).find(app) != std::wstring::npos);
+		}
 		/**
 		 * Retrieves the TCP proxy port number associated with a given process name.
-		 * @param process_name The name of the process.
+		 * @param process The pointer to network_process.
 		 * @return An std::optional containing the TCP port number if the process name is found,
 		 *         or an empty std::optional otherwise.
 		 */
-		std::optional<uint16_t> get_proxy_port_tcp(const std::wstring& process_name)
+		std::optional<uint16_t> get_proxy_port_tcp(const std::shared_ptr<iphelper::network_process>& process)
 		{
 			// Locks the proxy servers and process to proxy map for reading.
 			std::shared_lock lock(lock_);
@@ -610,7 +638,7 @@ namespace proxy
 			for (auto& [name, proxy_id] : name_to_proxy_)
 			{
 				// Check if the current process name contains the given process name.
-				if (process_name.find(name) != std::wstring::npos)
+				if (match_app_name(name, process))
 					// If it does, return the TCP proxy port associated with the proxy ID.
 					return proxy_servers_[proxy_id].first->proxy_port();
 			}
@@ -621,11 +649,11 @@ namespace proxy
 
 		/**
 		 * Retrieves the UDP proxy port number associated with a given process name.
-		 * @param process_name The name of the process.
+		 * @param process The pointer to network_process.
 		 * @return An std::optional containing the UDP port number if the process name is found,
 		 *         or an empty std::optional otherwise.
 		 */
-		std::optional<uint16_t> get_proxy_port_udp(const std::wstring& process_name)
+		std::optional<uint16_t> get_proxy_port_udp(const std::shared_ptr<iphelper::network_process>& process)
 		{
 			// Locks the proxy servers and process to proxy map for reading.
 			std::shared_lock lock(lock_);
@@ -634,7 +662,7 @@ namespace proxy
 			for (auto& [name, proxy_id] : name_to_proxy_)
 			{
 				// Check if the current process name contains the given process name.
-				if (process_name.find(name) != std::wstring::npos)
+				if (match_app_name(name, process))
 					// If it does, return the UDP proxy port associated with the proxy ID.
 					return proxy_servers_[proxy_id].second->proxy_port();
 			}
