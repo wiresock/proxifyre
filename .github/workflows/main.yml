@@ -38,8 +38,11 @@ jobs:
         run: |
           ./vcpkg/vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows
 
+      - name: Install NuGet CLI
+        run: choco install nuget.commandline
+
       - name: Restore NuGet Packages
-        run: msbuild -t:restore socksify.sln
+        run: nuget restore socksify.sln
 
       - name: Parse Version
         shell: bash
