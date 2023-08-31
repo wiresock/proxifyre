@@ -126,15 +126,29 @@ bool Socksifier::Socksifier::Stop()
 	return false;
 }
 
-IntPtr Socksifier::Socksifier::AddSocks5Proxy(String^ endpoint, String^ username, String^ password, const bool start)
+IntPtr Socksifier::Socksifier::AddSocks5Proxy(String^ endpoint, String^ username, String^ password, SupportedProtocolsEnum protocols, const bool start)
 {
 	if (!unmanaged_ptr_)
 		return static_cast<IntPtr>(-1);
+
+	auto protocols_mx = supported_protocols_mx::both;
+	switch (protocols)
+	{
+	case SupportedProtocolsEnum::TCP:
+		protocols_mx = supported_protocols_mx::tcp;
+		break;
+	case SupportedProtocolsEnum::UDP:
+		protocols_mx = supported_protocols_mx::udp;
+		break;
+	default:
+		break;
+	}
 
 	if (username != nullptr && password != nullptr)
 	{
 		return static_cast<IntPtr>(unmanaged_ptr_->add_socks5_proxy(
 			msclr::interop::marshal_as<std::string>(endpoint),
+			protocols_mx,
 			start,
 			msclr::interop::marshal_as<std::string>(username),
 			msclr::interop::marshal_as<std::string>(password)
@@ -142,7 +156,7 @@ IntPtr Socksifier::Socksifier::AddSocks5Proxy(String^ endpoint, String^ username
 	}
 
 	return static_cast<IntPtr>(unmanaged_ptr_->add_socks5_proxy(
-		msclr::interop::marshal_as<std::string>(endpoint), start));
+		msclr::interop::marshal_as<std::string>(endpoint), protocols_mx, start));
 }
 
 bool Socksifier::Socksifier::AssociateProcessNameToProxy(String^ processName, IntPtr proxy)

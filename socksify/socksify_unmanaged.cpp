@@ -101,6 +101,7 @@ bool socksify_unmanaged::stop() const
 
 LONG_PTR socksify_unmanaged::add_socks5_proxy(
 	const std::string& endpoint,
+	const supported_protocols_mx protocol,
 	const bool start,
 	const std::string& login,
 	const std::string& password) const
@@ -113,7 +114,20 @@ LONG_PTR socksify_unmanaged::add_socks5_proxy(
 		cred = std::make_pair(login, password);
 	}
 
-	if (const auto result = proxy_->add_socks5_proxy(endpoint, cred, start); result)
+	proxy::socks_local_router::supported_protocols protocols = proxy::socks_local_router::supported_protocols::both;
+	switch (protocol)
+	{
+		case supported_protocols_mx::tcp:
+			protocols = proxy::socks_local_router::supported_protocols::tcp;
+			break;
+		case supported_protocols_mx::udp:
+			protocols = proxy::socks_local_router::supported_protocols::udp;
+			break;
+		default:
+			break;
+	}
+
+	if (const auto result = proxy_->add_socks5_proxy(endpoint, protocols, cred, start); result)
 	{
 		return static_cast<LONG_PTR>(result.value());
 	}

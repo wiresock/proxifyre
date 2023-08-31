@@ -25,6 +25,7 @@ public:
 	[[nodiscard]] bool stop() const;
 	[[nodiscard]] LONG_PTR add_socks5_proxy(
 		const std::string& endpoint,
+		supported_protocols_mx protocol,
 		bool start = false,
 		const std::string& login = "",
 		const std::string& password = ""
