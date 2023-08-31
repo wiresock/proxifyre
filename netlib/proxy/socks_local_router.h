@@ -50,6 +50,13 @@ namespace proxy
 		std::atomic_bool is_active_{false};
 
 	public:
+		enum supported_protocols
+		{
+			tcp,
+			udp,
+			both
+		};
+
 		/**
 		 * The socks_local_router class constructor, used to set up a local router to handle SOCKS traffic.
 		 * It creates instances of `tcp_local_redirect`, `socks5_udp_local_redirect` and `queued_packet_filter`
@@ -256,8 +263,11 @@ namespace proxy
 			// Start proxies
 			for (auto& [tcp, udp] : proxy_servers_)
 			{
-				tcp->start();
-				udp->start();
+				if (tcp)
+					tcp->start();
+
+				if(udp)
+					udp->start();
 			}
 
 			// Update network configuration and start filter
@@ -312,10 +322,12 @@ namespace proxy
 			for (auto& [tcp, udp] : proxy_servers_)
 			{
 				// Stop TCP proxy
-				tcp->stop();
+				if(tcp)
+					tcp->stop();
 
 				// Stop UDP proxy
-				udp->stop();
+				if(udp)
+					udp->stop();
 			}
 
 			// Stop the thread pool associated with the I/O completion port
@@ -337,12 +349,14 @@ namespace proxy
 		/**
 		 * Add a SOCKS5 proxy and optionally starts it.
 		 * @param endpoint string representing the endpoint of the SOCKS5 proxy server.
+		 * @param protocols enum representing the protocols to be proxied.
 		 * @param cred_pair optional pair of strings representing username and password for authentication.
 		 * @param start boolean flag to start the proxy server after creating it.
 		 * @return an optional value containing the index of the added proxy server if successful, std::nullopt otherwise.
 		 */
 		std::optional<size_t> add_socks5_proxy(
 			const std::string& endpoint,
+			const supported_protocols protocols,
 			const std::optional<std::pair<std::string, std::string>>& cred_pair,
 			const bool start = false
 		)
@@ -390,18 +404,24 @@ namespace proxy
 
 			// Add the filters to a filter list
 			// Apply all the filters to the network traffic
-			ndisapi::static_filters::get_instance()
-				.add_filter(sock5_tcp_proxy_filter_out)
-				.add_filter(sock5_tcp_proxy_filter_in)
-				.add_filter(sock5_udp_proxy_filter_out)
-				.add_filter(sock5_udp_proxy_filter_in)
-				.apply();
+			if(protocols == both || protocols == udp)
+				ndisapi::static_filters::get_instance()
+					.add_filter(sock5_tcp_proxy_filter_out)
+					.add_filter(sock5_tcp_proxy_filter_in)
+					.add_filter(sock5_udp_proxy_filter_out)
+					.add_filter(sock5_udp_proxy_filter_in)
+					.apply();
+			else if(protocols == tcp)
+					ndisapi::static_filters::get_instance()
+					.add_filter(sock5_tcp_proxy_filter_out)
+					.add_filter(sock5_tcp_proxy_filter_in)
+					.apply();
 
 			try
 			{
 				// Create TCP and UDP proxy server objects and start them if required
 
-				auto socks_tcp_proxy_server = std::make_unique<s5_tcp_proxy_server>(
+				auto socks_tcp_proxy_server = (protocols == both || protocols == tcp)?std::make_unique<s5_tcp_proxy_server>(
 					0, io_port_, [this, endpoint = proxy_endpoint.value(), cred_pair](
 					const net::ip_address_v4 address, const uint16_t port)->
 					std::tuple<net::ip_address_v4, uint16_t, std::unique_ptr<s5_tcp_proxy_server::negotiate_context_t>>
@@ -432,9 +452,9 @@ namespace proxy
 						}
 
 						return std::make_tuple(net::ip_address_v4{}, 0, nullptr);
-					}, log_printer_, log_level_);
+					}, log_printer_, log_level_):nullptr;
 
-				auto socks_udp_proxy_server = std::make_unique<s5_udp_proxy_server>(
+				auto socks_udp_proxy_server = (protocols == both || protocols == udp)?std::make_unique<s5_udp_proxy_server>(
 					0, io_port_, [this, endpoint = proxy_endpoint.value(), cred_pair](
 					const net::ip_address_v4 address, const uint16_t port)->
 					std::tuple<net::ip_address_v4, uint16_t, std::unique_ptr<s5_udp_proxy_server::negotiate_context_t>>
@@ -460,30 +480,36 @@ namespace proxy
 						}
 
 						return std::make_tuple(net::ip_address_v4{}, 0, nullptr);
-					}, log_printer_, log_level_);
+					}, log_printer_, log_level_): nullptr;
 
 				if (start) // optionally start proxies
 				{
 					// If successful in starting the servers, log the local listening ports
-					if (!socks_tcp_proxy_server->start())
+					if (socks_tcp_proxy_server) 
 					{
-						print_log(netlib::log::log_level::error, "Failed to start TCP SOCKS5 proxy "s + endpoint);
-						return {};
+						if (!socks_tcp_proxy_server->start())
+						{
+							print_log(netlib::log::log_level::error, "Failed to start TCP SOCKS5 proxy "s + endpoint);
+							return {};
+						}
+
+						print_log(netlib::log::log_level::info,
+							"Local TCP proxy for "s + endpoint + " is listening port: " + std::to_string(
+								socks_tcp_proxy_server->proxy_port()));
 					}
 
-					print_log(netlib::log::log_level::info,
-					          "Local TCP proxy for "s + endpoint + " is listening port: " + std::to_string(
-						          socks_tcp_proxy_server->proxy_port()));
-
-					if (!socks_udp_proxy_server->start())
+					if (socks_udp_proxy_server)
 					{
-						print_log(netlib::log::log_level::error, "Failed to start UDP SOCKS5 proxy "s + endpoint);
-						return {};
-					}
+						if (!socks_udp_proxy_server->start())
+						{
+							print_log(netlib::log::log_level::error, "Failed to start UDP SOCKS5 proxy "s + endpoint);
+							return {};
+						}
 
-					print_log(netlib::log::log_level::info,
-					          "Local UDP proxy for "s + endpoint + " is listening port: " + std::to_string(
-						          socks_udp_proxy_server->proxy_port()));
+						print_log(netlib::log::log_level::info,
+							"Local UDP proxy for "s + endpoint + " is listening port: " + std::to_string(
+								socks_udp_proxy_server->proxy_port()));
+					}
 				}
 
 				// Lock the mutex to safely add the proxy servers to the shared data structure
@@ -640,7 +666,7 @@ namespace proxy
 				// Check if the current process name contains the given process name.
 				if (match_app_name(name, process))
 					// If it does, return the TCP proxy port associated with the proxy ID.
-					return proxy_servers_[proxy_id].first->proxy_port();
+					return proxy_servers_[proxy_id].first? std::optional(proxy_servers_[proxy_id].first->proxy_port()): std::nullopt;
 			}
 
 			// If the process name is not found in any of the keys, return an empty std::optional.
@@ -664,7 +690,7 @@ namespace proxy
 				// Check if the current process name contains the given process name.
 				if (match_app_name(name, process))
 					// If it does, return the UDP proxy port associated with the proxy ID.
-					return proxy_servers_[proxy_id].second->proxy_port();
+					return proxy_servers_[proxy_id].second? std::optional(proxy_servers_[proxy_id].second->proxy_port()): std::nullopt;
 			}
 
 			// If the process name is not found in any of the keys, return an empty std::optional.
@@ -685,7 +711,7 @@ namespace proxy
 			// Returns true if any server is using the port, false otherwise.
 			return std::ranges::any_of(std::as_const(proxy_servers_), [port](auto& proxy)
 				{
-					if (proxy.first->proxy_port() == port)
+					if (proxy.first && proxy.first->proxy_port() == port)
 						return true;
 					return false;
 				});
@@ -705,7 +731,7 @@ namespace proxy
 			// Returns true if any server is using the port, false otherwise.
 			return std::ranges::any_of(std::as_const(proxy_servers_), [port](auto& proxy)
 				{
-					if (proxy.second->proxy_port() == port)
+					if (proxy.second && proxy.second->proxy_port() == port)
 						return true;
 					return false;
 				});

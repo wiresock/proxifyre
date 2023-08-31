@@ -32,6 +32,13 @@ namespace Socksifier
 		NdisError
 	};
 
+	public enum class SupportedProtocolsEnum
+	{
+		TCP,
+		UDP,
+		BOTH
+	};
+
 	public ref class LogEntry sealed
 	{
 		long long time_stamp_;
@@ -91,7 +98,6 @@ namespace Socksifier
 		}
 	};
 
-
 	public ref class Socksifier sealed
 	{
 		Socksifier(LogLevel log_level);
@@ -107,7 +113,7 @@ namespace Socksifier
 
 		bool Start();
 		bool Stop();
-		IntPtr AddSocks5Proxy(String^ endpoint, String^ username, String^ password, bool start);
+		IntPtr AddSocks5Proxy(String^ endpoint, String^ username, String^ password, SupportedProtocolsEnum protocols, bool start);
 		bool AssociateProcessNameToProxy(String^ processName, IntPtr proxy);
 
 		property Int32 LogEventInterval

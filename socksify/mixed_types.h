@@ -16,6 +16,13 @@ enum class status_mx
 	error
 };
 
+enum class supported_protocols_mx
+{
+	tcp,
+	udp,
+	both
+};
+
 enum class event_type_mx : uint32_t
 {
 	connected,
