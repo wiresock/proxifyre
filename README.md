@@ -1,38 +1,48 @@
 # ProxiFyre: SOCKS5 Proxifier for Windows
 
-ProxiFyre elevates the foundational capabilities of the Windows Packet Filter's [socksify](https://github.com/wiresock/ndisapi/tree/master/examples/cpp/socksify) demo, introducing robust enhancements. Not only does it seamlessly integrate support for UDP, but it also empowers users with the flexibility of managing multiple proxy instances. Streamlining its configuration process, ProxiFyre now dynamically sources its settings from an `app-config.json` file, ensuring a more intuitive and user-friendly experience. Furthermore, with its adaptability in mind, ProxiFyre can be effortlessly configured to run as a Windows Service, providing continuous operation without the need for manual intervention.
+ProxiFyre elevates the foundational capabilities of the Windows Packet Filter's [socksify](https://github.com/wiresock/ndisapi/tree/master/examples/cpp/socksify) demo, introducing robust enhancements. Not only does it seamlessly integrate support for UDP, but it also empowers users with the flexibility of managing multiple proxy instances. Streamlining its configuration process, ProxiFyre now dynamically sources its settings from an app-config.json file, ensuring a more intuitive and user-friendly experience. Furthermore, with its adaptability in mind, ProxiFyre can be effortlessly configured to run as a Windows Service, providing continuous operation without the need for manual intervention.
 
 ## Configuration
 
-The application uses a configuration file named `app-config.json`. This JSON file should contain configurations for different applications. Each configuration object should have the following properties:
+The application uses a configuration file named app-config.json. This JSON file should contain configurations for different applications. Each configuration object should have the following properties:
 
-- `appNames`: An array of strings representing the names of applications this configuration applies to.
-- `socks5ProxyEndpoint`: A string that specifies the SOCKS5 proxy endpoint.
-- `username`: A string that specifies the username for the proxy.
-- `password`: A string that specifies the password for the proxy.
-- `supportedProtocols`: An array of strings specifying the supported protocols (e.g., "TCP", "UDP").
+- **appNames**: An array of strings representing the names of applications this configuration applies to.
+- **socks5ProxyEndpoint**: A string that specifies the SOCKS5 proxy endpoint.
+- **username**: A string that specifies the username for the proxy.
+- **password**: A string that specifies the password for the proxy.
+- **supportedProtocols**: An array of strings specifying the supported protocols (e.g., "TCP", "UDP").
+
+### LogLevel
+
+LogLevel can have one of the following values which define the detail of the log: `None`, `Info`, `Deb`, `All`
+
+### appNames
+
+On the application name, it can be a partial name or full name of the executable, e.g. `firefox` or `firefox.exe` both will work for the firefox browser, but also any application whose name includes `firefox` or `firefox.exe`, e.g. `NewFirefox.exe`. If the pattern specified in the appName contains slashes or backslashes then it is treated as a pathname and instead of matching the executable name, the full pathname is matched against the pattern. It allows specifying an entire folder using a full or partial path which can be convenient for UWP applications, e.g. `C:\\Program Files\\WindowsApps\\ROBLOXCORPORATION.ROBLOX` for ROBLOX.
+
+### SOCKS5 Proxy Authorization
+
+If the SOCKS5 proxy does not support authorization, you can skip the username and password in the configuration.
 
 Here is an example configuration:
 
 ```json
 {
-    "logLevel": "None",
-    "proxies": [
-        {
-            "appNames": ["chrome", "chrome_canary"],
-            "socks5ProxyEndpoint": "158.101.205.51:1080",
-            "username": "username1",
-            "password": "password1",
-            "supportedProtocols": ["TCP", "UDP"]
-        },
-        {
-            "appNames": ["firefox", "firefox_dev"],
-            "socks5ProxyEndpoint": "159.101.205.52:1080",
-            "username": "username2",
-            "password": "password2",
-            "supportedProtocols": ["TCP"]
-        }
-    ]
+ "logLevel": "None",
+ "proxies": [
+         {
+         "appNames": ["chrome", "C:\\Program Files\\WindowsApps\\ROBLOXCORPORATION.ROBLOX"],
+         "socks5ProxyEndpoint": "158.101.205.51:1080",
+         "username": "username1",
+         "password": "password1",
+         "supportedProtocols": ["TCP", "UDP"]
+         },
+         {
+         "appNames": ["firefox", "firefox_dev"],
+         "socks5ProxyEndpoint": "127.0.0.1:8080",
+         "supportedProtocols": ["TCP"]
+         }
+     ]
 }
 ```
 
