@@ -52,7 +52,27 @@ This guide provides step-by-step instructions on how to set up and run the Proxi
 
 ### Pre-installation Steps
 
-1. **Download and Install Windows Packet Filter (WinpkFilter)**: This is a critical dependency for our project. Please visit the [Windows Packet Filter Github page](https://github.com/wiresock/ndisapi/releases) to download and install the latest version.
+#### 1. Install Windows Packet Filter (WinpkFilter)
+
+Windows Packet Filter is a critical dependency for our project. 
+
+- Visit the [Windows Packet Filter Github page](https://link-to-winpkfilter-github-page) to download the latest version.
+- Follow the instructions on the page to install it.
+
+#### 2. Install Visual Studio Runtime Libraries
+
+Visual Studio Runtime Libraries are required for running applications developed with Visual Studio.
+
+- Go to [Visual Studio 2022 redistributable download page](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170)
+- Identify your system architecture (x64, x86, or ARM64).
+- Download the appropriate installer for your platform to ensure compatibility and optimal performance.
+  - For x64 systems, download the x64 installer.
+  - For x86 systems, download the x86 installer.
+  - For ARM64 systems, download the ARM64 installer.
+- Locate the downloaded installer and double-click on it to begin the installation.
+- Follow the on-screen instructions to complete the installation
+
+Please ensure you download the correct installer to avoid any installation issues.
 
 ### Installation Steps
 
