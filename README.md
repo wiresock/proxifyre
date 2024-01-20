@@ -56,7 +56,7 @@ This guide provides step-by-step instructions on how to set up and run the Proxi
 
 Windows Packet Filter is a critical dependency for our project. 
 
-- Visit the [Windows Packet Filter Github page](https://link-to-winpkfilter-github-page) to download the latest version.
+- Visit the [Windows Packet Filter Github page](https://github.com/wiresock/ndisapi/releases) to download the latest version.
 - Follow the instructions on the page to install it.
 
 #### 2. Install Visual Studio Runtime Libraries
