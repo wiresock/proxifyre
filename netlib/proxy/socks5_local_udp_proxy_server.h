@@ -425,10 +425,19 @@ namespace proxy
 			socks5_req<address_type_t> associate_req;
 			socks5_resp<address_type_t> associate_resp;
 
+			auto socks5_ident_req_size = sizeof(ident_req);
+
 			ident_req.methods[0] = 0x0; // RFC 1928: X'00' NO AUTHENTICATION REQUIRED
 			ident_req.methods[1] = 0x2; // RFC 1928: X'02' USERNAME/PASSWORD
 
-			auto result = send(socks_tcp_socket, reinterpret_cast<const char*>(&ident_req), sizeof(ident_req), 0);
+			// Don't suggest username/password option if not provided
+			if (!negotiate_ctx->socks5_username.has_value())
+			{
+				ident_req.number_of_methods = 1;
+				socks5_ident_req_size = sizeof(socks5_ident_req<1>);
+			}
+
+			auto result = send(socks_tcp_socket, reinterpret_cast<const char*>(&ident_req), static_cast<int>(socks5_ident_req_size), 0);
 			if (result == SOCKET_ERROR)
 			{
 				print_log(netlib::log::log_level::info,

@@ -237,11 +237,21 @@ namespace proxy
 			{
 				if (current_state_ == socks5_state::pre_login)
 				{
+					auto socks5_ident_req_size = sizeof(ident_req_);
+
 					ident_req_.methods[0] = 0x0; // RFC 1928: X'00' NO AUTHENTICATION REQUIRED
 					ident_req_.methods[1] = 0x2; // RFC 1928: X'02' USERNAME/PASSWORD
 
+					// Don't suggest username/password option if not provided
+					if(auto* negotiate_context_ptr = dynamic_cast<negotiate_context_t*>(tcp_proxy_socket<
+						T>::negotiate_ctx_.get()); !negotiate_context_ptr->socks5_username.has_value())
+					{
+						ident_req_.number_of_methods = 1;
+						socks5_ident_req_size = sizeof(socks5_ident_req<1>);
+					}
+
 					io_context_send_negotiate_.wsa_buf.buf = reinterpret_cast<char*>(&ident_req_);
-					io_context_send_negotiate_.wsa_buf.len = sizeof(ident_req_);
+					io_context_send_negotiate_.wsa_buf.len = static_cast<ULONG>(socks5_ident_req_size);
 					io_context_recv_negotiate_.wsa_buf.buf = reinterpret_cast<char*>(&ident_resp_);
 					io_context_recv_negotiate_.wsa_buf.len = sizeof(socks5_ident_resp);
 
