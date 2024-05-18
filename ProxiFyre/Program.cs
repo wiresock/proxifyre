@@ -16,6 +16,7 @@ namespace ProxiFyre
     public class ProxiFyreService
     {
         private static readonly Logger _logger = LogManager.GetCurrentClassLogger();
+        private static LogLevel _logLevel;
         private Socksifier.Socksifier _socksify;
 
         public void Start()
@@ -27,7 +28,7 @@ namespace ProxiFyre
             // Form the path to app-config.json
             var configFilePath = Path.Combine(directoryPath ?? string.Empty, "app-config.json");
 
-            // Form the path to app-config.json
+            // Form the path to NLog.config
             var logConfigFilePath = Path.Combine(directoryPath ?? string.Empty, "NLog.config");
 
             // Load the configuration from JSON
@@ -36,12 +37,12 @@ namespace ProxiFyre
             LogManager.Configuration = new XmlLoggingConfiguration(logConfigFilePath);
 
             // Handle the global log level from the configuration
-            var logLevel = Enum.TryParse<LogLevel>(serviceSettings.LogLevel, true, out var globalLogLevel)
+            _logLevel = Enum.TryParse<LogLevel>(serviceSettings.LogLevel, true, out var globalLogLevel)
                 ? globalLogLevel
-                : LogLevel.None;
+                : LogLevel.Info;
 
             // Get an instance of the Socksifier
-            _socksify = Socksifier.Socksifier.GetInstance(logLevel);
+            _socksify = Socksifier.Socksifier.GetInstance(_logLevel);
 
             // Attach the LogPrinter method to the LogEvent event
             _socksify.LogEvent += LogPrinter;
@@ -59,22 +60,24 @@ namespace ProxiFyre
 
                 foreach (var appName in appSettings.AppNames)
                     // Associate the defined application names to the proxies
-                    if (proxy.ToInt64() != -1 && _socksify.AssociateProcessNameToProxy(appName, proxy))
+                    if (proxy.ToInt64() != -1 && _socksify.AssociateProcessNameToProxy(appName, proxy) && _logLevel != LogLevel.None)
                         _logger.Info(
                             $"Successfully associated {appName} to {appSettings.Socks5ProxyEndpoint} SOCKS5 proxy with protocols {string.Join(", ", appSettings.SupportedProtocols)}!");
             }
 
             _socksify.Start();
 
-            // Inform user that the application is running and how to stop it
-            _logger.Info("ProxiFyre Service is running...");
+            // Inform user that the application is running
+            if(_logLevel != LogLevel.None)
+                _logger.Info("ProxiFyre Service is running...");
         }
 
         public void Stop()
         {
             // Dispose of the Socksifier before exiting
             _socksify.Dispose();
-            _logger.Info("ProxiFyre Service has stopped.");
+            if (_logLevel != LogLevel.None)
+                _logger.Info("ProxiFyre Service has stopped.");
             LogManager.Shutdown();
         }
 
