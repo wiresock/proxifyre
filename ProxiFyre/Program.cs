@@ -84,6 +84,9 @@ namespace ProxiFyre
         // Method to handle logging events
         private static void LogPrinter(object sender, LogEventArgs e)
         {
+            if (_logLevel == LogLevel.None)
+                return;
+
             // Loop through each log entry and log it using NLog
             foreach (var entry in e.Log.Where(entry => entry != null))
             {
