@@ -16,8 +16,8 @@ namespace ndisapi
 		                                                      sizeof(NDISRD_ETH_Packet) * (Size - 1),
 		                                                      0x1000>;
 
-		/// <summary>array of INTERMEDIATE_BUFFER structures</summary>
-		std::unique_ptr<INTERMEDIATE_BUFFER[]> packet_buffer_;
+		/// <summary>array of ndisapi::intermediate_buffer structures</summary>
+		std::unique_ptr<ndisapi::intermediate_buffer[]> packet_buffer_;
 		/// <summary>driver request for reading packets</summary>
 		std::unique_ptr<request_storage_type_t> read_request_ptr_;
 		/// <summary>driver request for writing packets to adapter</summary>
@@ -28,7 +28,7 @@ namespace ndisapi
 	public:
 		explicit packet_block(HANDLE adapter)
 		{
-			packet_buffer_ = std::make_unique<INTERMEDIATE_BUFFER[]>(Size);
+			packet_buffer_ = std::make_unique<ndisapi::intermediate_buffer[]>(Size);
 
 			read_request_ptr_ = std::make_unique<request_storage_type_t>();
 			write_adapter_request_ptr_ = std::make_unique<request_storage_type_t>();
@@ -47,7 +47,7 @@ namespace ndisapi
 			//
 			// Initialize packet buffers
 			//
-			ZeroMemory(packet_buffer_.get(), sizeof(INTERMEDIATE_BUFFER) * Size);
+			ZeroMemory(packet_buffer_.get(), sizeof(ndisapi::intermediate_buffer) * Size);
 
 			for (unsigned i = 0; i < Size; ++i)
 			{
@@ -70,12 +70,12 @@ namespace ndisapi
 			return reinterpret_cast<PETH_M_REQUEST>(write_mstcp_request_ptr_.get());
 		}
 
-		INTERMEDIATE_BUFFER& operator[](const std::size_t idx)
+		ndisapi::intermediate_buffer& operator[](const std::size_t idx)
 		{
 			return packet_buffer_[idx];
 		}
 
-		const INTERMEDIATE_BUFFER& operator[](const std::size_t idx) const
+		const ndisapi::intermediate_buffer& operator[](const std::size_t idx) const
 		{
 			return packet_buffer_[idx];
 		}
@@ -174,6 +174,24 @@ namespace ndisapi
 
 		// ********************************************************************************
 		/// <summary>
+		/// Inserts a packet into the inbound network flow.
+		/// This function creates a request with the packet data and sends it to the MSTCP.
+		/// </summary>
+		/// <param name="packet_data">The packet data to be inserted.</param>
+		// ********************************************************************************
+		void insert_packet_to_mstcp(const INTERMEDIATE_BUFFER& packet_data) const;
+
+		// ********************************************************************************
+		/// <summary>
+		/// Inserts a packet into the outbound network flow.
+		/// This function creates a request with the packet data and sends it to the network.
+		/// </summary>
+		/// <param name="packet_data">The packet data to be inserted.</param>
+		// ********************************************************************************
+		void insert_packet_to_adapter(const INTERMEDIATE_BUFFER& packet_data) const;
+
+		// ********************************************************************************
+		/// <summary>
 		/// Queries the list of the available network interfaces
 		/// </summary>
 		/// <returns>vector of available network adapters</returns>
@@ -243,9 +261,9 @@ namespace ndisapi
 		void release_filter();
 
 		/// <summary>outgoing packet processing functor</summary>
-		std::function<packet_action(HANDLE, INTERMEDIATE_BUFFER&)> filter_outgoing_packet_ = nullptr;
+		std::function<packet_action(HANDLE, ndisapi::intermediate_buffer&)> filter_outgoing_packet_ = nullptr;
 		/// <summary>incoming packet processing functor</summary>
-		std::function<packet_action(HANDLE, INTERMEDIATE_BUFFER&)> filter_incoming_packet_ = nullptr;
+		std::function<packet_action(HANDLE, ndisapi::intermediate_buffer&)> filter_incoming_packet_ = nullptr;
 		/// <summary>working thread running status</summary>
 		std::atomic<filter_state> filter_state_ = filter_state::stopped;
 		/// <summary>list of available network interfaces</summary>
@@ -444,6 +462,30 @@ namespace ndisapi
 					ad_list.m_nAdapterMediumList[i],
 					ad_list.m_usMTU[i]));
 		}
+	}
+	
+	inline void queued_packet_filter::insert_packet_to_mstcp(const INTERMEDIATE_BUFFER& packet_data) const
+	{
+		ETH_REQUEST request{
+			network_interfaces_[adapter_]->get_adapter(),
+			NDISRD_ETH_Packet
+			{
+				const_cast<INTERMEDIATE_BUFFER*>(&packet_data)
+			} };
+
+		SendPacketToMstcp(&request);
+	}
+
+	inline void queued_packet_filter::insert_packet_to_adapter(const INTERMEDIATE_BUFFER& packet_data) const
+	{
+		ETH_REQUEST request{
+			network_interfaces_[adapter_]->get_adapter(),
+			NDISRD_ETH_Packet
+			{
+				const_cast<INTERMEDIATE_BUFFER*>(&packet_data)
+			} };
+
+		SendPacketToAdapter(&request);
 	}
 
 	inline void queued_packet_filter::packet_read_thread()

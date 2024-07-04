@@ -582,6 +582,27 @@ namespace iphelper
 			return ret_val;
 		}
 
+		/**
+		 * @brief Returns the difference between the unicast addresses of this network adapter and another.
+		 *
+		 * This function compares the unicast addresses of this network adapter and another one. It returns a vector of
+		 * ip_address_info objects that are present in this network adapter but not in another one.
+		 *
+		 * @param rhs The other network adapter to compare with.
+		 * @return std::vector<ip_address_info> A vector of ip_address_info objects that are present in this network adapter rhs but not in rhs.
+		 */
+		[[nodiscard]] std::vector<ip_address_info> get_unicast_address_difference(const network_adapter_info& rhs) const
+		{
+			std::vector<ip_address_info> difference;
+
+			std::ranges::copy_if(unicast_address_list_, std::back_inserter(difference),
+				[this, rhs](const ip_address_info& address) {
+					return std::ranges::find(rhs.unicast_address_list_, address) == rhs.unicast_address_list_.end();
+				});
+
+			return difference;
+		}
+
 		/// <summary>
 		/// Gets network interface NDIS_MEDIUM
 		/// </summary>
