@@ -30,6 +30,7 @@
 #include <unordered_set>
 #include <queue>
 #include <regex>
+#include <syncstream>
 #include <gsl/gsl>
 
 #include "../include/common.h"
