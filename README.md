@@ -1,3 +1,38 @@
+# ProxiFyre-GUI: SOCKS5 Proxifier for Windows
+
+## note: all sub process of the exe that you added will be proxied in my version, I will add a switch to make this feature configable in next version.
+
+Add a new gui wpf application for proxyfyre. You can drag and drop some exe file or shortcut file on the main window it will be added into the list. 
+
+I made the drivers (both x86 and x64) included in my wpf project, forgot prepare env just run it.
+If you have vc redist v14.40 above installed, you can just download the zip file and etract it to any path, then run SpeedUp.exe
+If you don't known anything about vc runtime , please download the Launcher.exe, it include the vc_redist.exe and will install it automaticlly.
+
+I'll add auto upgrade in the next version, please wait.
+![image](https://github.com/user-attachments/assets/5457c76e-8008-4109-a963-a83c9d64ff30)
+
+you need edit the `settings_data.json` for your own socks5 proxy server
+
+```
+{
+  "ServerList": [{
+    "Id": 12345,
+    "Enabled": true,
+    "Name": "localhost",
+    "Host": "127.0.0.1",
+    "Port": 10800,
+    "Username": "",
+    "Secret": "",
+    "IsSelected": true,
+    "IsBest": true
+  }],
+  "FilePaths": [
+  ],
+  "CreateShortCut": true
+}
+```
+
+------------
 # ProxiFyre: SOCKS5 Proxifier for Windows
 
 ProxiFyre elevates the foundational capabilities of the Windows Packet Filter's [socksify](https://github.com/wiresock/ndisapi/tree/master/examples/cpp/socksify) demo, introducing robust enhancements. Not only does it seamlessly integrate support for UDP, but it also empowers users with the flexibility of managing multiple proxy instances. Streamlining its configuration process, ProxiFyre now dynamically sources its settings from an app-config.json file, ensuring a more intuitive and user-friendly experience. Furthermore, with its adaptability in mind, ProxiFyre can be effortlessly configured to run as a Windows Service, providing continuous operation without the need for manual intervention.
