@@ -31,6 +31,11 @@
 #include <queue>
 #include <regex>
 #include <gsl/gsl>
+#include <unordered_map>
+#include <windows.h>
+#include <tlhelp32.h>
+#include <chrono>
+#include <psapi.h> // ”√”⁄ GetModuleBaseName
 
 #include "../include/common.h"
 #include "../include/ndisapi.h"
@@ -66,6 +71,7 @@
 #include "../netlib/src/proxy/socks5_local_udp_proxy_server.h"
 #include "../netlib/src/iphelper/network_adapter_info.h"
 #include "../netlib/src/iphelper/process_lookup.h"
+#include "../netlib/src/process/process.h"
 #include "../netlib/src/proxy/socks_local_router.h"
 #include "mixed_types.h"
 #include "logger.h"

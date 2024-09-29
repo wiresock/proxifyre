@@ -6,7 +6,7 @@ struct mutex_impl
 };
 
 socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
-	log_level_{log_level}
+	log_level_{ log_level }
 {
 	using namespace std::string_literals;
 
@@ -16,13 +16,28 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
 	{
 		print_log(log_level_mx::info, "WSAStartup failed with error\n");
 	}
+}
 
+socksify_unmanaged::~socksify_unmanaged()
+{
+	WSACleanup();
+}
+
+socksify_unmanaged* socksify_unmanaged::get_instance(const log_level_mx log_level)
+{
+	static socksify_unmanaged inst(log_level); // NOLINT(clang-diagnostic-exit-time-destructors)
+	return &inst;
+}
+
+bool socksify_unmanaged::init()
+{
+	using namespace std::string_literals;
 	lock_ = std::make_unique<mutex_impl>();
 
 	print_log(log_level_mx::info, "Creating SOCKS5 Local Router instance..."s);
 
 	auto um_log_level = netlib::log::log_level::all;
-
+	std::cout << "test debug info =--------============---------" << std::endl;
 	switch (log_level_)
 	{
 	case log_level_mx::none:
@@ -39,26 +54,25 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
 		break;
 	}
 
-	proxy_ = std::make_unique<proxy::socks_local_router>(log_printer, um_log_level);
+	try {
+		proxy_ = std::make_unique<proxy::socks_local_router>(log_printer, um_log_level);
+	}
+	catch (const std::exception& e) {
+		print_log(log_level_mx::info, e.what());
+		std::cout << e.what() << std::endl;
+		print_log(log_level_mx::info, "[ERROR]: Failed to create the SOCKS5 Local Router instance!"s);
+		return false;
+	}
 
 	if (!proxy_)
 	{
 		print_log(log_level_mx::info, "[ERROR]: Failed to create the SOCKS5 Local Router instance!"s);
-		throw std::runtime_error("[ERROR]: Failed to create the SOCKS5 Local Router instance!");
+		return false;
 	}
 
 	print_log(log_level_mx::info, "SOCKS5 Local Router instance successfully created."s);
-}
 
-socksify_unmanaged::~socksify_unmanaged()
-{
-	WSACleanup();
-}
-
-socksify_unmanaged* socksify_unmanaged::get_instance(const log_level_mx log_level)
-{
-	static socksify_unmanaged inst(log_level); // NOLINT(clang-diagnostic-exit-time-destructors)
-	return &inst;
+	return true;
 }
 
 bool socksify_unmanaged::start() const
@@ -84,7 +98,7 @@ bool socksify_unmanaged::stop() const
 	if (!proxy_)
 	{
 		print_log(log_level_mx::info,
-		          "[ERROR]: Failed to stop the SOCKS5 Local Router instance. Instance does not exist."s);
+			"[ERROR]: Failed to stop the SOCKS5 Local Router instance. Instance does not exist."s);
 		return false;
 	}
 
@@ -107,7 +121,7 @@ LONG_PTR socksify_unmanaged::add_socks5_proxy(
 	const std::string& password) const
 {
 	using namespace std::string_literals;
-	std::optional<std::pair<std::string, std::string>> cred{std::nullopt};
+	std::optional<std::pair<std::string, std::string>> cred{ std::nullopt };
 
 	if (login != ""s)
 	{
@@ -117,14 +131,14 @@ LONG_PTR socksify_unmanaged::add_socks5_proxy(
 	proxy::socks_local_router::supported_protocols protocols = proxy::socks_local_router::supported_protocols::both;
 	switch (protocol)
 	{
-		case supported_protocols_mx::tcp:
-			protocols = proxy::socks_local_router::supported_protocols::tcp;
-			break;
-		case supported_protocols_mx::udp:
-			protocols = proxy::socks_local_router::supported_protocols::udp;
-			break;
-		default:
-			break;
+	case supported_protocols_mx::tcp:
+		protocols = proxy::socks_local_router::supported_protocols::tcp;
+		break;
+	case supported_protocols_mx::udp:
+		protocols = proxy::socks_local_router::supported_protocols::udp;
+		break;
+	default:
+		break;
 	}
 
 	if (const auto result = proxy_->add_socks5_proxy(endpoint, protocols, cred, start); result)
@@ -136,7 +150,7 @@ LONG_PTR socksify_unmanaged::add_socks5_proxy(
 }
 
 bool socksify_unmanaged::associate_process_name_to_proxy(const std::wstring& process_name,
-                                                         const LONG_PTR proxy_id) const
+	const LONG_PTR proxy_id) const
 {
 	return proxy_->associate_process_name_to_proxy(process_name, static_cast<size_t>(proxy_id));
 }

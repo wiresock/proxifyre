@@ -39,3 +39,11 @@
 /wiresock_service/obj/x64/Release/.NETFramework,Version=v4.7.2.AssemblyAttributes.cs
 /wiresock_service/obj/x86/Debug/.NETFramework,Version=v4.7.2.AssemblyAttributes.cs
 /wiresock_service/obj/x86/Release/.NETFramework,Version=v4.7.2.AssemblyAttributes.cs
+/vcpkg_installed
+**/.vs
+/packages
+**/bin
+**/obj
+/socksify/x64
+/Launcher/Resource/latest.zip
+/socksify/Win32

@@ -18,10 +18,12 @@ Socksifier::Socksifier::!Socksifier()
 {
 	// Set flag that we are going to exit
 	logger_thread_active_ = false;
+	if (log_event_ != nullptr) {
+		log_event_->Set();
+	}
 
-	log_event_->Set();
 
-	if (logging_thread_->IsAlive)
+	if (logging_thread_ && logging_thread_->IsAlive)
 		logging_thread_->Join();
 
 	// Release unmanaged core
@@ -56,7 +58,7 @@ void Socksifier::Socksifier::log_thread()
 				{
 					if (std::holds_alternative<std::string>(snd))
 						managed_log_list->Add(gcnew LogEntry(fst, ProxyGatewayEvent::Message,
-						                                     gcnew String(std::get<std::string>(snd).c_str())));
+							gcnew String(std::get<std::string>(snd).c_str())));
 					else
 					{
 						switch (std::get<event_mx>(snd).type)
@@ -79,8 +81,7 @@ void Socksifier::Socksifier::log_thread()
 				LogEvent(this, gcnew LogEventArgs(managed_log_list));
 			}
 		}
-	}
-	while (logger_thread_active_);
+	} while (logger_thread_active_);
 }
 
 UInt32 Socksifier::Socksifier::GetLogLimit()
@@ -110,6 +111,15 @@ Socksifier::Socksifier^ Socksifier::Socksifier::GetInstance()
 {
 	return GetInstance(LogLevel::All);
 }
+
+bool Socksifier::Socksifier::Init()
+{
+	if (unmanaged_ptr_)
+		return unmanaged_ptr_->init();
+
+	return false;
+}
+
 
 bool Socksifier::Socksifier::Start()
 {
@@ -165,9 +175,9 @@ bool Socksifier::Socksifier::AssociateProcessNameToProxy(String^ processName, In
 		return false;
 #if _WIN64
 	return unmanaged_ptr_->associate_process_name_to_proxy(msclr::interop::marshal_as<std::wstring>(processName),
-	                                                       proxy.ToInt64());
+		proxy.ToInt64());
 #else
 	return unmanaged_ptr_->associate_process_name_to_proxy(msclr::interop::marshal_as<std::wstring>(processName),
-	                                                       proxy.ToInt32());
+		proxy.ToInt32());
 #endif //_WIN64
 }

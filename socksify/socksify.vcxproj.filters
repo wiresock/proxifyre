@@ -52,11 +52,11 @@
     <Filter Include="Source Files\native">
       <UniqueIdentifier>{8d0a41c4-83ad-41d1-ad87-04c6303811bb}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Header Files\netlib\process">
+      <UniqueIdentifier>{78b40556-db49-4714-a485-3ac5e4304899}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\netlib\src\src\iphelper\network_adapter_info.h">
-      <Filter>Header Files\netlib\iphelper</Filter>
-    </ClInclude>
     <ClInclude Include="..\netlib\src\log\log.h">
       <Filter>Header Files\netlib\log</Filter>
     </ClInclude>
@@ -159,6 +159,12 @@
     <ClInclude Include="..\netlib\src\ndisapi\static_filters.h">
       <Filter>Header Files\netlib\ndisapi</Filter>
     </ClInclude>
+    <ClInclude Include="..\netlib\src\iphelper\network_adapter_info.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\src\process\process.h">
+      <Filter>Header Files\netlib\process</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AssemblyInfo.cpp">
@@ -183,5 +189,8 @@
     <Image Include="app.ico">
       <Filter>Resource Files</Filter>
     </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
   </ItemGroup>
 </Project>

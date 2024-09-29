@@ -1,0 +1,80 @@
+﻿<#@ template debug="true" hostSpecific="true" #>
+<#@ output extension=".cs" #>
+<#@ Assembly Name="System.Core.dll" #>
+<#@ Assembly Name="System.Xml.dll" #>
+<#@ Assembly Name="System.Xml.Linq.dll" #>
+<#@ Assembly Name="System.Windows.Forms.dll" #>
+<#@ import namespace="System" #>
+<#@ import namespace="System.IO" #>
+<#@ import namespace="System.Diagnostics" #>
+<#@ import namespace="System.Linq" #>
+<#@ import namespace="System.Xml.Linq" #>
+<#@ import namespace="System.Collections" #>
+<#@ import namespace="System.Collections.Generic" #><#   
+	string xamlFile = Path.ChangeExtension(this.Host.TemplateFile, ".xaml");
+	string nameSpace;
+	string prefix;
+	var keyNames = KeysFromXaml(xamlFile, out nameSpace, out prefix);
+
+#>using System.Diagnostics.CodeAnalysis;
+using System.Windows;
+
+namespace <#= nameSpace #>
+{
+    [SuppressMessage("ReSharper", "InconsistentNaming")]
+    public static class <#= prefix #>
+    {
+<# BuildComponentKeys(keyNames, prefix);
+#>
+        private static ComponentResourceKey MakeKey(object id)
+        {
+            return new ComponentResourceKey(typeof(<#= prefix #>), id);
+        }
+    }
+}
+<#+  
+	void BuildComponentKeys(IEnumerable<string> keyNames, string prefix)
+    {
+		foreach (var name in keyNames)
+        {
+#>        private static readonly ComponentResourceKey <#= name #>CompResKey = MakeKey("<#= prefix #>.<#= name #>");
+        public static ResourceKey <#= name #> => <#= name #>CompResKey;
+
+<#+          }
+    }
+
+    public static IEnumerable<string> KeysFromXaml(string fileName, out string nameSpace, out string prefix)
+    {
+        var doc = XDocument.Load(fileName);
+        XNamespace xamlNs = "http://schemas.microsoft.com/winfx/2006/xaml";
+
+        nameSpace = doc.Root.LastAttribute.Value; 
+		nameSpace = nameSpace.Remove(0, "clr-namespace:".Length);
+
+        var keys = doc.Root.Elements().Attributes(xamlNs + "Key").Select(a => a.Value).ToArray();
+        //keys have this form: { x: Static NameSpaceName:XamlName.Color1}
+
+		//get Prefix
+        prefix = "unknownPrefix";
+        var first = keys.FirstOrDefault();
+        if (first != null)
+        {
+            var p1 = first.LastIndexOf(":");
+            var p2 = first.LastIndexOf("}");
+            if (p1 < p2)
+                prefix = first.Substring(p1 + 1, p2 - p1 - 1).Split('.').FirstOrDefault();
+        }
+
+		//keynames
+        return keys.Select(key =>
+        {
+            var p1 = key.LastIndexOf(".");
+            var p2 = key.LastIndexOf("}");
+            if (p1 < p2)
+                return key.Substring(p1 + 1, p2 - p1 - 1);
+            else
+                return key;
+        }).ToArray();
+    }
+
+#>

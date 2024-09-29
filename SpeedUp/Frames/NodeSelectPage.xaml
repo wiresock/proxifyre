@@ -1,0 +1,71 @@
+﻿<Page x:Class="SpeedUp.Frames.NodeSelectPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+      xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+      xmlns:local="clr-namespace:SpeedUp.Frames"
+      mc:Ignorable="d" 
+      d:DesignHeight="450" d:DesignWidth="800"
+      Title="NodeSelectPage" Loaded="Page_Loaded">
+
+    <Grid Margin="10" Background="Transparent">
+        <Grid.Triggers>
+            <EventTrigger RoutedEvent="Grid.Loaded">
+                <BeginStoryboard>
+                    <Storyboard>
+                        <DoubleAnimation
+                    Storyboard.TargetProperty="Opacity"
+                    From="0.0" To="1.0" Duration="0:0:0.5"/>
+                    </Storyboard>
+                </BeginStoryboard>
+            </EventTrigger>
+        </Grid.Triggers>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="300"/>
+        </Grid.ColumnDefinitions>
+        <TreeView Grid.Column="0" Margin="5 20" Name="TreeView1"  Background="Transparent" BorderThickness="0"
+                  SelectedItemChanged="TreeView1_SelectedItemChanged"
+                  MouseDoubleClick="TreeView1_MouseDoubleClick" Loaded="TreeView1_Loaded">
+            <TreeView.ItemTemplate>
+                <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                    <TextBlock FontSize="14" Foreground="#333" Text="{Binding Name}" />
+                </HierarchicalDataTemplate>
+            </TreeView.ItemTemplate>
+        </TreeView>
+        <GridSplitter
+            Margin="0 30"
+          Grid.Column="1"
+          HorizontalAlignment="Left"
+          VerticalAlignment="Stretch"
+          ShowsPreview="True"
+          Width="1"
+          Background="#eee"
+        />
+        <Grid Grid.Column="1"  Width="300" Height="Auto" Background="Transparent">
+            <StackPanel Orientation="Vertical" Margin="10 0 0 0" >
+                <StackPanel Orientation="Horizontal"  >
+                    <TextBlock Text="Node" FontSize="14" Foreground="#333" Margin="0 50 0 0"/>
+                    <TextBlock x:Name="PreviewName_Text" Text="None" FontSize="14" Foreground="Gray" Margin="10 50 0 0"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal"  >
+                    <TextBlock Text="Ping" FontSize="14" Foreground="Black" Margin="0 10 0 0"/>
+                    <TextBlock x:Name="PreviewPing_Text" Text="--" TextAlignment="Center" Width="20" FontSize="14" Foreground="LightSeaGreen" Margin="10 10 0 0"/>
+                    <TextBlock Text="ms" FontSize="14" Foreground="Black" Margin="10 10 0 0"/>
+                </StackPanel>
+                <TextBlock FontSize="14" Foreground="Gray" Margin="10 30 10 0" TextWrapping="Wrap">Click to preview info, double click to select it</TextBlock>
+                <TextBlock FontSize="14" Foreground="Gray" Margin="10 10 10 0" TextWrapping="Wrap"></TextBlock>
+
+                <StackPanel Orientation="Horizontal"  >
+                    <TextBlock Text="Current" FontSize="14" Foreground="#333" Margin="0 20 0 0"/>
+                    <TextBlock x:Name="Name_Text" Text="None" FontSize="14" Foreground="Gray" Margin="10 20 0 0"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal"  >
+                    <TextBlock Text="Ping" FontSize="14" Foreground="Black" Margin="0 10 0 0"/>
+                    <TextBlock x:Name="Ping_Text"  Text="--" TextAlignment="Center" Width="20" FontSize="14" Foreground="LightSeaGreen" Margin="10 10 0 0"/>
+                    <TextBlock Text="ms" FontSize="14" Foreground="Black" Margin="10 10 0 0"/>
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Page>

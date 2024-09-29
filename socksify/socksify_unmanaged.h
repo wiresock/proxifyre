@@ -20,7 +20,7 @@ public:
 	socksify_unmanaged& operator=(socksify_unmanaged&& other) = delete;
 
 	static socksify_unmanaged* get_instance(log_level_mx log_level = log_level_mx::all);
-
+	[[nodiscard]] bool init();
 	[[nodiscard]] bool start() const;
 	[[nodiscard]] bool stop() const;
 	[[nodiscard]] LONG_PTR add_socks5_proxy(

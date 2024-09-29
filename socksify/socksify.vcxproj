@@ -29,7 +29,7 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
     <ProjectGuid>{9B831C7D-AFF8-4E08-B9A2-198631645BB2}</ProjectGuid>
-    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <Keyword>ManagedCProj</Keyword>
     <RootNamespace>wiresock</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
@@ -106,15 +106,18 @@
     <OutDir>$(SolutionDir)bin\dll\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(Platform)\$(Configuration)\</IntDir>
     <LinkIncremental>true</LinkIncremental>
+    <IncludePath>$(ProjectDir)3rdparty;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <OutDir>$(SolutionDir)bin\dll\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(Platform)\$(Configuration)\</IntDir>
     <LinkIncremental>false</LinkIncremental>
+    <IncludePath>$(ProjectDir)3rdparty;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <OutDir>$(SolutionDir)bin\dll\$(Platform)\$(Configuration)\</OutDir>
     <LinkIncremental>true</LinkIncremental>
+    <IncludePath>$(ProjectDir)3rdparty;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <OutDir>$(SolutionDir)bin\dll\$(Platform)\$(Configuration)\</OutDir>
@@ -123,10 +126,14 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <OutDir>$(SolutionDir)bin\dll\$(Platform)\$(Configuration)\</OutDir>
     <LinkIncremental>false</LinkIncremental>
+    <IncludePath>$(ProjectDir)3rdparty;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <OutDir>$(SolutionDir)bin\dll\$(Platform)\$(Configuration)\</OutDir>
     <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <PropertyGroup Label="Vcpkg">
+    <VcpkgEnableManifest>true</VcpkgEnableManifest>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -155,7 +162,7 @@
       <ConformanceMode>false</ConformanceMode>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;User32.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>
       </AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>
@@ -205,6 +212,7 @@
       <PreprocessorDefinitions>_CRT_RAND_S;_LIB;_ENABLE_EXTENDED_ALIGNED_STORAGE;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <ConformanceMode>false</ConformanceMode>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
       <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;</AdditionalDependencies>
@@ -249,6 +257,7 @@
     <ClInclude Include="..\netlib\src\net\mac_address.h" />
     <ClInclude Include="..\netlib\src\pcap\pcap.h" />
     <ClInclude Include="..\netlib\src\pcap\pcap_file_storage.h" />
+    <ClInclude Include="..\netlib\src\process\process.h" />
     <ClInclude Include="..\netlib\src\proxy\packet_pool.h" />
     <ClInclude Include="..\netlib\src\proxy\proxy_common.h" />
     <ClInclude Include="..\netlib\src\proxy\socks5_tcp_proxy_socket.h" />
@@ -301,7 +310,12 @@
     <Reference Include="System.Data" />
     <Reference Include="System.Xml" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+  </Target>
 </Project>

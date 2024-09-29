@@ -111,6 +111,7 @@ namespace Socksifier
 
 		event System::EventHandler<LogEventArgs^>^ LogEvent;
 
+		bool Init();
 		bool Start();
 		bool Stop();
 		IntPtr AddSocks5Proxy(String^ endpoint, String^ username, String^ password, SupportedProtocolsEnum protocols, bool start);
