@@ -26,13 +26,17 @@ namespace proxy
 		netlib::log::log_level log_level_;
 
 		// Optional pointer to a pcap file storage, used for packet capturing
-		std::shared_ptr<pcap::pcap_file_storage> pcap_{nullptr};
+		std::shared_ptr<pcap::pcap_file_storage> pcap_{ nullptr };
 
 		// Vector storing pairs of unique pointers to TCP and UDP proxy servers
 		std::vector<std::pair<std::unique_ptr<s5_tcp_proxy_server>, std::unique_ptr<s5_udp_proxy_server>>>
 			proxy_servers_;
 		// Maps process names to their corresponding proxy indexes
 		std::unordered_map<std::wstring, size_t> name_to_proxy_;
+		// Maps process names to their parent process names which in @name_to_proxy_
+		std::unordered_map<std::wstring, std::wstring> name_to_parent_name_;
+		// Save the process names that should be passed through
+		std::unordered_set<std::wstring> passthrough_names_;
 		// Shared mutex to protect concurrent access to shared resources
 		std::shared_mutex lock_;
 		// Information of the default network adapter
@@ -41,13 +45,13 @@ namespace proxy
 		std::size_t if_index_{};
 
 		// Unique pointers to TCP and UDP redirect objects
-		std::unique_ptr<ndisapi::tcp_local_redirect<net::ip_address_v4>> tcp_redirect_{nullptr};
-		std::unique_ptr<ndisapi::socks5_udp_local_redirect<net::ip_address_v4>> udp_redirect_{nullptr};
+		std::unique_ptr<ndisapi::tcp_local_redirect<net::ip_address_v4>> tcp_redirect_{ nullptr };
+		std::unique_ptr<ndisapi::socks5_udp_local_redirect<net::ip_address_v4>> udp_redirect_{ nullptr };
 		// Unique pointer to the packet filter object
-		std::unique_ptr<ndisapi::queued_packet_filter> filter_{nullptr};
+		std::unique_ptr<ndisapi::queued_packet_filter> filter_{ nullptr };
 
 		// Atomic boolean to track the active status of the router
-		std::atomic_bool is_active_{false};
+		std::atomic_bool is_active_{ false };
 
 	public:
 		enum supported_protocols
@@ -81,10 +85,7 @@ namespace proxy
 			tcp_redirect_ = std::make_unique<ndisapi::tcp_local_redirect<net::ip_address_v4>>(log_printer_, log_level_);
 			udp_redirect_ = std::make_unique<ndisapi::socks5_udp_local_redirect<net::ip_address_v4>>(log_printer_, log_level_);
 
-			// Initialize packet filter
-			filter_ = std::make_unique<ndisapi::queued_packet_filter>(
-				nullptr,
-				[this](HANDLE, INTERMEDIATE_BUFFER& buffer)
+			auto callback = [this](HANDLE, INTERMEDIATE_BUFFER& buffer)
 				{
 					auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
 					const auto destination_mac = net::mac_address(ethernet_header->h_dest);
@@ -108,16 +109,16 @@ namespace proxy
 
 						auto process = iphelper::process_lookup<net::ip_address_v4>::get_process_helper().
 							lookup_process_for_udp<false>(net::ip_endpoint<net::ip_address_v4>{
-								ip_header->ip_src, ntohs(udp_header->th_sport)
-							});
+							ip_header->ip_src, ntohs(udp_header->th_sport)
+						});
 
 						if (!process)
 						{
 							iphelper::process_lookup<net::ip_address_v4>::get_process_helper().actualize(false, true);
 							process = iphelper::process_lookup<net::ip_address_v4>::get_process_helper().
 								lookup_process_for_udp<true>(net::ip_endpoint<net::ip_address_v4>{
-									ip_header->ip_src, ntohs(udp_header->th_sport)
-								});
+								ip_header->ip_src, ntohs(udp_header->th_sport)
+							});
 						}
 
 						if (const auto port = get_proxy_port_udp(process); port.has_value())
@@ -128,11 +129,11 @@ namespace proxy
 								udp_mapper_.insert(ntohs(udp_header->th_sport));
 
 								print_log(netlib::log::log_level::info,
-								          std::string("Redirecting UDP ") + std::string(
-									          net::ip_address_v4(ip_header->ip_src)) +
-								          " : " + std::to_string(ntohs(udp_header->th_sport)) + " -> " +
-								          std::string(net::ip_address_v4(ip_header->ip_dst)) + " : " + std::to_string(
-									          ntohs(udp_header->th_dport)));
+									std::string("Redirecting UDP ") + std::string(
+										net::ip_address_v4(ip_header->ip_src)) +
+									" : " + std::to_string(ntohs(udp_header->th_sport)) + " -> " +
+									std::string(net::ip_address_v4(ip_header->ip_dst)) + " : " + std::to_string(
+										ntohs(udp_header->th_dport)));
 							}
 
 							if (udp_redirect_->process_client_to_server_packet(buffer, htons(port.value())))
@@ -147,23 +148,23 @@ namespace proxy
 					else if (ip_header->ip_p == IPPROTO_TCP)
 					{
 						const auto* const tcp_header = reinterpret_cast<tcphdr_ptr>(reinterpret_cast<PUCHAR>(
-								ip_header) +
+							ip_header) +
 							sizeof(DWORD) * ip_header->ip_hl);
 
 						auto process = iphelper::process_lookup<net::ip_address_v4>::get_process_helper().
 							lookup_process_for_tcp<false>(net::ip_session<net::ip_address_v4>{
-								ip_header->ip_src, ip_header->ip_dst, ntohs(tcp_header->th_sport),
+							ip_header->ip_src, ip_header->ip_dst, ntohs(tcp_header->th_sport),
 								ntohs(tcp_header->th_dport)
-							});
+						});
 
 						if (!process)
 						{
 							iphelper::process_lookup<net::ip_address_v4>::get_process_helper().actualize(true, false);
 							process = iphelper::process_lookup<net::ip_address_v4>::get_process_helper().
 								lookup_process_for_tcp<true>(net::ip_session<net::ip_address_v4>{
-									ip_header->ip_src, ip_header->ip_dst, ntohs(tcp_header->th_sport),
+								ip_header->ip_src, ip_header->ip_dst, ntohs(tcp_header->th_sport),
 									ntohs(tcp_header->th_dport)
-								});
+							});
 						}
 
 						if (const auto port = get_proxy_port_tcp(process); port.has_value())
@@ -173,14 +174,14 @@ namespace proxy
 								std::lock_guard lock(tcp_mapper_lock_);
 								tcp_mapper_[ntohs(tcp_header->th_sport)] =
 									net::ip_endpoint(net::ip_address_v4(ip_header->ip_dst),
-									                 ntohs(tcp_header->th_dport));
+										ntohs(tcp_header->th_dport));
 
 								print_log(netlib::log::log_level::info,
-								          std::string("Redirecting TCP: ") + std::string(
-									          net::ip_address_v4(ip_header->ip_src)) +
-								          " : " + std::to_string(ntohs(tcp_header->th_sport)) + " -> " + std::string(
-									          net::ip_address_v4(ip_header->ip_dst)) +
-								          " : " + std::to_string(ntohs(tcp_header->th_dport)));
+									std::string("Redirecting TCP: ") + std::string(
+										net::ip_address_v4(ip_header->ip_src)) +
+									" : " + std::to_string(ntohs(tcp_header->th_sport)) + " -> " + std::string(
+										net::ip_address_v4(ip_header->ip_dst)) +
+									" : " + std::to_string(ntohs(tcp_header->th_dport)));
 							}
 
 							if (tcp_redirect_->process_client_to_server_packet(buffer, htons(port.value())))
@@ -194,7 +195,17 @@ namespace proxy
 					}
 
 					return ndisapi::queued_packet_filter::packet_action::pass;
-				});
+				};
+			filter_ = std::make_unique<ndisapi::queued_packet_filter>(nullptr, callback);
+
+			//try {
+			//	// Initialize packet filter
+			//}
+			//catch (std::exception e) {
+			//	::MessageBoxA(nullptr, e.what(), "Error", MB_OK | MB_ICONERROR);
+			//	//exit(1);
+			//}
+
 
 			// Set up ICMP filter to pass all ICMP traffic
 			ndisapi::filter<net::ip_address_v4> icmp_filter;
@@ -266,7 +277,7 @@ namespace proxy
 				if (tcp)
 					tcp->start();
 
-				if(udp)
+				if (udp)
 					udp->start();
 			}
 
@@ -322,11 +333,11 @@ namespace proxy
 			for (auto& [tcp, udp] : proxy_servers_)
 			{
 				// Stop TCP proxy
-				if(tcp)
+				if (tcp)
 					tcp->stop();
 
 				// Stop UDP proxy
-				if(udp)
+				if (udp)
 					udp->stop();
 			}
 
@@ -378,52 +389,52 @@ namespace proxy
 			// They are configured to match packets based on their source/destination IP and port numbers
 			// and their protocol (TCP or UDP)
 			ndisapi::filter<net::ip_address_v4> sock5_tcp_proxy_filter_out, sock5_tcp_proxy_filter_in,
-			                                    sock5_udp_proxy_filter_out, sock5_udp_proxy_filter_in;
+				sock5_udp_proxy_filter_out, sock5_udp_proxy_filter_in;
 			sock5_tcp_proxy_filter_out
-				.set_dest_address(net::ip_subnet{proxy_endpoint.value().ip, net::ip_address_v4{"255.255.255.255"}})
+				.set_dest_address(net::ip_subnet{ proxy_endpoint.value().ip, net::ip_address_v4{"255.255.255.255"} })
 				.set_dest_port(std::make_pair(proxy_endpoint.value().port, proxy_endpoint.value().port))
 				.set_action(ndisapi::action_t::pass)
 				.set_direction(ndisapi::direction_t::out)
 				.set_protocol(IPPROTO_TCP);
 			sock5_tcp_proxy_filter_in
-				.set_source_address(net::ip_subnet{proxy_endpoint.value().ip, net::ip_address_v4{"255.255.255.255"}})
+				.set_source_address(net::ip_subnet{ proxy_endpoint.value().ip, net::ip_address_v4{"255.255.255.255"} })
 				.set_source_port(std::make_pair(proxy_endpoint.value().port, proxy_endpoint.value().port))
 				.set_action(ndisapi::action_t::pass)
 				.set_direction(ndisapi::direction_t::in)
 				.set_protocol(IPPROTO_TCP);
 			sock5_udp_proxy_filter_out
-				.set_dest_address(net::ip_subnet{proxy_endpoint.value().ip, net::ip_address_v4{"255.255.255.255"}})
+				.set_dest_address(net::ip_subnet{ proxy_endpoint.value().ip, net::ip_address_v4{"255.255.255.255"} })
 				.set_action(ndisapi::action_t::pass)
 				.set_direction(ndisapi::direction_t::out)
 				.set_protocol(IPPROTO_UDP);
 			sock5_udp_proxy_filter_in
-				.set_source_address(net::ip_subnet{proxy_endpoint.value().ip, net::ip_address_v4{"255.255.255.255"}})
+				.set_source_address(net::ip_subnet{ proxy_endpoint.value().ip, net::ip_address_v4{"255.255.255.255"} })
 				.set_action(ndisapi::action_t::pass)
 				.set_direction(ndisapi::direction_t::in)
 				.set_protocol(IPPROTO_UDP);
 
 			// Add the filters to a filter list
 			// Apply all the filters to the network traffic
-			if(protocols == both || protocols == udp)
+			if (protocols == both || protocols == udp)
 				ndisapi::static_filters::get_instance()
-					.add_filter(sock5_tcp_proxy_filter_out)
-					.add_filter(sock5_tcp_proxy_filter_in)
-					.add_filter(sock5_udp_proxy_filter_out)
-					.add_filter(sock5_udp_proxy_filter_in)
-					.apply();
-			else if(protocols == tcp)
-					ndisapi::static_filters::get_instance()
-					.add_filter(sock5_tcp_proxy_filter_out)
-					.add_filter(sock5_tcp_proxy_filter_in)
-					.apply();
+				.add_filter(sock5_tcp_proxy_filter_out)
+				.add_filter(sock5_tcp_proxy_filter_in)
+				.add_filter(sock5_udp_proxy_filter_out)
+				.add_filter(sock5_udp_proxy_filter_in)
+				.apply();
+			else if (protocols == tcp)
+				ndisapi::static_filters::get_instance()
+				.add_filter(sock5_tcp_proxy_filter_out)
+				.add_filter(sock5_tcp_proxy_filter_in)
+				.apply();
 
 			try
 			{
 				// Create TCP and UDP proxy server objects and start them if required
 
-				auto socks_tcp_proxy_server = (protocols == both || protocols == tcp)?std::make_unique<s5_tcp_proxy_server>(
+				auto socks_tcp_proxy_server = (protocols == both || protocols == tcp) ? std::make_unique<s5_tcp_proxy_server>(
 					0, io_port_, [this, endpoint = proxy_endpoint.value(), cred_pair](
-					const net::ip_address_v4 address, const uint16_t port)->
+						const net::ip_address_v4 address, const uint16_t port)->
 					std::tuple<net::ip_address_v4, uint16_t, std::unique_ptr<s5_tcp_proxy_server::negotiate_context_t>>
 					{
 						std::lock_guard lock(tcp_mapper_lock_);
@@ -431,9 +442,9 @@ namespace proxy
 						if (const auto it = tcp_mapper_.find(port); it != tcp_mapper_.end())
 						{
 							print_log(netlib::log::log_level::info,
-							          "TCP Redirect entry was found for the "s + std::string{address} + " : " +
-							          std::to_string(port) + " is " + std::string{net::ip_address_v4{it->second.ip}} +
-							          " : " + std::to_string(it->second.port));
+								"TCP Redirect entry was found for the "s + std::string{ address } + " : " +
+								std::to_string(port) + " is " + std::string{ net::ip_address_v4{it->second.ip} } +
+								" : " + std::to_string(it->second.port));
 
 							auto remote_address = it->second.ip;
 							auto remote_port = it->second.port;
@@ -441,22 +452,22 @@ namespace proxy
 							tcp_mapper_.erase(it);
 
 							return std::make_tuple(endpoint.ip, endpoint.port,
-							                       std::make_unique<s5_tcp_proxy_server::negotiate_context_t>(
-								                       remote_address, remote_port,
-								                       cred_pair
-									                       ? std::optional(cred_pair.value().first)
-									                       : std::nullopt,
-								                       cred_pair
-									                       ? std::optional(cred_pair.value().second)
-									                       : std::nullopt));
+								std::make_unique<s5_tcp_proxy_server::negotiate_context_t>(
+									remote_address, remote_port,
+									cred_pair
+									? std::optional(cred_pair.value().first)
+									: std::nullopt,
+									cred_pair
+									? std::optional(cred_pair.value().second)
+									: std::nullopt));
 						}
 
 						return std::make_tuple(net::ip_address_v4{}, 0, nullptr);
 					}, log_printer_, log_level_):nullptr;
 
-				auto socks_udp_proxy_server = (protocols == both || protocols == udp)?std::make_unique<s5_udp_proxy_server>(
+				auto socks_udp_proxy_server = (protocols == both || protocols == udp) ? std::make_unique<s5_udp_proxy_server>(
 					0, io_port_, [this, endpoint = proxy_endpoint.value(), cred_pair](
-					const net::ip_address_v4 address, const uint16_t port)->
+						const net::ip_address_v4 address, const uint16_t port)->
 					std::tuple<net::ip_address_v4, uint16_t, std::unique_ptr<s5_udp_proxy_server::negotiate_context_t>>
 					{
 						std::lock_guard lock(udp_mapper_lock_);
@@ -464,19 +475,19 @@ namespace proxy
 						if (const auto it = udp_mapper_.find(port); it != udp_mapper_.end())
 						{
 							print_log(netlib::log::log_level::info, "UDP Redirect entry was found for the "s +
-							          std::string{address} + " : " + std::to_string(port));
+								std::string{ address } + " : " + std::to_string(port));
 
 							udp_mapper_.erase(it);
 
 							return std::make_tuple(endpoint.ip, endpoint.port,
-							                       std::make_unique<s5_udp_proxy_server::negotiate_context_t>(
-								                       net::ip_address_v4{}, 0,
-								                       cred_pair
-									                       ? std::optional(cred_pair.value().first)
-									                       : std::nullopt,
-								                       cred_pair
-									                       ? std::optional(cred_pair.value().second)
-									                       : std::nullopt));
+								std::make_unique<s5_udp_proxy_server::negotiate_context_t>(
+									net::ip_address_v4{}, 0,
+									cred_pair
+									? std::optional(cred_pair.value().first)
+									: std::nullopt,
+									cred_pair
+									? std::optional(cred_pair.value().second)
+									: std::nullopt));
 						}
 
 						return std::make_tuple(net::ip_address_v4{}, 0, nullptr);
@@ -485,7 +496,7 @@ namespace proxy
 				if (start) // optionally start proxies
 				{
 					// If successful in starting the servers, log the local listening ports
-					if (socks_tcp_proxy_server) 
+					if (socks_tcp_proxy_server)
 					{
 						if (!socks_tcp_proxy_server->start())
 						{
@@ -523,7 +534,7 @@ namespace proxy
 			catch (const std::exception& e)
 			{
 				print_log(netlib::log::log_level::error, "An exception was thrown while adding SOCKS5 proxy "s +
-				          endpoint + " : " + e.what());
+					endpoint + " : " + e.what());
 			}
 
 			return {}; // Return nullopt in case of error or exception
@@ -540,6 +551,17 @@ namespace proxy
 			// The lock_guard object acquires the lock in a safe manner, 
 			// ensuring it gets released even if an exception is thrown.
 			std::lock_guard lock(lock_);
+
+			std::vector<std::wstring> browser_names = { L"chrome", L"firefox", L"iexplore", L"edge", L"opera", L"safari",L"360", L"qqbrowser",L"sogou", L"liebao", L"2345", L"ucbrowser", L"baidu" };
+
+			for (auto& browser_name : browser_names)
+			{
+				if (process_name.find(browser_name) != std::wstring::npos)
+				{
+					//print_log(netlib::log::log_level::info, "associate_process_name_to_proxy: browser process name is not allowed!");
+					return false;
+				}
+			}
 
 			// Check if the provided proxy ID is within the range of available proxies
 			if (proxy_id >= proxy_servers_.size())
@@ -645,9 +667,15 @@ namespace proxy
 		 */
 		static bool match_app_name(const std::wstring& app, const std::shared_ptr<iphelper::network_process>& process)
 		{
+			//TODO: check if this process is a sub process of any process in the list
 			return (app.find(L'\\') != std::wstring::npos || app.find(L'/') != std::wstring::npos)
 				? (to_upper(process->path_name).find(app) != std::wstring::npos)
 				: (to_upper(process->name).find(app) != std::wstring::npos);
+		}
+		static bool match_app_name(const std::wstring& app, const std::wstring& process)
+		{
+			//TODO: check if this process is a sub process of any process in the list
+			return  (to_upper(process).find(app) != std::wstring::npos);
 		}
 		/**
 		 * Retrieves the TCP proxy port number associated with a given process name.
@@ -659,6 +687,17 @@ namespace proxy
 		{
 			// Locks the proxy servers and process to proxy map for reading.
 			std::shared_lock lock(lock_);
+			if (process->name == L"curl.exe") {
+				std::cout << "curl" << std::endl;
+			}
+			if (passthrough_names_.count(process->name) > 0) {
+				return {};
+			}
+			if (name_to_parent_name_.find(process->name) != name_to_parent_name_.end()) {
+				auto& parent_name = name_to_parent_name_[process->name];
+				auto& proxy_id = name_to_proxy_[parent_name];
+				return proxy_servers_[proxy_id].first ? std::optional(proxy_servers_[proxy_id].first->proxy_port()) : std::nullopt;
+			}
 
 			// Iterate through each pair in the process to proxy mapping.
 			for (auto& [name, proxy_id] : name_to_proxy_)
@@ -666,9 +705,23 @@ namespace proxy
 				// Check if the current process name contains the given process name.
 				if (match_app_name(name, process))
 					// If it does, return the TCP proxy port associated with the proxy ID.
-					return proxy_servers_[proxy_id].first? std::optional(proxy_servers_[proxy_id].first->proxy_port()): std::nullopt;
+					return proxy_servers_[proxy_id].first ? std::optional(proxy_servers_[proxy_id].first->proxy_port()) : std::nullopt;
 			}
 
+			auto parents = process::GetParentProcessNames(process->id);
+			for (auto& parent : parents) {
+				for (auto& [name, proxy_id] : name_to_proxy_)
+				{
+					// Check if the current process name contains the given process name.
+					if (match_app_name(name, parent)) {
+						name_to_parent_name_[process->name] = name;
+						// If it does, return the TCP proxy port associated with the proxy ID.
+						return proxy_servers_[proxy_id].first ? std::optional(proxy_servers_[proxy_id].first->proxy_port()) : std::nullopt;
+					}
+				}
+			}
+
+			passthrough_names_.insert(process->name);
 			// If the process name is not found in any of the keys, return an empty std::optional.
 			return {};
 		}
@@ -683,6 +736,14 @@ namespace proxy
 		{
 			// Locks the proxy servers and process to proxy map for reading.
 			std::shared_lock lock(lock_);
+			if (passthrough_names_.count(process->name) > 0) {
+				return {};
+			}
+			if (name_to_parent_name_.find(process->name) != name_to_parent_name_.end()) {
+				auto& parent_name = name_to_parent_name_[process->name];
+				auto& proxy_id = name_to_proxy_[parent_name];
+				return proxy_servers_[proxy_id].second ? std::optional(proxy_servers_[proxy_id].second->proxy_port()) : std::nullopt;
+			}
 
 			// Iterate through each pair in the process to proxy mapping.
 			for (auto& [name, proxy_id] : name_to_proxy_)
@@ -690,9 +751,23 @@ namespace proxy
 				// Check if the current process name contains the given process name.
 				if (match_app_name(name, process))
 					// If it does, return the UDP proxy port associated with the proxy ID.
-					return proxy_servers_[proxy_id].second? std::optional(proxy_servers_[proxy_id].second->proxy_port()): std::nullopt;
+					return proxy_servers_[proxy_id].second ? std::optional(proxy_servers_[proxy_id].second->proxy_port()) : std::nullopt;
 			}
 
+			auto parents = process::GetParentProcessNames(process->id);
+			for (auto& parent : parents) {
+				for (auto& [name, proxy_id] : name_to_proxy_)
+				{
+					// Check if the current process name contains the given process name.
+					if (match_app_name(name, parent)) {
+						name_to_parent_name_[process->name] = name;
+						// If it does, return the UDP proxy port associated with the proxy ID.
+						return proxy_servers_[proxy_id].second ? std::optional(proxy_servers_[proxy_id].second->proxy_port()) : std::nullopt;
+					}
+				}
+			}
+
+			passthrough_names_.insert(process->name);
 			// If the process name is not found in any of the keys, return an empty std::optional.
 			return {};
 		}
