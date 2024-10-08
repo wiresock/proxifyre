@@ -32,6 +32,7 @@ you need edit the `settings_data.json` for your own socks5 proxy server
 }
 ```
 
+The GUI project is maintained by Sun Zhaozheng.
 ------------
 # ProxiFyre: SOCKS5 Proxifier for Windows
 
