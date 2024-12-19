@@ -59,14 +59,14 @@ jobs:
         with:
           type: 'zip'
           filename: 'ProxiFyre-${{ github.ref_name }}-${{ matrix.platform }}.zip'
-          directory: 'bin\exe\${{ matrix.platform }}\${{ matrix.build_configuration }}'
+          directory: 'bin\\exe\\${{ matrix.platform }}\\${{ matrix.build_configuration }}'
           exclusions: '*.pdb'
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: ${{ matrix.platform }}-artifact
-          path: 'bin\exe\${{ matrix.platform }}\${{ matrix.build_configuration }}\ProxiFyre-${{ github.ref_name }}-${{ matrix.platform }}.zip'
+          path: 'bin\\exe\\${{ matrix.platform }}\\${{ matrix.build_configuration }}\\ProxiFyre-${{ github.ref_name }}-${{ matrix.platform }}.zip'
 
   upload-release:
     if: ${{ always() }}
@@ -77,7 +77,7 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Download artifacts
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v3
         with:
           path: 'artifacts'
 
