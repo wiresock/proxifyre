@@ -22,8 +22,8 @@ foreach ($file in $files) {
 
     # Sign the executable inside the extracted folder
     $exePath = $extractPath + "/ProxiFyre.exe"
-    & signtool sign /fd sha1 /t http://timestamp.digicert.com /n "IP SMIRNOV VADIM VALERIEVICH" $exePath
-    & signtool sign /as /td sha256 /fd sha256 /tr http://timestamp.digicert.com /n "IP SMIRNOV VADIM VALERIEVICH" $exePath
+    & signtool sign /fd sha1 /t http://timestamp.digicert.com /n "The Anti-Cloud Corporation" $exePath
+    & signtool sign /as /td sha256 /fd sha256 /tr http://timestamp.digicert.com /n "The Anti-Cloud Corporation" $exePath
 
     # Change to the directory of the folder to be zipped
     Push-Location $extractPath
