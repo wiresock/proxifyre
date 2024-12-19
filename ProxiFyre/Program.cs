@@ -1,12 +1,12 @@
-﻿using System;
+﻿using Newtonsoft.Json;
+using NLog;
+using NLog.Config;
+using Socksifier;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using Newtonsoft.Json;
-using NLog;
-using NLog.Config;
-using Socksifier;
 using Topshelf;
 using LogLevel = Socksifier.LogLevel;
 
@@ -68,7 +68,7 @@ namespace ProxiFyre
             _socksify.Start();
 
             // Inform user that the application is running
-            if(_logLevel != LogLevel.None)
+            if (_logLevel != LogLevel.None)
                 _logger.Info("ProxiFyre Service is running...");
         }
 
@@ -159,7 +159,7 @@ namespace ProxiFyre
                     s.WhenStarted(tc => tc.Start());
                     s.WhenStopped(tc => tc.Stop());
                 });
-                
+
                 x.RunAsLocalSystem();
 
                 x.SetDescription("ProxiFyre - SOCKS5 Proxifier Service");
