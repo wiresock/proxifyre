@@ -393,7 +393,8 @@ namespace net
                 return false;
 
             // All link-local addresses have the next 54 bits set to 0
-            for (int i = 2; i < 8; i++) {
+            for (int i = 2; i < 8; i++)
+            {
                 if (u.Byte[i] != 0)
                     return false;
             }

@@ -51,8 +51,8 @@ END
 //
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 3,4,3,1
- PRODUCTVERSION 3,4,3,1
+ FILEVERSION 3,6,1,1
+ PRODUCTVERSION 3,6,1,1
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -69,12 +69,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "NT Kernel Resources"
             VALUE "FileDescription", "Windows Packet Filter user interface library"
-            VALUE "FileVersion", "3.4.3.1"
+            VALUE "FileVersion", "3.6.1.1"
             VALUE "InternalName", "ndisapi.dll"
-            VALUE "LegalCopyright", "Copyright © NT KERNEL 2000-2023"
+            VALUE "LegalCopyright", "Copyright © NT KERNEL 2000-2024"
             VALUE "OriginalFilename", "ndisapi.dll"
             VALUE "ProductName", "Windows Packet Filter Kit"
-            VALUE "ProductVersion", "3.4.3.1"
+            VALUE "ProductVersion", "3.6.1.1"
         END
     END
     BLOCK "VarFileInfo"
