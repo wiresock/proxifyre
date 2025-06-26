@@ -884,10 +884,12 @@ namespace proxy
             std::thread restart_async([this]()
             {
                 bool update_result;
+
+                std::lock_guard internal_lock(lock_);
+
                 // Stop the current filter.
                 filter_->stop_filter();
                 {
-                    std::lock_guard internal_lock(lock_);
                     // Update the network configuration.
                     update_result = update_network_configuration();
                 }
