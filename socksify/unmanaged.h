@@ -31,6 +31,7 @@
 #include <queue>
 #include <regex>
 #include <syncstream>
+#include <chrono>
 #include <gsl/gsl>
 
 #include "../include/common.h"
