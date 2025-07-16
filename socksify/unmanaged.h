@@ -32,12 +32,14 @@
 #include <regex>
 #include <syncstream>
 #include <chrono>
+#include <cassert>
 #include <gsl/gsl>
 
 #include "../include/common.h"
 #include "../include/ndisapi.h"
-#include "../netlib/src/log/log.h"
 #include "../netlib/src/tools/generic.h"
+#include "../netlib/src/tools/strings.h"
+#include "../netlib/src/log/log.h"
 #include "../netlib/src/iphlp.h"
 #include "../netlib/src/winsys/object.h"
 #include "../netlib/src/winsys/event.h"
@@ -51,10 +53,11 @@
 #include "../netlib/src/iphelper/network_adapter_info.h"
 #include "../netlib/src/ndisapi/network_adapter.h"
 #include "../netlib/src/ndisapi/intermediate_buffer.h"
-#include "../netlib/src/ndisapi/queued_packet_filter.h"
+#include "../netlib/src/ndisapi/intermediate_buffer_pool.h"
+#include "../netlib/src/ndisapi/queued_multi_interface_packet_filter.h"
 #include "../netlib/src/ndisapi/static_filters.h"
 #include "../netlib/src/pcap/pcap.h"
-#include "../netlib/src/pcap/pcap_file_storage.h"
+#include "../netlib/src/pcap/pcap_stream_logger.h"
 #include "../netlib/src/ndisapi/tcp_local_redirect.h"
 #include "../netlib/src/proxy/proxy_common.h"
 #include "../netlib/src/proxy/socks5_common.h"

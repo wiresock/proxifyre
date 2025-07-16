@@ -115,6 +115,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <OutDir>$(SolutionDir)bin\dll\$(Platform)\$(Configuration)\</OutDir>
     <LinkIncremental>true</LinkIncremental>
+    <RunCodeAnalysis>true</RunCodeAnalysis>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <OutDir>$(SolutionDir)bin\dll\$(Platform)\$(Configuration)\</OutDir>
@@ -237,10 +238,11 @@
     <ClInclude Include="..\netlib\src\iphelper\network_adapter_info.h" />
     <ClInclude Include="..\netlib\src\iphelper\process_lookup.h" />
     <ClInclude Include="..\netlib\src\log\log.h" />
+    <ClInclude Include="..\netlib\src\ndisapi\intermediate_buffer_pool.h" />
+    <ClInclude Include="..\netlib\src\ndisapi\queued_multi_interface_packet_filter.h" />
     <ClInclude Include="..\netlib\src\ndisapi\static_filters.h" />
     <ClInclude Include="..\netlib\src\ndisapi\tcp_local_redirect.h" />
     <ClInclude Include="..\netlib\src\ndisapi\network_adapter.h" />
-    <ClInclude Include="..\netlib\src\ndisapi\queued_packet_filter.h" />
     <ClInclude Include="..\netlib\src\ndisapi\socks5_udp_local_redirect.h" />
     <ClInclude Include="..\netlib\src\net\ipv6_helper.h" />
     <ClInclude Include="..\netlib\src\net\ip_address.h" />
@@ -248,7 +250,7 @@
     <ClInclude Include="..\netlib\src\net\ip_subnet.h" />
     <ClInclude Include="..\netlib\src\net\mac_address.h" />
     <ClInclude Include="..\netlib\src\pcap\pcap.h" />
-    <ClInclude Include="..\netlib\src\pcap\pcap_file_storage.h" />
+    <ClInclude Include="..\netlib\src\pcap\pcap_stream_logger.h" />
     <ClInclude Include="..\netlib\src\proxy\packet_pool.h" />
     <ClInclude Include="..\netlib\src\proxy\proxy_common.h" />
     <ClInclude Include="..\netlib\src\proxy\socks5_tcp_proxy_socket.h" />
@@ -259,6 +261,7 @@
     <ClInclude Include="..\netlib\src\proxy\tcp_proxy_socket.h" />
     <ClInclude Include="..\netlib\src\proxy\socks5_local_udp_proxy_server.h" />
     <ClInclude Include="..\netlib\src\tools\generic.h" />
+    <ClInclude Include="..\netlib\src\tools\strings.h" />
     <ClInclude Include="..\netlib\src\winsys\event.h" />
     <ClInclude Include="..\netlib\src\winsys\io_completion_port.h" />
     <ClInclude Include="..\netlib\src\winsys\object.h" />

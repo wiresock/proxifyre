@@ -32,7 +32,7 @@ namespace net
             // Check if this IPv6 packet
             if (ip_header->ip6_v != 6)
             {
-                return {nullptr, next_proto};
+                return { nullptr, next_proto };
             }
 
             // Find the first header
@@ -47,35 +47,35 @@ namespace net
                     - sizeof(
                         ipv6ext))
                 {
-                    return {nullptr, next_proto};
+                    return { nullptr, next_proto };
                 }
 
                 switch (next_proto)
                 {
-                // Fragmentation
+                    // Fragmentation
                 case IPPROTO_FRAGMENT:
+                {
+                    const auto frag = reinterpret_cast<const ipv6ext_frag*>(next_header);
+
+                    // If this isn't the FIRST fragment, there won't be a TCP/UDP header anyway
+                    if ((frag->ip6_offlg & 0xFC) != 0)
                     {
-                        const auto frag = reinterpret_cast<const ipv6ext_frag*>(next_header);
-
-                        // If this isn't the FIRST fragment, there won't be a TCP/UDP header anyway
-                        if ((frag->ip6_offlg & 0xFC) != 0)
-                        {
-                            // The offset is non-zero
-                            next_proto = frag->ip6_next;
-
-                            return {nullptr, next_proto};
-                        }
-
-                        // Otherwise it's either an entire segment or the first fragment
+                        // The offset is non-zero
                         next_proto = frag->ip6_next;
 
-                        // Return next octet following the fragmentation header
-                        next_header = reinterpret_cast<const ipv6ext*>(reinterpret_cast<const char*>(next_header) +
-                            sizeof(
-                                ipv6ext_frag));
-
-                        return {const_cast<void*>(static_cast<const void*>(next_header)), next_proto};
+                        return { nullptr, next_proto };
                     }
+
+                    // Otherwise it's either an entire segment or the first fragment
+                    next_proto = frag->ip6_next;
+
+                    // Return next octet following the fragmentation header
+                    next_header = reinterpret_cast<const ipv6ext*>(reinterpret_cast<const char*>(next_header) +
+                        sizeof(
+                            ipv6ext_frag));
+
+                    return { const_cast<void*>(static_cast<const void*>(next_header)), next_proto };
+                }
 
                 // Headers we just skip over
                 case IPPROTO_HOPOPTS:
@@ -83,9 +83,9 @@ namespace net
                 case IPPROTO_DSTOPTS:
                     next_proto = next_header->ip6_next;
 
-                // As per RFC 2460 : ip6ext_len specifies the extended
-                // header length, in units of 8 octets *not including* the
-                // first 8 octets.
+                    // As per RFC 2460 : ip6ext_len specifies the extended
+                    // header length, in units of 8 octets *not including* the
+                    // first 8 octets.
 
                     next_header = reinterpret_cast<const ipv6ext*>(reinterpret_cast<const char*>(next_header) + 8 +
                         static_cast<ULONG_PTR>(next_header
@@ -94,7 +94,7 @@ namespace net
 
                 default:
                     // No more IPv6 headers to skip
-                    return {const_cast<void*>(static_cast<const void*>(next_header)), next_proto};
+                    return { const_cast<void*>(static_cast<const void*>(next_header)), next_proto };
                 }
             }
         }
@@ -134,21 +134,21 @@ namespace net
             }
 
             if (const auto checksum = tcp_udp_v6_checksum(
-                    &ipv6_header->ip6_src,
-                    &ipv6_header->ip6_dst,
-                    protocol,
-                    header,
-                    packet->m_Length - static_cast<uint32_t>(static_cast<uint8_t*>(header) - packet->m_IBuffer));
+                &ipv6_header->ip6_src,
+                &ipv6_header->ip6_dst,
+                protocol,
+                header,
+                packet->m_Length - static_cast<uint32_t>(static_cast<uint8_t*>(header) - packet->m_IBuffer));
                 protocol
                 == IPPROTO_TCP)
             {
                 tcp_header->th_sum = checksum;
             }
-            else if (protocol == IPPROTO_UDP)
+            else if (protocol == IPPROTO_UDP && udp_header)
             {
                 udp_header->th_sum = checksum;
             }
-            else if (protocol == IPPROTO_ICMPV6)
+            else if (protocol == IPPROTO_ICMPV6 && icmp_header)
             {
                 icmp_header->checksum = checksum;
             }
@@ -213,7 +213,7 @@ namespace net
         /// <param name="len">length of the TCP/UDP packet including header</param>
         /// <returns>64 bit checksum value</returns>
         static uint64_t tcp_udp_v6_header_checksum_partial(const in6_addr* src_ip, const in6_addr* dst_ip,
-                                                           const uint8_t protocol, const uint32_t len)
+            const uint8_t protocol, const uint32_t len)
         {
             /* The IPv6 pseudo-header is defined in RFC 2460, Section 8.1. */
             struct ipv6_pseudo_header_t
@@ -258,7 +258,7 @@ namespace net
         /// <returns>calculated checksum in network order</returns>
         // ********************************************************************************
         static uint16_t tcp_udp_v6_checksum(const struct in6_addr* src_ip, const struct in6_addr* dst_ip,
-                                            const uint8_t protocol, const void* payload, const uint32_t len)
+            const uint8_t protocol, const void* payload, const uint32_t len)
         {
             auto sum = tcp_udp_v6_header_checksum_partial(src_ip, dst_ip, protocol, len);
             sum = ip_checksum_partial(payload, len, sum);

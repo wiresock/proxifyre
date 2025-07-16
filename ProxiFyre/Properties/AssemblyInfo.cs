@@ -5,11 +5,11 @@ using System.Runtime.InteropServices;
 // set of attributes. Change these attribute values to modify the information
 // associated with an assembly.
 [assembly: AssemblyTitle("ProxiFyre")]
-[assembly: AssemblyDescription("")]
+[assembly: AssemblyDescription("ProxiFyre – A fast, flexible proxy engine for traffic redirection, filtering, and secure tunneling, powered by the Windows Packet Filter driver.")]
 [assembly: AssemblyConfiguration("")]
-[assembly: AssemblyCompany("")]
+[assembly: AssemblyCompany("NT KERNEL")]
 [assembly: AssemblyProduct("ProxiFyre")]
-[assembly: AssemblyCopyright("Copyright NT KERNEL© 2023")]
+[assembly: AssemblyCopyright("Copyright NT KERNEL© 2022-2025")]
 [assembly: AssemblyTrademark("ProxiFyre")]
 [assembly: AssemblyCulture("")]
 

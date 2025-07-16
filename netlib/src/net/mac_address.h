@@ -19,7 +19,7 @@ namespace net
         /// <summary>
         /// MAC address storage
         /// </summary>
-        std::array<unsigned char, eth_address_length> data{0};
+        std::array<unsigned char, eth_address_length> data{ 0 };
         using size_type = std::array<unsigned char, eth_address_length>::size_type;
 
         /// <summary>
@@ -119,17 +119,17 @@ namespace net
             std::basic_ostringstream<T> oss;
             oss << std::hex
                 << std::uppercase
-                << std::setfill(T{'0'}) << std::setw(2)
+                << std::setfill(T{ '0' }) << std::setw(2)
                 << static_cast<unsigned>(data.at(0))
-                << std::setfill(T{'0'}) << std::setw(2)
+                << std::setfill(T{ '0' }) << std::setw(2)
                 << static_cast<unsigned>(data.at(1))
-                << std::setfill(T{'0'}) << std::setw(2)
+                << std::setfill(T{ '0' }) << std::setw(2)
                 << static_cast<unsigned>(data.at(2))
-                << std::setfill(T{'0'}) << std::setw(2)
+                << std::setfill(T{ '0' }) << std::setw(2)
                 << static_cast<unsigned>(data.at(3))
-                << std::setfill(T{'0'}) << std::setw(2)
+                << std::setfill(T{ '0' }) << std::setw(2)
                 << static_cast<unsigned>(data.at(4))
-                << std::setfill(T{'0'}) << std::setw(2)
+                << std::setfill(T{ '0' }) << std::setw(2)
                 << static_cast<unsigned>(data.at(5));
             return oss.str();
         }

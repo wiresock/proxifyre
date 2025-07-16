@@ -113,7 +113,7 @@ namespace net
             {
                 auto ip_subnet_mask_ptr = reinterpret_cast<const ip6_addr*>(&mask);
                 return static_cast<uint8_t>(std::bitset<32>(ip_subnet_mask_ptr->u.dword[0]).count() + std::bitset<
-                        32>(ip_subnet_mask_ptr->u.dword[1]).count() +
+                    32>(ip_subnet_mask_ptr->u.dword[1]).count() +
                     std::bitset<32>(ip_subnet_mask_ptr->u.dword[2]).count() + std::bitset<32>(ip_subnet_mask_ptr
                         ->u.dword[3]).count());
             }
@@ -161,7 +161,7 @@ namespace net
                 auto ip_subnet_ptr = reinterpret_cast<const ip6_addr*>(this);
 
                 if (auto ip_subnet_mask_ptr = reinterpret_cast<const ip6_addr*>(&mask); ((ip_ptr->u.qword[0] &
-                        ip_subnet_mask_ptr->u.qword[0]) == (ip_subnet_ptr->u.qword[0] &
+                    ip_subnet_mask_ptr->u.qword[0]) == (ip_subnet_ptr->u.qword[0] &
                         ip_subnet_mask_ptr->u.qword[0])) &&
                     ((ip_ptr->u.qword[1] & ip_subnet_mask_ptr->u.qword[1]) == (ip_subnet_ptr->u.qword[1] &
                         ip_subnet_mask_ptr->u.qword[1])))
@@ -174,7 +174,7 @@ namespace net
 
                 if (const auto ip_subnet_mask_ptr = reinterpret_cast<const in_addr*>(&mask); (ip_ptr->S_un.S_addr &
                     ip_subnet_mask_ptr->S_un.S_addr) == (ip_subnet_ptr->S_un.S_addr &
-                    ip_subnet_mask_ptr->S_un.S_addr))
+                        ip_subnet_mask_ptr->S_un.S_addr))
                     return true;
             }
 
@@ -227,7 +227,7 @@ namespace net
                         {
                             if (mask <= 128)
                             {
-                                uint8_t address_mask[ip_address_v6::ipv6_address_max_length] = {0};
+                                uint8_t address_mask[ip_address_v6::ipv6_address_max_length] = { 0 };
 
                                 const auto maxed_bytes = mask / 8;
                                 auto last_byte_bits = mask % 8;

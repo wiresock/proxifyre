@@ -17,7 +17,7 @@ namespace winsys
         /// Constructs safe_event from the even object handle
         /// </summary>
         // ReSharper disable once CppParameterMayBeConst
-        explicit safe_event(HANDLE handle = nullptr) noexcept: safe_object_handle(handle)
+        explicit safe_event(HANDLE handle = nullptr) noexcept : safe_object_handle(handle)
         {
         }
 
@@ -31,7 +31,7 @@ namespace winsys
         /// </summary>
         /// <param name="other">Object instance to move from</param>
         safe_event(safe_event&& other) noexcept
-            : safe_object_handle{std::move(other)}
+            : safe_object_handle{ std::move(other) }
         {
         }
 

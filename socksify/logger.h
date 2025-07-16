@@ -1,20 +1,31 @@
 #pragma once
 
+/**
+ * @brief Thread-safe singleton logger for storing and managing log messages and events.
+ *
+ * The logger class provides a thread-safe mechanism for logging messages and events,
+ * storing them in an internal buffer with a configurable limit. It supports log event
+ * notification via a Windows event handle and provides a custom stream buffer for
+ * integration with standard C++ streams.
+ */
 class logger
 {
-    static constexpr auto default_log_limit = 100;
-    log_storage_mx_t log_storage_;
-    std::mutex log_storage_lock_;
-    size_t log_limit_{default_log_limit};
-    HANDLE log_event_{nullptr};
+    static constexpr auto default_log_limit = 100; ///< Default maximum number of log entries to keep.
+    log_storage_mx_t log_storage_;                 ///< Container for storing log entries.
+    std::mutex log_storage_lock_;                  ///< Mutex for synchronizing access to log storage.
+    size_t log_limit_{ default_log_limit };          ///< Maximum number of log entries before signaling event.
+    HANDLE log_event_{ nullptr };                    ///< Windows event handle for log notifications.
 
     /**
      * @brief Custom stream buffer for logging.
+     *
+     * This stream buffer allows the logger to be used as a standard output stream.
+     * Each line written to the stream is added to the logger's storage.
      */
     class log_streambuf final : public std::streambuf
     {
-        logger* log_;
-        std::string buffer_;
+        logger* log_;         ///< Pointer to the parent logger.
+        std::string buffer_;  ///< Buffer for accumulating characters until a newline.
 
     protected:
         /**
@@ -46,8 +57,8 @@ class logger
         }
     };
 
-    log_streambuf streambuf_;
-    std::ostream log_stream_;
+    log_streambuf streambuf_; ///< Stream buffer for log output.
+    std::ostream log_stream_; ///< Output stream using the custom stream buffer.
 
     /**
      * @brief Private constructor to enforce singleton pattern.
@@ -70,6 +81,9 @@ public:
     /**
      * @brief Logs a message.
      * @param log The message to log.
+     *
+     * The message is timestamped and added to the log storage. If the log storage exceeds
+     * the configured limit and a log event handle is set, the event is signaled.
      */
     void log_printer(const char* log)
     {
@@ -89,6 +103,10 @@ public:
     /**
      * @brief Logs an event.
      * @param log_event The event to log.
+     *
+     * Supported event types are address_error, connected, and disconnected.
+     * The event is timestamped and added to the log storage. If the log storage exceeds
+     * the configured limit and a log event handle is set, the event is signaled.
      */
     void log_event(const event_mx log_event)
     {
@@ -99,16 +117,16 @@ public:
         case event_type_mx::address_error:
         case event_type_mx::connected:
         case event_type_mx::disconnected:
-            {
-                const auto ms = duration_cast<milliseconds>(
-                    system_clock::now().time_since_epoch()
-                );
+        {
+            const auto ms = duration_cast<milliseconds>(
+                system_clock::now().time_since_epoch()
+            );
 
-                std::lock_guard lock(log_storage_lock_);
+            std::lock_guard lock(log_storage_lock_);
 
-                log_storage_.emplace_back(ms.count(), log_event);
-            }
-            break;
+            log_storage_.emplace_back(ms.count(), log_event);
+        }
+        break;
         }
 
         if (log_event_ && log_storage_.size() > log_limit_)
@@ -116,8 +134,10 @@ public:
     }
 
     /**
-     * @brief Reads the log storage.
-     * @return Optional containing the log storage if not empty.
+     * @brief Reads and clears the log storage.
+     * @return Optional containing the log storage if not empty, otherwise std::nullopt.
+     *
+     * The returned log storage is moved out of the logger, clearing the internal buffer.
      */
     std::optional<log_storage_mx_t> read_log()
     {
@@ -130,7 +150,7 @@ public:
 
     /**
      * @brief Gets the size of the log storage.
-     * @return The size of the log storage.
+     * @return The number of log entries currently stored.
      */
     size_t size()
     {
@@ -141,6 +161,8 @@ public:
     /**
      * @brief Sets the log limit.
      * @param log_limit The new log limit.
+     *
+     * When the number of log entries exceeds this limit, the log event is signaled (if set).
      */
     void set_log_limit(const uint32_t log_limit)
     {
@@ -159,6 +181,8 @@ public:
     /**
      * @brief Sets the log event handle.
      * @param log_event The log event handle.
+     *
+     * The event is signaled when the log storage exceeds the configured limit.
      */
     void set_log_event(HANDLE log_event)
     {
@@ -168,6 +192,8 @@ public:
     /**
      * @brief Gets the log stream.
      * @return Reference to the log stream.
+     *
+     * The returned stream can be used with standard C++ stream operations to log messages.
      */
     std::ostream& get_log_stream()
     {

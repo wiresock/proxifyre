@@ -12,13 +12,30 @@ using LogLevel = Socksifier.LogLevel;
 
 namespace ProxiFyre
 {
-    // Main class for the SOCKS proxy application
+    /// <summary>
+    /// Main class for the SOCKS proxy application.
+    /// Handles service lifecycle, configuration loading, and proxy association.
+    /// </summary>
     public class ProxiFyreService
     {
-        private static readonly Logger _logger = LogManager.GetCurrentClassLogger();
+        /// <summary>
+        /// NLog logger instance for logging service events.
+        /// </summary>
+        private static readonly Logger LoggerInstance = LogManager.GetCurrentClassLogger();
+
+        /// <summary>
+        /// The current log level for the service.
+        /// </summary>
         private static LogLevel _logLevel;
+
+        /// <summary>
+        /// The Socksifier instance used to manage SOCKS5 proxies.
+        /// </summary>
         private Socksifier.Socksifier _socksify;
 
+        /// <summary>
+        /// Starts the ProxiFyre service, loads configuration, and initializes proxies.
+        /// </summary>
         public void Start()
         {
             // Get the current executable path
@@ -60,39 +77,44 @@ namespace ProxiFyre
 
                 foreach (var appName in appSettings.AppNames)
                     // Associate the defined application names to the proxies
-                    if (proxy.ToInt64() != -1 && _socksify.AssociateProcessNameToProxy(appName, proxy) && _logLevel != LogLevel.None)
-                        _logger.Info(
+                    if (proxy.ToInt64() != -1 && _socksify.AssociateProcessNameToProxy(appName, proxy) && _logLevel >= LogLevel.Info)
+                        LoggerInstance.Info(
                             $"Successfully associated {appName} to {appSettings.Socks5ProxyEndpoint} SOCKS5 proxy with protocols {string.Join(", ", appSettings.SupportedProtocols)}!");
             }
 
             _socksify.Start();
 
             // Inform user that the application is running
-            if (_logLevel != LogLevel.None)
-                _logger.Info("ProxiFyre Service is running...");
+            if (_logLevel >= LogLevel.Info)
+                LoggerInstance.Info("ProxiFyre Service is running...");
         }
 
+        /// <summary>
+        /// Stops the ProxiFyre service and disposes of resources.
+        /// </summary>
         public void Stop()
         {
             // Dispose of the Socksifier before exiting
             _socksify.Dispose();
-            if (_logLevel != LogLevel.None)
-                _logger.Info("ProxiFyre Service has stopped.");
+            if (_logLevel >= LogLevel.Info)
+                LoggerInstance.Info("ProxiFyre Service has stopped.");
             LogManager.Shutdown();
         }
 
-        // Method to handle logging events
+        /// <summary>
+        /// Handles logging events from the Socksifier and logs them using NLog.
+        /// </summary>
+        /// <param name="sender">The event sender.</param>
+        /// <param name="e">The log event arguments.</param>
         private static void LogPrinter(object sender, LogEventArgs e)
         {
-            if (_logLevel == LogLevel.None)
-                return;
-
             // Loop through each log entry and log it using NLog
             foreach (var entry in e.Log.Where(entry => entry != null))
             {
+                // Format log entry with ISO 8601 timestamp, event, description, and data.
                 var logMessage =
-                    $"{new DateTime(1970, 1, 1).AddSeconds(entry.TimeStamp / 1000)}::{entry.Event}::{entry.Description}::{entry.Data}";
-                _logger.Info(logMessage);
+                    $"{DateTimeOffset.FromUnixTimeMilliseconds(entry.TimeStamp):u} | Event: {entry.Event} | Description: {entry.Description ?? string.Empty} | Data: {entry.Data}";
+                LoggerInstance.Info(logMessage);
             }
         }
 
@@ -116,21 +138,84 @@ namespace ProxiFyre
         //    ]
         //}
 
+        /// <summary>
+        /// Represents the root configuration settings for ProxiFyre.
+        /// </summary>
         private class ProxiFyreSettings
         {
-            public string LogLevel { get; set; }
-            public List<AppSettings> Proxies { get; set; }
+            /// <summary>
+            /// Initializes a new instance of the <see cref="ProxiFyreSettings"/> class.
+            /// </summary>
+            /// <param name="logLevel">The log level as a string.</param>
+            /// <param name="proxies">The list of proxy application settings.</param>
+            public ProxiFyreSettings(string logLevel, List<AppSettings> proxies)
+            {
+                LogLevel = logLevel;
+                Proxies = proxies;
+            }
+
+            /// <summary>
+            /// Gets the log level for the service.
+            /// </summary>
+            public string LogLevel { get; }
+
+            /// <summary>
+            /// Gets the list of proxy application settings.
+            /// </summary>
+            public List<AppSettings> Proxies { get; }
         }
 
-        private class AppSettings
+        /// <summary>
+        /// Represents the settings for a single proxy and its associated applications.
+        /// </summary>
+        internal class AppSettings
         {
-            public List<string> AppNames { get; set; }
-            public string Socks5ProxyEndpoint { get; set; }
-            public string Username { get; set; }
-            public string Password { get; set; }
-            public List<string> SupportedProtocols { get; set; } // Keep the original list for parsing
+            /// <summary>
+            /// Initializes a new instance of the <see cref="AppSettings"/> class.
+            /// </summary>
+            /// <param name="appNames">List of application names to associate with the proxy.</param>
+            /// <param name="socks5ProxyEndpoint">SOCKS5 proxy endpoint address.</param>
+            /// <param name="username">Username for proxy authentication.</param>
+            /// <param name="password">Password for proxy authentication.</param>
+            /// <param name="supportedProtocols">List of supported protocols (e.g., TCP, UDP).</param>
+            public AppSettings(List<string> appNames, string socks5ProxyEndpoint, string username, string password, List<string> supportedProtocols)
+            {
+                AppNames = appNames;
+                Socks5ProxyEndpoint = socks5ProxyEndpoint;
+                Username = username;
+                Password = password;
+                SupportedProtocols = supportedProtocols;
+            }
 
-            public SupportedProtocolsEnum SupportedProtocolsParse // New property for the enum
+            /// <summary>
+            /// Gets or sets the list of application names to associate with the proxy.
+            /// </summary>
+            public List<string> AppNames { get; set; }
+
+            /// <summary>
+            /// Gets the SOCKS5 proxy endpoint address.
+            /// </summary>
+            public string Socks5ProxyEndpoint { get; }
+
+            /// <summary>
+            /// Gets the username for proxy authentication.
+            /// </summary>
+            public string Username { get; }
+
+            /// <summary>
+            /// Gets the password for proxy authentication.
+            /// </summary>
+            public string Password { get; }
+
+            /// <summary>
+            /// Gets the list of supported protocols (e.g., TCP, UDP).
+            /// </summary>
+            public List<string> SupportedProtocols { get; }
+
+            /// <summary>
+            /// Gets the supported protocols as an enum value.
+            /// </summary>
+            public SupportedProtocolsEnum SupportedProtocolsParse
             {
                 get
                 {
@@ -147,8 +232,14 @@ namespace ProxiFyre
         }
     }
 
+    /// <summary>
+    /// Entry point for the ProxiFyre service application.
+    /// </summary>
     internal class Program
     {
+        /// <summary>
+        /// Main method. Configures and runs the ProxiFyre service using Topshelf.
+        /// </summary>
         private static void Main()
         {
             HostFactory.Run(x =>
@@ -162,7 +253,7 @@ namespace ProxiFyre
 
                 x.RunAsLocalSystem();
 
-                x.SetDescription("ProxiFyre - SOCKS5 Proxifier Service");
+                x.SetDescription("ProxiFyre - SOCKS5 Proxifyre Service");
                 x.SetDisplayName("ProxiFyre Service");
                 x.SetServiceName("ProxiFyreService");
             });

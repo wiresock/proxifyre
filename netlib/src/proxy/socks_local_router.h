@@ -1,55 +1,172 @@
 #pragma once
 namespace proxy
 {
+    /**
+     * @class socks_local_router
+     * @brief Implements a local router for handling SOCKS proxy traffic.
+     *
+     * The socks_local_router class manages TCP and UDP redirection, process-to-proxy mapping,
+     * and dynamic network adapter filtering for transparent proxying. It integrates with
+     * the system's network configuration and logging facilities, and provides mechanisms
+     * for deferred process resolution, packet filtering, and proxy server management.
+     *
+     * Inherits from:
+     * - iphelper::network_config_info<socks_local_router>: For network configuration monitoring and callbacks.
+     * - netlib::log::logger<socks_local_router>: For logging router events and diagnostics.
+     */
     class socks_local_router :
         public iphelper::network_config_info<socks_local_router>,
         public netlib::log::logger<socks_local_router>
     {
+        // Type alias for the log level used by the logger base class.
         using log_level = netlib::log::log_level;
 
-        // Allows the base class 'network_config_info' to access the private CRTP callback
+        /**
+         * @brief Alias for the packet filter type from the ndisapi library.
+         */
+        using packet_filter = ndisapi::queued_multi_interface_packet_filter;
+
+        // Allows the base class 'network_config_info' to access the private CRTP callback.
         friend network_config_info;
 
-        // Definitions of TCP and UDP proxy server types, specialized for IPv4 and SOCKS5
+        /**
+         * @brief Type alias for the SOCKS5 TCP proxy server specialized for IPv4.
+         */
         using s5_tcp_proxy_server = tcp_proxy_server<socks5_tcp_proxy_socket<net::ip_address_v4>>;
+
+        /**
+         * @brief Type alias for the SOCKS5 UDP proxy server specialized for IPv4.
+         */
         using s5_udp_proxy_server = socks5_local_udp_proxy_server<socks5_udp_proxy_socket<net::ip_address_v4>>;
 
-        // Stores a mapping of TCP ports to their corresponding IP endpoints
+        /**
+         * @brief Stores a mapping of TCP ports to their corresponding IP endpoints.
+         */
         std::unordered_map<uint16_t, net::ip_endpoint<net::ip_address_v4>> tcp_mapper_;
-        // Stores the set of UDP ports being mapped
+
+        /**
+         * @brief Stores the set of UDP ports being mapped.
+         */
         std::unordered_set<uint16_t> udp_mapper_;
-        // Mutexes to synchronize access to the TCP and UDP maps
+
+        /**
+         * @brief Mutex to synchronize access to the TCP port mapping.
+         */
         std::mutex tcp_mapper_lock_;
+
+        /**
+         * @brief Mutex to synchronize access to the UDP port mapping.
+         */
         std::mutex udp_mapper_lock_;
-        // I/O completion port for async operations
+
+        /**
+         * @brief I/O completion port for asynchronous operations.
+         */
         winsys::io_completion_port io_port_;
 
-        // Optional pointer to a pcap file storage, used for packet capturing
-        std::shared_ptr<pcap::pcap_file_storage> pcap_{nullptr};
+        /**
+         * @brief Optional pcap stream logger for packet capture logging.
+         */
+        std::optional<pcap::pcap_stream_logger> pcap_logger_;
 
-        // Vector storing pairs of unique pointers to TCP and UDP proxy servers
-        std::vector<std::pair<std::unique_ptr<s5_tcp_proxy_server>, std::unique_ptr<s5_udp_proxy_server>>>
-        proxy_servers_;
-        // Maps process names to their corresponding proxy indexes
+        /**
+         * @brief Vector storing pairs of unique pointers to TCP and UDP proxy servers.
+         */
+        std::vector<std::pair<std::unique_ptr<s5_tcp_proxy_server>, std::unique_ptr<s5_udp_proxy_server>>> proxy_servers_;
+
+        /**
+         * @brief Maps process names to their corresponding proxy indexes.
+         */
         std::unordered_map<std::wstring, size_t> name_to_proxy_;
-        // Shared mutex to protect concurrent access to shared resources
+
+        /**
+         * @brief Shared mutex to protect concurrent access to shared resources.
+         */
         std::shared_mutex lock_;
-        // Information of the default network adapter
+
+        /**
+         * @brief Information of the default network adapter.
+         */
         std::optional<iphelper::network_adapter_info> default_adapter_;
-        // Index of the network interface used
+
+        /**
+         * @brief Index of the network interface used.
+         */
         std::size_t if_index_{};
 
-        // Unique pointers to TCP and UDP redirect objects
-        std::unique_ptr<ndisapi::tcp_local_redirect<net::ip_address_v4>> tcp_redirect_{nullptr};
-        std::unique_ptr<ndisapi::socks5_udp_local_redirect<net::ip_address_v4>> udp_redirect_{nullptr};
-        // Unique pointer to the packet filter object
-        std::unique_ptr<ndisapi::queued_packet_filter> filter_{nullptr};
+        /**
+         * @brief Unique pointer to the TCP redirect object.
+         */
+        std::unique_ptr<ndisapi::tcp_local_redirect<net::ip_address_v4>> tcp_redirect_{ nullptr };
 
-        // Atomic boolean to track the active status of the router
-        std::atomic_bool is_active_{false};
+        /**
+         * @brief Unique pointer to the UDP redirect object.
+         */
+        std::unique_ptr<ndisapi::socks5_udp_local_redirect<net::ip_address_v4>> udp_redirect_{ nullptr };
 
-        // Unique pointer to the static filters object
-        std::unique_ptr<ndisapi::static_filters> static_filters_;
+        /**
+         * @brief Unique pointer to the packet filter object.
+         */
+        std::unique_ptr<packet_filter> packet_filter_{ nullptr };
+
+        /**
+         * @brief Atomic boolean to track the active status of the router.
+         */
+        std::atomic_bool is_active_{ false };
+
+        /**
+         * @brief Static filters for packet filtering.
+         */
+        ndisapi::static_filters static_filters_;
+
+        /**
+         * @brief Process lookup for IPv4 addresses.
+         */
+        iphelper::process_lookup<net::ip_address_v4> process_lookup_v4_;
+
+        /**
+         * @brief Process lookup for IPv6 addresses.
+         */
+        iphelper::process_lookup<net::ip_address_v6> process_lookup_v6_;
+
+        /**
+         * @brief Mutex to protect the set of adapter names that need to be filtered.
+         */
+        std::shared_mutex adapters_to_filter_lock_;
+
+        /**
+         * @brief Set of adapter names that need to be filtered.
+         */
+        std::unordered_set<std::string> adapters_to_filter_;
+
+        /**
+         * @brief Thread for lazy process resolution.
+         */
+        std::thread process_resolve_thread_;
+
+        /**
+         * @brief Queue for holding pointers to intermediate_buffer objects that require process resolution.
+         *
+         * This queue is used to store buffers that need to be processed by the process resolution thread.
+         * Access to this queue is synchronized using process_resolve_buffer_mutex_ and process_resolve_buffer_queue_cv_.
+         */
+        std::queue<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> process_resolve_buffer_queue_;
+
+        /**
+         * @brief Mutex to guard access to the process_resolve_buffer_queue_.
+         *
+         * This mutex ensures thread-safe access to the buffer queue, preventing data races
+         * when multiple threads are adding to or removing from the queue.
+         */
+        mutable std::mutex process_resolve_buffer_mutex_;
+
+        /**
+         * @brief Condition variable for synchronizing access to the process_resolve_buffer_queue_.
+         *
+         * This condition variable is used to notify waiting threads when new buffers are added to the queue,
+         * allowing the process resolution thread to efficiently wait for work.
+         */
+        std::condition_variable process_resolve_buffer_queue_cv_;
 
     public:
         enum supported_protocols : uint8_t
@@ -66,138 +183,98 @@ namespace proxy
          *
          * @param log_level A netlib::log::log_level object that defines the level of log information to be printed.
          *                  For instance, if log_level > netlib::log::log_level::debug, the router creates a pcap file for capturing network packets.
-         * @param log_stream An optional std::ostream reference wrapper for logging. If provided, log messages will be written to this stream.
+         * @param log_stream Optional reference to an output stream for logging.
+         * @param pcap_log_stream Optional reference to an output stream for pcap logging.
          */
         explicit socks_local_router(const log_level log_level = log_level::error,
-                                    const std::optional<std::reference_wrapper<std::ostream>> log_stream =
-                                        std::nullopt) :
-            logger(log_level, log_stream)
+                                    const std::optional<std::reference_wrapper<std::ostream>> log_stream = std::nullopt,
+                                    const std::optional<std::reference_wrapper<std::ostream>> pcap_log_stream = std::nullopt) :
+                                    logger(log_level, log_stream),
+                                    static_filters_{ true, true, log_level_, log_stream_ },
+                                    process_lookup_v4_{ log_level_, log_stream_ },
+                                    process_lookup_v6_{ log_level_, log_stream_ }
         {
             using namespace std::string_literals;
 
-            // If the logging level is higher than debug, initialize pcap to store network packets in a pcap file
-            if (log_level_ > log_level::debug)
-                pcap_ = std::make_shared<pcap::pcap_file_storage>("socks_local_router.pcap"s);
+            if (pcap_log_stream) {
+                pcap_logger_.emplace(*pcap_log_stream);
+            }
 
             // Initialize TCP and UDP redirect objects
             tcp_redirect_ = std::make_unique<ndisapi::tcp_local_redirect<net::ip_address_v4>>(log_level_, log_stream);
             udp_redirect_ = std::make_unique<ndisapi::socks5_udp_local_redirect<net::ip_address_v4>>(
                 log_level_, log_stream);
-            static_filters_ = std::make_unique<ndisapi::static_filters>(true, true, log_level_, log_stream);
 
             // Initialize packet filter
-            filter_ = std::make_unique<ndisapi::queued_packet_filter>(
+            packet_filter_ = std::make_unique<packet_filter>(
                 nullptr,
-                [this](HANDLE, INTERMEDIATE_BUFFER& buffer)
+                [this](HANDLE, ndisapi::intermediate_buffer& buffer)
                 {
                     auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
                     const auto destination_mac = net::mac_address(ethernet_header->h_dest);
 
                     if (ntohs(ethernet_header->h_proto) != ETH_P_IP)
-                        return ndisapi::queued_packet_filter::packet_action::pass;
+                    {
+                        return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+                    }
 
-                    auto* const ip_header = reinterpret_cast<iphdr_ptr>(ethernet_header + 1);
+                    log_packet_to_pcap(buffer);
 
-                    if (pcap_)
-                        *pcap_ << buffer;
+                    const auto* const ip_header = reinterpret_cast<iphdr_ptr>(ethernet_header + 1);
 
                     if (ip_header->ip_p == IPPROTO_UDP)
                     {
-                        const auto* const udp_header = reinterpret_cast<udphdr_ptr>(reinterpret_cast<PUCHAR>(ip_header)
-                            + sizeof(DWORD) * ip_header->ip_hl);
-
                         // skip broadcast and multicast UDP packets
                         if (destination_mac.is_broadcast() || destination_mac.is_multicast())
-                            return ndisapi::queued_packet_filter::packet_action::pass;
-
-                        auto process = iphelper::process_lookup<net::ip_address_v4>::get_process_helper().
-                            lookup_process_for_udp<false>(net::ip_endpoint<net::ip_address_v4>{
-                                ip_header->ip_src, ntohs(udp_header->th_sport)
-                            });
-
-                        if (!process)
                         {
-                            iphelper::process_lookup<net::ip_address_v4>::get_process_helper().actualize(false, true);
-                            process = iphelper::process_lookup<net::ip_address_v4>::get_process_helper().
-                                lookup_process_for_udp<true>(net::ip_endpoint<net::ip_address_v4>{
-                                    ip_header->ip_src, ntohs(udp_header->th_sport)
-                                });
+                            return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
                         }
 
-                        if (const auto port = get_proxy_port_udp(process); port.has_value())
+                        if (const auto result = process_udp_packet(buffer, false))
                         {
-                            if (udp_redirect_->is_new_endpoint(buffer))
+                            return result.value();
+                        }
+                        // Queue for the later processing
+                        if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
+                        {
                             {
-                                std::lock_guard lock(udp_mapper_lock_);
-                                udp_mapper_.insert(ntohs(udp_header->th_sport));
-
-                                print_log(log_level::info,
-                                          std::string("Redirecting UDP ") + std::string(
-                                              net::ip_address_v4(ip_header->ip_src)) +
-                                          " : " + std::to_string(ntohs(udp_header->th_sport)) + " -> " +
-                                          std::string(net::ip_address_v4(ip_header->ip_dst)) + " : " + std::to_string(
-                                              ntohs(udp_header->th_dport)));
+                                std::lock_guard lock(process_resolve_buffer_mutex_);
+                                process_resolve_buffer_queue_.push(std::move(allocated_buffer));
                             }
-
-                            if (udp_redirect_->process_client_to_server_packet(buffer, htons(port.value())))
-                                return ndisapi::queued_packet_filter::packet_action::revert;
+                            process_resolve_buffer_queue_cv_.notify_one();
                         }
-                        else if (is_udp_proxy_port(ntohs(udp_header->th_sport)))
+                        else 
                         {
-                            if (udp_redirect_->process_server_to_client_packet(buffer))
-                                return ndisapi::queued_packet_filter::packet_action::revert;
+                            // Handle the error, e.g., log it or take corrective action
+                            print_log(log_level::error, "Failed to allocate buffer.");
                         }
+                        return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
                     }
-                    else if (ip_header->ip_p == IPPROTO_TCP)
+
+                    if (ip_header->ip_p == IPPROTO_TCP)
                     {
-                        const auto* const tcp_header = reinterpret_cast<tcphdr_ptr>(reinterpret_cast<PUCHAR>(
-                                ip_header) +
-                            sizeof(DWORD) * ip_header->ip_hl);
-
-                        auto process = iphelper::process_lookup<net::ip_address_v4>::get_process_helper().
-                            lookup_process_for_tcp<false>(net::ip_session<net::ip_address_v4>{
-                                ip_header->ip_src, ip_header->ip_dst, ntohs(tcp_header->th_sport),
-                                ntohs(tcp_header->th_dport)
-                            });
-
-                        if (!process)
+                        if (const auto result = process_tcp_packet(buffer, false))
                         {
-                            iphelper::process_lookup<net::ip_address_v4>::get_process_helper().actualize(true, false);
-                            process = iphelper::process_lookup<net::ip_address_v4>::get_process_helper().
-                                lookup_process_for_tcp<true>(net::ip_session<net::ip_address_v4>{
-                                    ip_header->ip_src, ip_header->ip_dst, ntohs(tcp_header->th_sport),
-                                    ntohs(tcp_header->th_dport)
-                                });
+                            return result.value();
                         }
-
-                        if (const auto port = get_proxy_port_tcp(process); port.has_value())
+                        // Queue for the later processing
+                        if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer)) 
                         {
-                            if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
                             {
-                                std::lock_guard lock(tcp_mapper_lock_);
-                                tcp_mapper_[ntohs(tcp_header->th_sport)] =
-                                    net::ip_endpoint(net::ip_address_v4(ip_header->ip_dst),
-                                                     ntohs(tcp_header->th_dport));
-
-                                print_log(log_level::info,
-                                          std::string("Redirecting TCP: ") + std::string(
-                                              net::ip_address_v4(ip_header->ip_src)) +
-                                          " : " + std::to_string(ntohs(tcp_header->th_sport)) + " -> " + std::string(
-                                              net::ip_address_v4(ip_header->ip_dst)) +
-                                          " : " + std::to_string(ntohs(tcp_header->th_dport)));
+                                std::lock_guard lock(process_resolve_buffer_mutex_);
+                                process_resolve_buffer_queue_.push(std::move(allocated_buffer));
                             }
-
-                            if (tcp_redirect_->process_client_to_server_packet(buffer, htons(port.value())))
-                                return ndisapi::queued_packet_filter::packet_action::revert;
+                            process_resolve_buffer_queue_cv_.notify_one();
                         }
-                        else if (is_tcp_proxy_port(ntohs(tcp_header->th_sport)))
+                        else 
                         {
-                            if (tcp_redirect_->process_server_to_client_packet(buffer))
-                                return ndisapi::queued_packet_filter::packet_action::revert;
+                            // Handle the error, e.g., log it or take corrective action
+                            print_log(log_level::error, "Failed to allocate buffer.");
                         }
+                        return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
                     }
 
-                    return ndisapi::queued_packet_filter::packet_action::pass;
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
                 });
 
             // Set up ICMP filter to pass all ICMP traffic
@@ -208,9 +285,8 @@ namespace proxy
                 .set_protocol(IPPROTO_ICMP);
 
             // Add the ICMP filter to the static filters list
-            static_filters_->add_filter_back(icmp_filter);
+            static_filters_.add_filter_back(icmp_filter);
         }
-
 
         /**
          * Destructor for the socks_local_router class.
@@ -256,26 +332,16 @@ namespace proxy
         bool start()
         {
             if (auto expected = false; !is_active_.compare_exchange_strong(expected, true))
-                return false;
-
-            std::shared_lock lock(lock_);
-
-            // Start thread pool
-            io_port_.start_thread_pool();
-
-            // Start proxies
-            for (auto& [tcp, udp] : proxy_servers_)
             {
-                if (tcp)
-                    tcp->start();
-
-                if (udp)
-                    udp->start();
+                print_log(log_level::error, "Filter is already active!");
+                return false;
             }
 
-            // Update network configuration and start filter
-            if (update_network_configuration())
-                filter_->start_filter(if_index_);
+            if (!packet_filter_)
+            {
+                print_log(log_level::error, "Packet filter is not initialized!");
+                return false;
+            }
 
             if (!this->set_notify_ip_interface_change())
             {
@@ -283,6 +349,75 @@ namespace proxy
                     log_level::error,
                     "set_notify_ip_interface_change has failed, lasterror: " + std::to_string(
                         GetLastError()));
+            }
+
+            {
+                std::shared_lock lock(lock_);
+
+                // Start thread pool
+                io_port_.start_thread_pool();
+
+                // Start proxies
+                for (auto& [tcp, udp] : proxy_servers_)
+                {
+                    if (tcp) 
+                    {
+                        if (!tcp->start())
+                        {
+                            print_log(log_level::error, "Failed to start TCP proxy on port: " + std::to_string(tcp->proxy_port()));
+                        }
+                    }
+
+                    if (udp)
+                    {
+                        if (!udp->start())
+                        {
+                            print_log(log_level::error, "Failed to start UDP proxy on port: " + std::to_string(udp->proxy_port()));
+                        }
+                    }
+                }
+            }
+
+            process_resolve_thread_ = std::thread(&socks_local_router::process_resolve_thread_proc, this);
+
+            // Update network configuration and start filter
+            update_network_configuration();
+            if (!packet_filter_->start_filter())
+            {
+                print_log(log_level::error, "Failed to start NDIS packet filter");
+
+                // Attempt to cancel notification of IP interface changes
+                if (!this->cancel_notify_ip_interface_change())
+                {
+                    // Log an error if cancelling notification of IP interface changes failed
+                    print_log(
+                        log_level::error, "cancel_notify_ip_interface_change has failed, lasterror: " +
+                        std::to_string(GetLastError()));
+
+                    std::shared_lock lock(lock_);
+
+                    // Stop all proxies
+                    for (auto& [tcp, udp] : proxy_servers_)
+                    {
+                        // Stop TCP proxy
+                        if (tcp)
+                            tcp->stop();
+
+                        // Stop UDP proxy
+                        if (udp)
+                            udp->stop();
+                    }
+
+                    // Stop the thread pool associated with the I/O completion port
+                    io_port_.stop_thread_pool();
+
+                    is_active_.store(false);
+
+                    process_resolve_buffer_queue_cv_.notify_all();
+
+                    if (process_resolve_thread_.joinable())
+                        process_resolve_thread_.join();
+                }
             }
 
             return is_active_;
@@ -306,8 +441,33 @@ namespace proxy
             if (auto expected = true; !is_active_.compare_exchange_strong(expected, false))
                 return false;
 
-            // Lock shared resources before accessing them
-            std::shared_lock lock(lock_);
+            // Stop the filter (presumably some sort of network filter)
+            packet_filter_->stop_filter();
+
+            process_resolve_buffer_queue_cv_.notify_all();
+
+            if (process_resolve_thread_.joinable())
+                process_resolve_thread_.join();
+
+            {
+                // Lock shared resources before accessing them
+                std::shared_lock lock(lock_);
+
+                // Stop all proxies
+                for (auto& [tcp, udp] : proxy_servers_)
+                {
+                    // Stop TCP proxy
+                    if (tcp)
+                        tcp->stop();
+
+                    // Stop UDP proxy
+                    if (udp)
+                        udp->stop();
+                }
+
+                // Stop the thread pool associated with the I/O completion port
+                io_port_.stop_thread_pool();
+            }
 
             // Attempt to cancel notification of IP interface changes
             if (!this->cancel_notify_ip_interface_change())
@@ -317,24 +477,6 @@ namespace proxy
                     log_level::error, "cancel_notify_ip_interface_change has failed, lasterror: " +
                     std::to_string(GetLastError()));
             }
-
-            // Stop the filter (presumably some sort of network filter)
-            filter_->stop_filter();
-
-            // Stop all proxies
-            for (auto& [tcp, udp] : proxy_servers_)
-            {
-                // Stop TCP proxy
-                if (tcp)
-                    tcp->stop();
-
-                // Stop UDP proxy
-                if (udp)
-                    udp->stop();
-            }
-
-            // Stop the thread pool associated with the I/O completion port
-            io_port_.stop_thread_pool();
 
             // Return the current active status (which should now be false)
             return is_active_;
@@ -346,7 +488,7 @@ namespace proxy
          */
         bool is_driver_loaded() const
         {
-            return filter_->IsDriverLoaded();
+            return packet_filter_->IsDriverLoaded();
         }
 
         /**
@@ -404,15 +546,15 @@ namespace proxy
             // Apply all the filters to the network traffic
             if (protocols == both || protocols == udp)
             {
-                static_filters_->add_filter_back(tcp_out_filter);
-                static_filters_->add_filter_back(tcp_in_filter);
-                static_filters_->add_filter_back(udp_out_filter);
-                static_filters_->add_filter_back(udp_in_filter);
+                static_filters_.add_filter_back(tcp_out_filter);
+                static_filters_.add_filter_back(tcp_in_filter);
+                static_filters_.add_filter_back(udp_out_filter);
+                static_filters_.add_filter_back(udp_in_filter);
             }
             else if (protocols == tcp)
             {
-                static_filters_->add_filter_back(tcp_out_filter);
-                static_filters_->add_filter_back(tcp_in_filter);
+                static_filters_.add_filter_back(tcp_out_filter);
+                static_filters_.add_filter_back(tcp_in_filter);
             }
 
             try
@@ -573,7 +715,7 @@ namespace proxy
          * Parses a string to construct a network endpoint, consisting of an IPv4 address and a port number.
          * The format of the string is expected to be "IP:PORT".
          * @param endpoint The string representation of the network endpoint.
-         * @return An std::optional containing a net::ip_endpoint<net::ip_address_v4> object if parsing is successful,
+         * @return A std::optional containing a net::ip_endpoint<net::ip_address_v4> object if parsing is successful,
          *         or an empty std::optional otherwise.
          */
         static std::optional<net::ip_endpoint<net::ip_address_v4>> parse_endpoint(const std::string& endpoint)
@@ -652,22 +794,27 @@ namespace proxy
          * The function checks if the application name pattern includes a path (by looking for "/" or "\\").
          * If a path is included in the pattern, the function matches against the process's path_name,
          * otherwise it matches against the process's name. The matching is done case-insensitively.
+         * Additionally, this function excludes the current process (by process ID).
          *
          * @param app The application name or pattern to check against the process details.
          * @param process The process details to check against the application pattern.
-         * @return true if the process details match the application pattern, false otherwise.
+         * @return true if the process details match the application pattern and are not the current process, false otherwise.
          */
         static bool match_app_name(const std::wstring& app, const std::shared_ptr<iphelper::network_process>& process)
         {
+            // Exclude the current process by process ID
+            if (process && process->id == ::GetCurrentProcessId())
+                return false;
+
             return (app.find(L'\\') != std::wstring::npos || app.find(L'/') != std::wstring::npos)
-                       ? (to_upper(process->path_name).find(app) != std::wstring::npos)
-                       : (to_upper(process->name).find(app) != std::wstring::npos);
+                ? (to_upper(process->path_name).find(app) != std::wstring::npos)
+                : (to_upper(process->name).find(app) != std::wstring::npos);
         }
 
         /**
          * Retrieves the TCP proxy port number associated with a given process name.
          * @param process The pointer to network_process.
-         * @return An std::optional containing the TCP port number if the process name is found,
+         * @return A std::optional containing the TCP port number if the process name is found,
          *         or an empty std::optional otherwise.
          */
         std::optional<uint16_t> get_proxy_port_tcp(const std::shared_ptr<iphelper::network_process>& process)
@@ -693,7 +840,7 @@ namespace proxy
         /**
          * Retrieves the UDP proxy port number associated with a given process name.
          * @param process The pointer to network_process.
-         * @return An std::optional containing the UDP port number if the process name is found,
+         * @return A std::optional containing the UDP port number if the process name is found,
          *         or an empty std::optional otherwise.
          */
         std::optional<uint16_t> get_proxy_port_udp(const std::shared_ptr<iphelper::network_process>& process)
@@ -757,149 +904,421 @@ namespace proxy
         }
 
         /**
-         * Updates the network configuration based on the current state of the IP interfaces.
-         * @return True if the configuration updated successfully, false otherwise.
+         * @brief Processes a UDP packet for possible redirection through a proxy.
+         *
+         * This function inspects the provided intermediate_buffer, attempts to resolve the associated process,
+         * and determines if the UDP packet should be redirected to a proxy port, passed through, or reverted.
+         * If the process cannot be resolved and @p postponed is false, the function returns std::nullopt,
+         * indicating that the packet should be queued for later processing. If @p postponed is true, a
+         * second attempt is made to resolve the process using an updated process table.
+         *
+         * If the process is associated with a UDP proxy, and the packet is from a new endpoint, the source
+         * port is recorded and a redirection is logged. The function then attempts to process the packet for
+         * client-to-server redirection. If the packet is from a known proxy port, it attempts to process it
+         * for server-to-client redirection.
+         *
+         * @param buffer Reference to the intermediate_buffer containing the packet data.
+         * @param postponed If false, only the current process table is used for lookup. If true, the process
+         *        table is refreshed and a second lookup is attempted.
+         * @return std::optional<packet_filter::packet_action> indicating the action to take:
+         *         - std::nullopt: process could not be resolved (should be queued for later)
+         *         - packet_action::revert: packet should be reverted (redirected)
+         *         - packet_action::pass: packet should be passed through
          */
-        bool update_network_configuration()
+        std::optional<packet_filter::packet_action> process_udp_packet(ndisapi::intermediate_buffer& buffer, const bool postponed)
         {
-            // Attempts to reconfigure the filter. If it fails, logs an error.
-            if (!filter_->reconfigure())
+            auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
+            auto* const ip_header = reinterpret_cast<iphdr_ptr>(ethernet_header + 1);
+            const auto* const udp_header = reinterpret_cast<udphdr_ptr>(reinterpret_cast<PUCHAR>(ip_header)
+                + sizeof(DWORD) * ip_header->ip_hl);
+
+            // If the destination port is 53 (DNS), allow the packet to pass through without redirection
+            // TODO: We might consider adding a DNS proxy in the future
+            if (ntohs(udp_header->th_dport) == 53)
             {
-                print_log(log_level::error,
-                          "socks5_local_router: Failed to update WinpkFilter network interfaces \n");
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
             }
 
-            // Retrieves a list of all NDIS adapters.
-            const auto& ndis_adapters = filter_->get_interface_list();
+            auto process = process_lookup_v4_.
+                lookup_process_for_udp<false>(net::ip_endpoint<net::ip_address_v4>{
+                ip_header->ip_src, ntohs(udp_header->th_sport)
+            });
 
-            // Attempts to find the best interface for a given IP address (1.1.1.1 in this case).
-            default_adapter_ = get_best_interface(net::ip_address_v4("1.1.1.1"));
-
-            // If no suitable interface is found, logs an error and returns false.
-            if (!default_adapter_)
+            if (!process)
             {
-                print_log(log_level::error,
-                          "socks5_local_router:: Failed to figure out the route to the 1.1.1.1 \n");
-                return false;
-            }
-
-            // Logs the name of the default adapter.
-            print_log(log_level::info,
-                      "socks5_local_router:: Detected default interface " + default_adapter_->get_adapter_name());
-
-            // Checks if the default adapter type is not Point-to-Point Protocol (PPP).
-            if (default_adapter_->get_if_type() != IF_TYPE_PPP)
-            {
-                // Finds the matching NDIS adapter and sets the index if found.
-                if (const auto it = std::ranges::find_if(ndis_adapters,
-                                                         [this](const auto& ndis_adapter)
-                                                         {
-                                                             return (std::string::npos != ndis_adapter->
-                                                                 get_internal_name().
-                                                                 find(default_adapter_->get_adapter_name()));
-                                                         }); it != ndis_adapters.cend())
+                if (postponed)
                 {
-                    if_index_ = it - ndis_adapters.begin();
-                    return true;
+                    process = process_lookup_v4_.
+                        lookup_process_for_udp<true>(net::ip_endpoint<net::ip_address_v4>{
+                        ip_header->ip_src, ntohs(udp_header->th_sport)
+                    });
                 }
-            }
-            else // If the default adapter type is PPP.
-            {
-                // Finds the matching NDIS adapter and sets the index if found.
-                if (const auto it = std::ranges::find_if(ndis_adapters,
-                                                         [this](const auto& ndis_adapter)
-                                                         {
-                                                             if (auto wan_info = ndis_adapter->get_ras_links();
-                                                                 wan_info)
-                                                             {
-                                                                 if (auto ras_it = std::find_if(
-                                                                     wan_info->cbegin(), wan_info->cend(),
-                                                                     [this](auto& ras_link)
-                                                                     {
-                                                                         return default_adapter_->has_address(
-                                                                             ras_link.ip_address);
-                                                                     }); ras_it != wan_info->cend())
-                                                                 {
-                                                                     return true;
-                                                                 }
-                                                             }
-
-                                                             return false;
-                                                         }); it != ndis_adapters.cend())
+                else
                 {
-                    if_index_ = it - ndis_adapters.begin();
-                    return true;
+                    return std::nullopt;
                 }
             }
 
-            // If a matching NDIS adapter was not found for the default interface, logs an informational message.
-            if (log_level::info < log_level_)
+            if (const auto port = get_proxy_port_udp(process); port.has_value())
             {
-                print_log(
-                    log_level::info,
-                    "socks5_local_router: Failed to find a matching WinpkFilter interface for the " +
-                    default_adapter_->get_adapter_name());
+                if (udp_redirect_->is_new_endpoint(buffer))
+                {
+                    std::lock_guard lock(udp_mapper_lock_);
+                    udp_mapper_.insert(ntohs(udp_header->th_sport));
+
+                    print_log(log_level::info,
+                        std::string("Redirecting UDP ") + std::string(
+                            net::ip_address_v4(ip_header->ip_src)) +
+                        " : " + std::to_string(ntohs(udp_header->th_sport)) + " -> " +
+                        std::string(net::ip_address_v4(ip_header->ip_dst)) + " : " + std::to_string(
+                            ntohs(udp_header->th_dport)));
+                }
+
+                if (udp_redirect_->process_client_to_server_packet(buffer, htons(port.value())))
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+            }
+            else if (is_udp_proxy_port(ntohs(udp_header->th_sport)))
+            {
+                if (udp_redirect_->process_server_to_client_packet(buffer))
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
             }
 
-            return false;
+            return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
         }
 
         /**
-         * This is a callback function to handle changes in the IP interface, typically invoked when there are network changes.
+         * @brief Processes a TCP packet for possible redirection through a proxy.
          *
-         * @param row A pointer to the MIB_IPINTERFACE_ROW structure that contains information about the IP interface that changed.
-         * @param notification_type A MIB_NOTIFICATION_TYPE enumeration value that indicates the type of notification.
+         * This function inspects the provided intermediate_buffer, attempts to resolve the associated process,
+         * and determines if the TCP packet should be redirected to a proxy port, passed through, or reverted.
+         * If the process cannot be resolved and @p postponed is false, the function returns std::nullopt,
+         * indicating that the packet should be queued for later processing. If @p postponed is true, a
+         * second attempt is made to resolve the process using an updated process table.
+         *
+         * If the process is associated with a TCP proxy, and the packet is a SYN (connection initiation),
+         * the source port is mapped to the destination endpoint and a redirection is logged. The function
+         * then attempts to process the packet for client-to-server redirection. If the packet is from a
+         * known proxy port, it attempts to process it for server-to-client redirection.
+         *
+         * @param buffer Reference to the intermediate_buffer containing the packet data.
+         * @param postponed If false, only the current process table is used for lookup. If true, the process
+         *        table is refreshed and a second lookup is attempted.
+         * @return std::optional<packet_filter::packet_action> indicating the action to take:
+         *         - std::nullopt: process could not be resolved (should be queued for later)
+         *         - packet_action::revert: packet should be reverted (redirected)
+         *         - packet_action::pass: packet should be passed through
          */
-        void ip_interface_changed_callback(PMIB_IPINTERFACE_ROW row, MIB_NOTIFICATION_TYPE notification_type)
+        std::optional<packet_filter::packet_action> process_tcp_packet(ndisapi::intermediate_buffer& buffer, const bool postponed)
         {
-            // Get the best network interface for the given IP address.
-            // In this case, the IP address is hardcoded as "1.1.1.1".
-            const std::optional<iphelper::network_adapter_info> adapter = get_best_interface(
-                net::ip_address_v4("1.1.1.1"));
+            auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
+            auto* const ip_header = reinterpret_cast<iphdr_ptr>(ethernet_header + 1);
+            const auto* const tcp_header = reinterpret_cast<tcphdr_ptr>(reinterpret_cast<PUCHAR>(
+                ip_header) +
+                sizeof(DWORD) * ip_header->ip_hl);
 
-            // If no suitable network adapter is found, log an error and return.
-            if (!adapter)
-            {
-                print_log(
-                    log_level::error,
-                    "socks5_local_router: ip_interface_changed_callback: No Internet available.");
-
-                return;
-            }
-
-            // If the new network adapter is the same as the previous one, there's no need for action.
-            if (default_adapter_.has_value() && *adapter == *default_adapter_ && adapter->is_same_address_info<false>(
-                *default_adapter_))
-            {
-                // nothing has changed, no reaction needed
-                return;
-            }
-
-            // Log that the network adapter has changed and the filter engine needs to be restarted.
-            print_log(
-                log_level::info,
-                "socks5_local_router: ip_interface_changed_callback: default network adapter has changed. Restart the filter engine.");
-
-            // Create a new thread to restart the filter engine.
-            std::thread restart_async([this]()
-            {
-                bool update_result;
-
-                std::lock_guard internal_lock(lock_);
-
-                // Stop the current filter.
-                filter_->stop_filter();
-                {
-                    // Update the network configuration.
-                    update_result = update_network_configuration();
-                }
-                // If the network configuration is updated successfully, start the filter again.
-                if (update_result)
-                    filter_->start_filter(if_index_);
+            auto process = process_lookup_v4_.
+                lookup_process_for_tcp<false>(net::ip_session<net::ip_address_v4>{
+                ip_header->ip_src, ip_header->ip_dst, ntohs(tcp_header->th_sport),
+                    ntohs(tcp_header->th_dport)
             });
 
-            // Detach the thread to allow it to execute independently of the main thread.
-            restart_async.detach();
+            if (!process)
+            {
+                if (postponed)
+                {
+                    process = process_lookup_v4_.
+                        lookup_process_for_tcp<true>(net::ip_session<net::ip_address_v4>{
+                        ip_header->ip_src, ip_header->ip_dst, ntohs(tcp_header->th_sport),
+                            ntohs(tcp_header->th_dport)
+                    });
+                }
+                else
+                {
+                    return std::nullopt;
+                }
+            }
+
+            if (const auto port = get_proxy_port_tcp(process); port.has_value())
+            {
+                // If this is a SYN packet (connection initiation), map the source port to the destination endpoint
+                if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
+                {
+                    std::lock_guard lock(tcp_mapper_lock_);
+                    tcp_mapper_[ntohs(tcp_header->th_sport)] =
+                        net::ip_endpoint(net::ip_address_v4(ip_header->ip_dst),
+                            ntohs(tcp_header->th_dport));
+
+                    print_log(log_level::info,
+                        std::string("Redirecting TCP: ") + std::string(
+                            net::ip_address_v4(ip_header->ip_src)) +
+                        " : " + std::to_string(ntohs(tcp_header->th_sport)) + " -> " + std::string(
+                            net::ip_address_v4(ip_header->ip_dst)) +
+                        " : " + std::to_string(ntohs(tcp_header->th_dport)));
+                }
+
+                // Attempt to process the packet for client-to-server redirection
+                if (tcp_redirect_->process_client_to_server_packet(buffer, htons(port.value())))
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+            }
+            // If the packet is from a known proxy port, process for server-to-client redirection
+            else if (is_tcp_proxy_port(ntohs(tcp_header->th_sport)))
+            {
+                if (tcp_redirect_->process_server_to_client_packet(buffer))
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+            }
+
+            // Otherwise, pass the packet through
+            return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+        }
+
+        /**
+         * @brief Logs a single packet to the pcap logger.
+         *
+         * This function logs a single packet to the pcap logger if it is available.
+         *
+         * @param packet The packet to be logged.
+         */
+        void log_packet_to_pcap(const INTERMEDIATE_BUFFER& packet) {
+            if (pcap_logger_) {
+                pcap_logger_.value() << packet;
+            }
+        }
+
+        /**
+         * @brief Sends a queue of packets to the network adapters.
+         *
+         * This method takes a vector of intermediate_buffer pointers and sends them to the network adapters
+         * using the underlying packet filter. The packets are sent unsorted, and the number of successfully
+         * sent packets is tracked internally.
+         *
+         * @param packet_queue Reference to a vector of intermediate_buffer pointers to be sent.
+         * @return true if the packets were successfully sent to the adapters, false otherwise.
+         */
+        bool send_packets_to_adapters(std::vector<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr>& packet_queue) const
+        {
+            DWORD packets_success = 0;
+            return packet_filter_->SendPacketsToAdaptersUnsorted(
+                reinterpret_cast<PINTERMEDIATE_BUFFER*>(packet_queue.data()),
+                static_cast<DWORD>(packet_queue.size()),
+                &packets_success
+            );
+        }
+
+        /**
+         * @brief Sends a queue of packets to the Microsoft TCP/IP stack (MSTCP).
+         *
+         * This method takes a vector of intermediate_buffer pointers and sends them to the MSTCP stack
+         * using the underlying packet filter. The packets are sent unsorted, and the number of successfully
+         * sent packets is tracked internally.
+         *
+         * @param packet_queue Reference to a vector of intermediate_buffer pointers to be sent.
+         * @return true if the packets were successfully sent to MSTCP, false otherwise.
+         */
+        bool send_packets_to_mstcp(std::vector<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr>& packet_queue) const
+        {
+            DWORD packets_success = 0;
+            return packet_filter_->SendPacketsToMstcpUnsorted(
+                reinterpret_cast<PINTERMEDIATE_BUFFER*>(packet_queue.data()),
+                static_cast<DWORD>(packet_queue.size()),
+                &packets_success
+            );
+        }
+
+        /**
+        * @brief Thread procedure for deferred process resolution and packet forwarding.
+        *
+        * This method runs in a dedicated thread and is responsible for processing packets
+        * that could not be immediately associated with a process. It waits for packets to
+        * appear in the process_resolve_buffer_queue_, then attempts to resolve the process
+        * information using an updated process table. Based on the result of the resolution
+        * and packet inspection, packets are either sent to network adapters, sent to the
+        * Microsoft TCP/IP stack, or dropped. The method ensures thread safety and efficient
+        * processing by using local queues and minimizing lock contention.
+        *
+        * The main steps are:
+        * 1. Wait for packets to be queued or for the router to become inactive.
+        * 2. Swap the shared queue with a local queue for processing.
+        * 3. Refresh the process lookup table.
+        * 4. For each packet, attempt to resolve the process and determine the appropriate
+        *    action (pass to adapter, revert to MSTCP, or assert on unexpected cases).
+        * 5. Send processed packets to their respective destinations and clear local queues.
+        *
+        * The thread exits when the router is deactivated and the queue is empty.
+        */
+        void process_resolve_thread_proc()
+        {
+            // Use local (non-static) containers to avoid static initialization order issues and data races
+            std::queue<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> local_queue;
+            std::vector<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> to_adapters;
+            std::vector<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> to_mstcp;
+
+            while (is_active_.load())
+            {
+                {
+                    std::unique_lock lock(process_resolve_buffer_mutex_);
+                    process_resolve_buffer_queue_cv_.wait(lock, [this] {
+                        return !process_resolve_buffer_queue_.empty() || !is_active_.load();
+                        });
+
+                    if (!is_active_.load() && process_resolve_buffer_queue_.empty())
+                        break;
+
+                    // Swap the contents of the shared queue with the local queue
+                    std::swap(process_resolve_buffer_queue_, local_queue);
+                }
+
+                // Actualize process lookup before processing
+                process_lookup_v4_.actualize(true, true);
+
+                while (!local_queue.empty())
+                {
+                    auto buffer_ptr = std::move(local_queue.front());
+                    local_queue.pop();
+
+                    auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer_ptr->m_IBuffer);
+
+                    if (const auto* const ip_header = reinterpret_cast<iphdr_ptr>(ethernet_header + 1); 
+                        ip_header->ip_p == IPPROTO_UDP)
+                    {
+                        if (const auto result = process_udp_packet(*buffer_ptr, true); 
+                            result && result->action == packet_filter::packet_action::action_type::pass)
+                        {
+                            to_adapters.push_back(std::move(buffer_ptr));
+                        }
+                        else if (result && result->action == packet_filter::packet_action::action_type::revert)
+                        {
+                            to_mstcp.push_back(std::move(buffer_ptr));
+                        }
+                        else
+                        {
+                            // Should always have a result for postponed packets
+                            assert(false && "process_udp_packet should always return a result for postponed packets");
+                        }
+                    }
+                    else if (ip_header->ip_p == IPPROTO_TCP)
+                    {
+                        if (const auto result = process_tcp_packet(*buffer_ptr, true); 
+                            result && result->action == packet_filter::packet_action::action_type::pass)
+                        {
+                            to_adapters.push_back(std::move(buffer_ptr));
+                        }
+                        else if (result && result->action == packet_filter::packet_action::action_type::revert)
+                        {
+                            to_mstcp.push_back(std::move(buffer_ptr));
+                        }
+                        else
+                        {
+                            // Should always have a result for postponed packets
+                            assert(false && "process_tcp_packet should always return a result for postponed packets");
+                        }
+                    }
+                    else
+                    {
+                        // Only TCP/UDP packets should be queued for deferred processing
+                        assert(false && "Only TCP/UDP packets should be queued for deferred processing");
+                    }
+                }
+
+                if (!to_adapters.empty())
+                {
+                    send_packets_to_adapters(to_adapters);
+                    to_adapters.clear();
+                }
+
+                if (!to_mstcp.empty())
+                {
+                    send_packets_to_mstcp(to_mstcp);
+                    to_mstcp.clear();
+                }
+            }
+        }
+
+        /**
+         * @brief Callback function that is called when the IP interface changes.
+         *
+         * This function is triggered by changes in the network configuration and
+         * updates the network configuration accordingly.
+         *
+         * @param row Pointer to the MIB_IPINTERFACE_ROW structure that contains
+         *            information about the IP interface that changed.
+         * @param notification_type The type of notification that triggered the callback.
+         */
+        void ip_interface_changed_callback([[maybe_unused]] PMIB_IPINTERFACE_ROW row, [[maybe_unused]] MIB_NOTIFICATION_TYPE notification_type)
+        {
+            print_log(log_level::debug, "Network configuration has changed.");
+            update_network_configuration();
+        }
+
+        /**
+         * @brief Updates the network configuration by filtering or unfiltering network adapters.
+         *
+         * This function retrieves the list of network adapters and external network connections,
+         * determines which adapters need to be filtered, and applies the appropriate filters.
+         */
+        void update_network_configuration()
+        {
+            const auto ndis_adapters = packet_filter_->get_interface_list();
+            const auto configured_interfaces = iphelper::network_adapter_info::get_external_network_connections();
+            std::unordered_set<std::string> adapters_to_filter;
+
+            for (const auto& adapter : configured_interfaces)
+            {
+                if (adapter.get_if_type() != IF_TYPE_PPP)
+                {
+                    if (const auto it = std::ranges::find_if(ndis_adapters,
+                        [&adapter](const auto& ndis_adapter)
+                        {
+                            return ndis_adapter.get_internal_name().find(adapter.get_adapter_name()) != std::string::npos;
+                        }); it != ndis_adapters.end())
+                    {
+                        adapters_to_filter.insert(it->get_internal_name());
+                    }
+                }
+                else
+                {
+                    if (const auto it = std::ranges::find_if(ndis_adapters,
+                        [&adapter](const auto& ndis_adapter)
+                        {
+                            if (const auto wan_info = ndis_adapter.get_ras_links(); wan_info)
+                            {
+                                return std::any_of(wan_info->begin(), wan_info->end(),
+                                    [&adapter](const auto& ras_link)
+                                    {
+                                        return adapter.has_address(ras_link.ip_address);
+                                    });
+                            }
+                            return false;
+                        }); it != ndis_adapters.end())
+                    {
+                        adapters_to_filter.insert(it->get_internal_name());
+                    }
+                }
+            }
+
+            {
+                std::shared_lock lock(adapters_to_filter_lock_);
+                if (adapters_to_filter_ == adapters_to_filter)
+                    return;
+            }
+
+            for (const auto& adapter : ndis_adapters)
+            {
+                if (const auto& internal_name = adapter.get_internal_name(); adapters_to_filter.contains(internal_name))
+                {
+                    packet_filter_->filter_network_adapter(internal_name);
+                    print_log(log_level::debug, "Filtering network interface: " + adapter.get_friendly_name());
+                }
+                else
+                {
+                    packet_filter_->unfilter_network_adapter(internal_name);
+                    print_log(log_level::debug, "Unfiltering network interface: " + adapter.get_friendly_name());
+                }
+            }
+
+            {
+                std::unique_lock lock(adapters_to_filter_lock_);
+                adapters_to_filter_ = std::move(adapters_to_filter);
+            }
         }
     };
 }

@@ -18,7 +18,7 @@ namespace winsys
         /// </summary>
         /// <param name="handle"></param>
         // ReSharper disable once CppParameterMayBeConst
-        explicit safe_object_handle(HANDLE handle) noexcept: unique_ptr(handle, &safe_object_handle::close)
+        explicit safe_object_handle(HANDLE handle) noexcept : unique_ptr(handle, &safe_object_handle::close)
         {
         }
 
@@ -32,7 +32,7 @@ namespace winsys
         /// </summary>
         /// <param name="other">Object instance to move from</param>
         safe_object_handle(safe_object_handle&& other) noexcept
-            : std::unique_ptr<std::remove_pointer_t<HANDLE>, void(*)(HANDLE)>{std::move(other)}
+            : std::unique_ptr<std::remove_pointer_t<HANDLE>, void(*)(HANDLE)>{ std::move(other) }
         {
         }
 

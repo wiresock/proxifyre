@@ -1,6 +1,3 @@
-// ReSharper disable CppSpecialFunctionWithoutNoexceptSpecification
-// ReSharper disable CppClangTidyClangDiagnosticMissingBraces
-// ReSharper disable CppClangTidyClangDiagnosticMissingFieldInitializers
 #pragma once
 
 namespace iphelper
@@ -145,8 +142,8 @@ namespace iphelper
                     sockaddr_in&>(rhs)).sin_addr.S_un.S_addr);
             case AF_INET6:
                 return (0 == std::memcmp(reinterpret_cast<const sockaddr_in6*>(this)->sin6_addr.u.Word,
-                                         reinterpret_cast<const sockaddr_in6&>(rhs).sin6_addr.u.Word,
-                                         sizeof(sockaddr_in6::sin6_addr)));
+                    reinterpret_cast<const sockaddr_in6&>(rhs).sin6_addr.u.Word,
+                    sizeof(sockaddr_in6::sin6_addr)));
             default:
                 break;
             }
@@ -160,8 +157,8 @@ namespace iphelper
         explicit operator std::string() const
         {
             return (ss_family == AF_INET)
-                       ? std::string(net::ip_address_v4((reinterpret_cast<const sockaddr_in*>(this))->sin_addr))
-                       : std::string(net::ip_address_v6((reinterpret_cast<const sockaddr_in6*>(this)->sin6_addr)));
+                ? std::string(net::ip_address_v4((reinterpret_cast<const sockaddr_in*>(this))->sin_addr))
+                : std::string(net::ip_address_v6((reinterpret_cast<const sockaddr_in6*>(this)->sin6_addr)));
         }
 
         /// <summary>
@@ -170,8 +167,8 @@ namespace iphelper
         explicit operator std::wstring() const
         {
             return (ss_family == AF_INET)
-                       ? std::wstring(net::ip_address_v4((reinterpret_cast<const sockaddr_in*>(this))->sin_addr))
-                       : std::wstring(net::ip_address_v6(reinterpret_cast<const sockaddr_in6*>(this)->sin6_addr));
+                ? std::wstring(net::ip_address_v4((reinterpret_cast<const sockaddr_in*>(this))->sin_addr))
+                : std::wstring(net::ip_address_v6(reinterpret_cast<const sockaddr_in6*>(this)->sin6_addr));
         }
     };
 
@@ -186,7 +183,7 @@ namespace iphelper
         /// <param name="address">IP address represented as sockaddr</param>
         /// <param name="hardware_address">Hardware (MAC) address</param>
         explicit ip_gateway_info(const sockaddr& address,
-                                 const net::mac_address& hardware_address = net::mac_address()) :
+            const net::mac_address& hardware_address) :
             ip_address_info(address), hardware_address(hardware_address)
         {
         }
@@ -197,15 +194,33 @@ namespace iphelper
         /// <param name="address">IP address represented as SOCKET_ADDRESS</param>
         /// <param name="hardware_address">Hardware (MAC) address</param>
         explicit ip_gateway_info(const SOCKET_ADDRESS& address,
-                                 const net::mac_address& hardware_address = net::mac_address()) :
+            const net::mac_address& hardware_address) :
             ip_address_info(address), hardware_address(hardware_address)
+        {
+        }
+
+        /// <summary>
+        /// Constructs ip_gateway_info from sockaddr
+        /// </summary>
+        /// <param name="address">IP address represented as sockaddr</param>
+        explicit ip_gateway_info(const sockaddr& address) :
+            ip_address_info(address)
+        {
+        }
+
+        /// <summary>
+        /// Constructs ip_gateway_info from SOCKET_ADDRESS
+        /// </summary>
+        /// <param name="address">IP address represented as SOCKET_ADDRESS</param>
+        explicit ip_gateway_info(const SOCKET_ADDRESS& address) :
+            ip_address_info(address)
         {
         }
 
         /// <summary>
         /// Hardware (MAC) address of the gateway
         /// </summary>
-        net::mac_address hardware_address;
+        std::optional<net::mac_address> hardware_address = std::nullopt;
     };
 
     /// <summary>
@@ -282,7 +297,7 @@ namespace iphelper
         /// <param name="if_table">MIB_IF_TABLE2 pointer: 
         /// https://docs.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_if_table2</param>
         /// <param name="index">Network interface index in MIB_IF_TABLE2</param>
-        network_adapter_info(PIP_ADAPTER_ADDRESSES address, PMIB_IF_TABLE2 if_table, const size_t index) :
+        network_adapter_info(const PIP_ADAPTER_ADDRESSES address, const PMIB_IF_TABLE2 if_table, const size_t index) :
             if_index_(address->IfIndex),
             ipv6_if_index_(address->Ipv6IfIndex),
             adapter_name_(address->AdapterName),
@@ -319,14 +334,9 @@ namespace iphelper
                 gateway_address = gateway_address->Next;
             }
 
-            // Initialize MAC addresses for the network gateways
-            if ((address->IfType == IF_TYPE_ETHERNET_CSMACD) ||
-                (address->IfType == IF_TYPE_IEEE80211))
-                initialize_gateway_hw_address_list();
-
             if (if_table->Table[index].PhysicalMediumType == NdisPhysicalMediumUnspecified)
             {
-                // For unknown physical media interface (usually virtual interfaces) try to lookup the underlying media
+                // For unknown physical media interface (usually virtual interfaces) try to look up the underlying media
                 for (size_t i = 0; i < if_table->NumEntries; ++i)
                 {
                     if ((i != index) && // different entry from the current one
@@ -338,7 +348,7 @@ namespace iphelper
                         // and equal MAC address
                         (if_table->Table[i].InterfaceAndOperStatusFlags.HardwareInterface)
                         // and real hardware interface
-                    )
+                        )
                     {
                         true_medium_type_ = if_table->Table[i].PhysicalMediumType;
                         true_adapter_name_ = guid_wrapper(if_table->Table[i].InterfaceGuid);
@@ -426,10 +436,10 @@ namespace iphelper
             HKEY h_key;
 
             if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-                              key_name.c_str(),
-                              0,
-                              KEY_WRITE,
-                              &h_key) != ERROR_SUCCESS)
+                key_name.c_str(),
+                0,
+                KEY_WRITE,
+                &h_key) != ERROR_SUCCESS)
                 return false;
 
             const auto status = RegSetValueExA(
@@ -470,11 +480,38 @@ namespace iphelper
         }
 
         /// <summary>
-        /// Gets network interface configured gateway addresses
+        /// Retrieves the list of configured gateway addresses for this network interface.
         /// </summary>
-        /// <returns>Network interface configured gateway addresses as a vector of ip_gateway_info</returns>
+        /// <remarks>
+        /// This method returns a reference to a vector of <c>ip_gateway_info</c> objects, each representing a gateway
+        /// address configured for the network interface. Each <c>ip_gateway_info</c> contains both the IP address and,
+        /// if available, the hardware (MAC) address of the gateway.
+        ///
+        /// If the interface type is Ethernet or IEEE 802.11 (Wi-Fi), and any gateway entry does not have a resolved
+        /// hardware address, this method will attempt to resolve and populate the hardware address for all gateways
+        /// before returning the list. This ensures that the returned vector always contains up-to-date hardware address
+        /// information where possible.
+        ///
+        /// The returned reference remains valid as long as the <c>network_adapter_info</c> object is alive and unmodified.
+        /// </remarks>
+        /// <returns>
+        /// A const reference to a vector of <c>ip_gateway_info</c> objects, each representing a configured gateway for the interface.
+        /// </returns>
         [[nodiscard]] const std::vector<ip_gateway_info>& get_gateway_address_list() const noexcept
         {
+            // Initialize MAC addresses for the network gateways
+            if ((if_type_ == IF_TYPE_ETHERNET_CSMACD) ||
+                (if_type_ == IF_TYPE_IEEE80211))
+                {
+                    if (std::ranges::any_of(std::as_const(gateway_address_list_), [](auto&& gateway)
+                        {
+                            return !gateway.hardware_address.has_value();
+                        }))
+                    {
+                        // If any of the gateway addresses does not have hardware address, initialize it
+                        initialize_gateway_hw_address_list();
+                    }
+                }
             return gateway_address_list_;
         }
 
@@ -484,8 +521,7 @@ namespace iphelper
         /// <returns>true if network interface has specified unicast IP address, false otherwise</returns>
         [[nodiscard]] bool has_address(const ip_address_info& address) const
         {
-            return unicast_address_list_.cend() != std::find(unicast_address_list_.cbegin(),
-                                                             unicast_address_list_.cend(), address);
+            return unicast_address_list_.cend() != std::ranges::find(unicast_address_list_, address);
         }
 
         /// <summary>
@@ -557,12 +593,12 @@ namespace iphelper
 
             // Check if any of the unicast addresses have changed
             std::for_each(rhs.unicast_address_list_.cbegin(), rhs.unicast_address_list_.cend(),
-                          [&ret_val, this](auto& address)
-                          {
-                              if (unicast_address_list_.cend() == std::find(
-                                  unicast_address_list_.cbegin(), unicast_address_list_.cend(), address))
-                                  ret_val = false;
-                          });
+                [&ret_val, this](auto& address)
+                {
+                    if (unicast_address_list_.cend() == std::find(
+                        unicast_address_list_.cbegin(), unicast_address_list_.cend(), address))
+                        ret_val = false;
+                });
 
             if (ret_val == false)
                 return ret_val;
@@ -571,12 +607,12 @@ namespace iphelper
             if constexpr (BCheckGateway)
             {
                 std::for_each(rhs.gateway_address_list_.cbegin(), rhs.gateway_address_list_.cend(),
-                              [&ret_val, this](auto& address)
-                              {
-                                  if (gateway_address_list_.cend() == std::find(
-                                      gateway_address_list_.cbegin(), gateway_address_list_.cend(), address))
-                                      ret_val = false;
-                              });
+                    [&ret_val, this](auto& address)
+                    {
+                        if (gateway_address_list_.cend() == std::find(
+                            gateway_address_list_.cbegin(), gateway_address_list_.cend(), address))
+                            ret_val = false;
+                    });
             }
 
             return ret_val;
@@ -596,11 +632,9 @@ namespace iphelper
             std::vector<ip_address_info> difference;
 
             std::ranges::copy_if(unicast_address_list_, std::back_inserter(difference),
-                                 [this, rhs](const ip_address_info& address)
-                                 {
-                                     return std::ranges::find(rhs.unicast_address_list_, address) == rhs.
-                                         unicast_address_list_.end();
-                                 });
+                [this, rhs](const ip_address_info& address) {
+                    return std::ranges::find(rhs.unicast_address_list_, address) == rhs.unicast_address_list_.end();
+                });
 
             return difference;
         }
@@ -618,9 +652,9 @@ namespace iphelper
         [[nodiscard]] NDIS_PHYSICAL_MEDIUM get_physical_medium_type() const { return physical_medium_type_; }
 
         /// <summary>
-        /// Gets network interface lowest underlying layer NDIS_PHYSICAL_MEDIUM
+        /// Gets network interface the lowest underlying layer NDIS_PHYSICAL_MEDIUM
         /// </summary>
-        /// <returns>Network interface lowest underlying layer NDIS_PHYSICAL_MEDIUM</returns>
+        /// <returns>Network interface the lowest underlying layer NDIS_PHYSICAL_MEDIUM</returns>
         [[nodiscard]] NDIS_PHYSICAL_MEDIUM get_true_physical_medium_type() const { return true_medium_type_; }
 
         /// <summary>
@@ -869,7 +903,7 @@ namespace iphelper
         }
 
         /// <summary>
-        /// Configures IPv4 network interface routes (Wireguard AllowedIps parameter)
+        /// Configures IPv4 network interface routes
         /// </summary>
         /// <param name="ips">IPv4/IPv6 subnets to configure</param>
         /// <returns>vector of unique pointers to MIB_IPFORWARD_ROW2</returns>
@@ -879,7 +913,7 @@ namespace iphelper
         {
             std::vector<std::unique_ptr<MIB_IPFORWARD_ROW2>> ret_val;
 
-            std::for_each(ips.cbegin(), ips.cend(), [this, &ret_val](auto&& v)
+            std::ranges::for_each(ips, [this, &ret_val](auto&& v)
             {
                 if (auto subnet_v4_ptr = std::get_if<net::ip_subnet<net::ip_address_v4>>(&v); subnet_v4_ptr)
                 {
@@ -914,7 +948,7 @@ namespace iphelper
         }
 
         /// <summary>
-        /// Configures IPv6 network interface routes (Wireguard AllowedIps parameter)
+        /// Configures IPv6 network interface routes
         /// </summary>
         /// <param name="ips">IPv4/IPv6 subnets to configure</param>
         /// <returns>vector of unique pointers to MIB_IPFORWARD_ROW2</returns>
@@ -924,7 +958,7 @@ namespace iphelper
         {
             std::vector<std::unique_ptr<MIB_IPFORWARD_ROW2>> return_value;
 
-            std::for_each(ips.cbegin(), ips.cend(), [this, &return_value](auto&& v)
+            std::ranges::for_each(ips, [this, &return_value](auto&& v)
             {
                 if (auto subnet_v6_ptr = std::get_if<net::ip_subnet<net::ip_address_v6>>(&v); subnet_v6_ptr)
                 {
@@ -984,7 +1018,7 @@ namespace iphelper
 
             SetLastError(ERROR_SUCCESS);
 
-            std::for_each(address.begin(), address.end(), [&status](auto&& a) noexcept
+            std::ranges::for_each(address, [&status](auto&& a) noexcept
             {
                 if (const auto error_code = ::DeleteIpForwardEntry2(a.get()); NOERROR != error_code)
                 {
@@ -1144,7 +1178,7 @@ namespace iphelper
         /// <param name="hw_address">hardware address</param>
         /// <returns>unique pointer to MIB_IPNET_ROW2</returns>
         [[nodiscard]] std::unique_ptr<MIB_IPNET_ROW2> add_ndp_entry(const net::ip_address_v4& address,
-                                                                    const net::mac_address& hw_address) const
+            const net::mac_address& hw_address) const
         {
             auto net_row = std::make_unique<MIB_IPNET_ROW2>();
             RtlSecureZeroMemory(net_row.get(), sizeof(MIB_IPNET_ROW2));
@@ -1179,7 +1213,7 @@ namespace iphelper
         /// <param name="hw_address">hardware address</param>
         /// <returns>unique pointer to MIB_IPNET_ROW2</returns>
         [[nodiscard]] std::unique_ptr<MIB_IPNET_ROW2> add_ndp_entry(const net::ip_address_v6& address,
-                                                                    const net::mac_address& hw_address) const
+            const net::mac_address& hw_address) const
         {
             auto net_row = std::make_unique<MIB_IPNET_ROW2>();
             RtlSecureZeroMemory(net_row.get(), sizeof(MIB_IPNET_ROW2));
@@ -1230,15 +1264,15 @@ namespace iphelper
         /// Initializes gateways address list (resolves hardware addresses)
         /// </summary>
         /// <returns>nothing</returns>
-        void initialize_gateway_hw_address_list() noexcept
+        void initialize_gateway_hw_address_list() const noexcept
         {
             SetLastError(ERROR_SUCCESS);
 
             if (!gateway_address_list_.empty())
             {
-                std::for_each(gateway_address_list_.begin(), gateway_address_list_.end(), [this](auto& address)
+                std::ranges::for_each(gateway_address_list_, [this](auto& address)
                 {
-                    MIB_IPNET_ROW2 row = {0};
+                    MIB_IPNET_ROW2 row{};
 
                     row.Address.si_family = address.ss_family;
                     row.InterfaceLuid = luid_;
@@ -1303,7 +1337,7 @@ namespace iphelper
         /// <summary>
         /// List of gateways for the adapter.
         /// </summary>
-        std::vector<ip_gateway_info> gateway_address_list_; // 
+        mutable std::vector<ip_gateway_info> gateway_address_list_;
         /// <summary>
         /// The Media Access Control (MAC) address for the adapter.
         /// </summary>
@@ -1379,9 +1413,9 @@ namespace iphelper
             }
 
             error_code = GetAdaptersAddresses(AF_UNSPEC,
-                                              GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                                              GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_INCLUDE_ALL_INTERFACES,
-                                              nullptr, nullptr, &dw_size);
+                GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_INCLUDE_ALL_INTERFACES,
+                nullptr, nullptr, &dw_size);
 
             // Get available unicast addresses
             if ((ERROR_BUFFER_OVERFLOW == error_code) && dw_size)
@@ -1391,11 +1425,11 @@ namespace iphelper
                     auto ip_address_info = std::make_unique<unsigned char[]>(dw_size);
 
                     error_code = GetAdaptersAddresses(AF_UNSPEC,
-                                                      GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                                                      GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_INCLUDE_ALL_INTERFACES,
-                                                      nullptr,
-                                                      reinterpret_cast<PIP_ADAPTER_ADDRESSES>(ip_address_info.get()),
-                                                      &dw_size);
+                        GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                        GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_INCLUDE_ALL_INTERFACES,
+                        nullptr,
+                        reinterpret_cast<PIP_ADAPTER_ADDRESSES>(ip_address_info.get()),
+                        &dw_size);
 
                     if (NO_ERROR == error_code)
                     {
@@ -1406,13 +1440,13 @@ namespace iphelper
                             if ((current_address->FirstUnicastAddress == nullptr) ||
                                 (current_address->OperStatus != IfOperStatusUp) ||
                                 (current_address->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
-                            )
+                                )
                             {
                                 current_address = current_address->Next;
                                 continue;
                             }
 
-                            // Lookup an advanced information on the network interface
+                            // Lookup advanced information on the network interface
                             for (size_t i = 0; i < mib_table->NumEntries; ++i)
                             {
                                 if (mib_table->Table[i].InterfaceLuid == current_address->Luid)
@@ -1433,8 +1467,7 @@ namespace iphelper
                         SetLastError(error_code);
                         break;
                     }
-                }
-                while (true);
+                } while (true);
             }
             else
             {
@@ -1474,9 +1507,9 @@ namespace iphelper
 
             // Get available unicast addresses
             error_code = GetAdaptersAddresses(AF_UNSPEC,
-                                              GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                                              GAA_FLAG_INCLUDE_GATEWAYS |
-                                              GAA_FLAG_INCLUDE_ALL_INTERFACES, nullptr, nullptr, &dw_size);
+                GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                GAA_FLAG_INCLUDE_GATEWAYS |
+                GAA_FLAG_INCLUDE_ALL_INTERFACES, nullptr, nullptr, &dw_size);
 
             if ((ERROR_BUFFER_OVERFLOW == error_code) && dw_size)
             {
@@ -1485,11 +1518,11 @@ namespace iphelper
                     auto ip_address_info = std::make_unique<unsigned char[]>(dw_size);
 
                     error_code = GetAdaptersAddresses(AF_UNSPEC,
-                                                      GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                                                      GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_INCLUDE_ALL_INTERFACES,
-                                                      nullptr,
-                                                      reinterpret_cast<PIP_ADAPTER_ADDRESSES>(ip_address_info.get()),
-                                                      &dw_size);
+                        GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                        GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_INCLUDE_ALL_INTERFACES,
+                        nullptr,
+                        reinterpret_cast<PIP_ADAPTER_ADDRESSES>(ip_address_info.get()),
+                        &dw_size);
 
                     if (NO_ERROR == error_code)
                     {
@@ -1503,12 +1536,12 @@ namespace iphelper
                                 continue;
                             }
 
-                            // Lookup an advanced information on the network interface
+                            // Lookup advanced information on the network interface
                             for (size_t i = 0; i < mib_table->NumEntries; ++i)
                             {
                                 if (mib_table->Table[i].InterfaceLuid == current_address->Luid)
                                 {
-                                    network_adapter_info result{current_address, mib_table, i};
+                                    network_adapter_info result{ current_address, mib_table, i };
                                     FreeMibTable(mib_table);
                                     return std::move(result);
                                 }
@@ -1525,8 +1558,7 @@ namespace iphelper
                         SetLastError(error_code);
                         break;
                     }
-                }
-                while (true);
+                } while (true);
             }
             else
             {
@@ -1566,9 +1598,9 @@ namespace iphelper
 
             // Get available unicast addresses
             error_code = GetAdaptersAddresses(AF_UNSPEC,
-                                              GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                                              GAA_FLAG_INCLUDE_GATEWAYS |
-                                              GAA_FLAG_INCLUDE_ALL_INTERFACES, nullptr, nullptr, &dw_size);
+                GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                GAA_FLAG_INCLUDE_GATEWAYS |
+                GAA_FLAG_INCLUDE_ALL_INTERFACES, nullptr, nullptr, &dw_size);
 
             if ((ERROR_BUFFER_OVERFLOW == error_code) && dw_size)
             {
@@ -1577,11 +1609,11 @@ namespace iphelper
                     auto ip_address_info = std::make_unique<unsigned char[]>(dw_size);
 
                     error_code = GetAdaptersAddresses(AF_UNSPEC,
-                                                      GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                                                      GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_INCLUDE_ALL_INTERFACES,
-                                                      nullptr,
-                                                      reinterpret_cast<PIP_ADAPTER_ADDRESSES>(ip_address_info.get()),
-                                                      &dw_size);
+                        GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                        GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_INCLUDE_ALL_INTERFACES,
+                        nullptr,
+                        reinterpret_cast<PIP_ADAPTER_ADDRESSES>(ip_address_info.get()),
+                        &dw_size);
 
                     if (NO_ERROR == error_code)
                     {
@@ -1595,12 +1627,12 @@ namespace iphelper
                                 continue;
                             }
 
-                            // Lookup an advanced information on the network interface
+                            // Lookup advanced information on the network interface
                             for (size_t i = 0; i < mib_table->NumEntries; ++i)
                             {
                                 if (mib_table->Table[i].InterfaceLuid == current_address->Luid)
                                 {
-                                    network_adapter_info result{current_address, mib_table, i};
+                                    network_adapter_info result{ current_address, mib_table, i };
                                     FreeMibTable(mib_table);
                                     return std::move(result);
                                 }
@@ -1618,8 +1650,7 @@ namespace iphelper
                         SetLastError(error_code);
                         break;
                     }
-                }
-                while (true);
+                } while (true);
             }
             else
             {
@@ -1659,9 +1690,9 @@ namespace iphelper
 
             // Get available unicast addresses
             error_code = GetAdaptersAddresses(AF_UNSPEC,
-                                              GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                                              GAA_FLAG_INCLUDE_GATEWAYS |
-                                              GAA_FLAG_INCLUDE_ALL_INTERFACES, nullptr, nullptr, &dw_size);
+                GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                GAA_FLAG_INCLUDE_GATEWAYS |
+                GAA_FLAG_INCLUDE_ALL_INTERFACES, nullptr, nullptr, &dw_size);
 
             if ((ERROR_BUFFER_OVERFLOW == error_code) && dw_size)
             {
@@ -1670,11 +1701,11 @@ namespace iphelper
                     auto ip_address_info = std::make_unique<unsigned char[]>(dw_size);
 
                     error_code = GetAdaptersAddresses(AF_UNSPEC,
-                                                      GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                                                      GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_INCLUDE_ALL_INTERFACES,
-                                                      nullptr,
-                                                      reinterpret_cast<PIP_ADAPTER_ADDRESSES>(ip_address_info.get()),
-                                                      &dw_size);
+                        GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                        GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_INCLUDE_ALL_INTERFACES,
+                        nullptr,
+                        reinterpret_cast<PIP_ADAPTER_ADDRESSES>(ip_address_info.get()),
+                        &dw_size);
 
                     if (NO_ERROR == error_code)
                     {
@@ -1682,20 +1713,20 @@ namespace iphelper
 
                         while (current_address)
                         {
-                            std::string adapter_name{current_address->AdapterName};
-                            std::transform(adapter_name.begin(), adapter_name.end(), adapter_name.begin(), toupper);
+                            std::string adapter_name{ current_address->AdapterName };
+                            std::ranges::transform(adapter_name, adapter_name.begin(), toupper);
                             if (adapter_name.find(guid) == std::string::npos)
                             {
                                 current_address = current_address->Next;
                                 continue;
                             }
 
-                            // Lookup an advanced information on the network interface
+                            // Lookup advanced information on the network interface
                             for (size_t i = 0; i < mib_table->NumEntries; ++i)
                             {
                                 if (mib_table->Table[i].InterfaceLuid == current_address->Luid)
                                 {
-                                    network_adapter_info result{current_address, mib_table, i};
+                                    network_adapter_info result{ current_address, mib_table, i };
                                     FreeMibTable(mib_table);
                                     return std::move(result);
                                 }
@@ -1713,8 +1744,7 @@ namespace iphelper
                         SetLastError(error_code);
                         break;
                     }
-                }
-                while (true);
+                } while (true);
             }
             else
             {
@@ -1755,26 +1785,20 @@ namespace iphelper
         /// <summary>
         /// NotifyIpInterfaceChange handle value
         /// </summary>
-        HANDLE notify_ip_interface_change_{nullptr};
+        HANDLE notify_ip_interface_change_{ nullptr };
         /// <summary>
         /// Tracks callback enters/leaves
         /// </summary>
-        std::atomic_uint32_t notify_ip_interface_ref_{0};
+        std::atomic_uint32_t notify_ip_interface_ref_{ 0 };
         /// <summary>
         /// Synchronization lock
         /// </summary>
         mutex_type lock_;
 
-    public:
         /// <summary>
         /// Default constructor
         /// </summary>
         network_config_info() = default;
-
-        /// <summary>
-        /// Deleted copy constructor
-        /// </summary>
-        network_config_info(const network_config_info& other) = delete;
 
         /// <summary>
         /// Move constructor
@@ -1789,6 +1813,12 @@ namespace iphelper
             notify_ip_interface_ref_ = other.notify_ip_interface_ref_.exchange(0);
         }
 
+public:    
+        /// <summary>
+        /// Deleted copy constructor
+        /// </summary>
+        network_config_info(const network_config_info& other) = delete;  // NOLINT(bugprone-crtp-constructor-accessibility)
+
         /// <summary>
         /// Deleted copy assignment
         /// </summary>
@@ -1799,14 +1829,12 @@ namespace iphelper
         /// </summary>
         /// <param name="other">object instance to move from</param>
         /// <returns>this object reference</returns>
-        network_config_info& operator=(network_config_info&& other)
+        network_config_info& operator=(network_config_info&& other) noexcept
         {
             if (this == &other)
                 return *this;
 
-            write_lock lhs_lk(lock_, std::defer_lock);
-            write_lock rhs_lk(other.lock_, std::defer_lock);
-            std::lock(lhs_lk, rhs_lk);
+            std::scoped_lock lock(lock_, other.lock_);
 
             notify_ip_interface_change_ = other.notify_ip_interface_change_;
             other.notify_ip_interface_change_ = nullptr;
@@ -1904,29 +1932,29 @@ namespace iphelper
         static std::vector<network_adapter_info> get_routable_interfaces(const net::ip_address_v4& ip_address)
         {
             auto is_valid_route = [&ip_address](auto adapter)
-            {
-                SOCKADDR_INET dest_address, best_route_address{};
-                // ReSharper disable once CppAssignedValueIsNeverUsed
-                dest_address.si_family = AF_INET;
-                dest_address.Ipv4.sin_family = AF_INET;
-                dest_address.Ipv4.sin_addr = ip_address;
-                MIB_IPFORWARD_ROW2 forward_row{};
-
-                if (auto error_code = GetBestRoute2(nullptr, adapter.get_if_index(), nullptr, &dest_address, 0,
-                                                    &forward_row, &best_route_address); NO_ERROR != error_code)
                 {
-                    ::SetLastError(error_code);
-                    return true; // NOTE: shouldn't be this called is_invalid_route() instead?
-                }
-                return false;
-            };
+                    SOCKADDR_INET dest_address, best_route_address{};
+                    // ReSharper disable once CppAssignedValueIsNeverUsed
+                    dest_address.si_family = AF_INET;
+                    dest_address.Ipv4.sin_family = AF_INET;
+                    dest_address.Ipv4.sin_addr = ip_address;
+                    MIB_IPFORWARD_ROW2 forward_row{};
+
+                    if (auto error_code = GetBestRoute2(nullptr, adapter.get_if_index(), nullptr, &dest_address, 0,
+                        &forward_row, &best_route_address); NO_ERROR != error_code)
+                    {
+                        ::SetLastError(error_code);
+                        return true; // NOTE: shouldn't be this called is_invalid_route() instead?
+                    }
+                    return false;
+                };
 
             auto adapters = network_adapter_info::get_external_network_connections();
 
             adapters.erase(std::remove_if(adapters.begin(), adapters.end(), [&is_valid_route](auto a)
-            {
-                return is_valid_route(a);
-            }), adapters.end());
+                {
+                    return is_valid_route(a);
+                }), adapters.end());
 
             return adapters;
         }
@@ -1939,29 +1967,29 @@ namespace iphelper
         static std::vector<network_adapter_info> get_routable_interfaces(const net::ip_address_v6& ip_address)
         {
             auto is_valid_route = [&ip_address](auto adapter)
-            {
-                SOCKADDR_INET dest_address, best_route_address{};
-                // ReSharper disable once CppAssignedValueIsNeverUsed
-                dest_address.si_family = AF_INET6;
-                dest_address.Ipv6.sin6_family = AF_INET6;
-                dest_address.Ipv6.sin6_addr = ip_address;
-                MIB_IPFORWARD_ROW2 forward_row{};
-
-                if (auto error_code = GetBestRoute2(nullptr, adapter.get_if_index(), nullptr, &dest_address, 0,
-                                                    &forward_row, &best_route_address); NO_ERROR != error_code)
                 {
-                    ::SetLastError(error_code);
-                    return true; // NOTE: shouldn't be this called is_invalid_route() instead?
-                }
-                return false;
-            };
+                    SOCKADDR_INET dest_address, best_route_address{};
+                    // ReSharper disable once CppAssignedValueIsNeverUsed
+                    dest_address.si_family = AF_INET6;
+                    dest_address.Ipv6.sin6_family = AF_INET6;
+                    dest_address.Ipv6.sin6_addr = ip_address;
+                    MIB_IPFORWARD_ROW2 forward_row{};
+
+                    if (auto error_code = GetBestRoute2(nullptr, adapter.get_if_index(), nullptr, &dest_address, 0,
+                        &forward_row, &best_route_address); NO_ERROR != error_code)
+                    {
+                        ::SetLastError(error_code);
+                        return true; // NOTE: shouldn't be this called is_invalid_route() instead?
+                    }
+                    return false;
+                };
 
             auto adapters = network_adapter_info::get_external_network_connections();
 
             adapters.erase(std::remove_if(adapters.begin(), adapters.end(), [&is_valid_route](auto a)
-            {
-                return is_valid_route(a);
-            }), adapters.end());
+                {
+                    return is_valid_route(a);
+                }), adapters.end());
 
             return adapters;
         }
@@ -1976,7 +2004,7 @@ namespace iphelper
             SetLastError(ERROR_SUCCESS);
 
             auto error_code = ::NotifyIpInterfaceChange(AF_UNSPEC, &network_config_info::ip_interface_changed_callback,
-                                                        this, FALSE, &notify_ip_interface_change_);
+                this, FALSE, &notify_ip_interface_change_);
 
             if (NO_ERROR == error_code)
                 return true;
@@ -2010,11 +2038,11 @@ namespace iphelper
         /// NotifyIpInterfaceChange callback. Calls ip_interface_changed_callback of CRTP derived class
         /// </summary>
         /// <param name="caller_context">this pointer</param>
-        /// <param name="row">pointer to MIB_IPINTERFACE_ROW</param>
+        /// <param name="row"> to MIB_IPINTERFACE_ROW</param>
         /// <param name="notification_type">type of notification</param>
         /// <returns></returns>
         static void __stdcall ip_interface_changed_callback(void* caller_context, PMIB_IPINTERFACE_ROW row,
-                                                            MIB_NOTIFICATION_TYPE notification_type)
+            MIB_NOTIFICATION_TYPE notification_type)
         {
             if (auto* const this_pointer = static_cast<T*>(caller_context); this_pointer)
             {
@@ -2025,12 +2053,14 @@ namespace iphelper
         }
 
         /// <summary>
-        /// Checks if enter/leave reference counter is zero and we can unload
+        /// Checks if enter/leave reference counter is zero, and we can unload
         /// </summary>
         /// <returns>true if unload is possible, false otherwise</returns>
         bool notify_ip_interface_can_unload() const
         {
             return (notify_ip_interface_ref_ == 0);
         }
+
+        friend T;
     };
 }

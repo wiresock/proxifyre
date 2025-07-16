@@ -14,6 +14,8 @@
 #include <string>
 #include <memory>
 #include <variant>
+#include <optional>
+#include <fstream>
 
 #include "mixed_types.h"
 

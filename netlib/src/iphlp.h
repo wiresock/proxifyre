@@ -17,7 +17,7 @@ typedef long n_time;
 typedef unsigned short u_short;
 typedef unsigned long u_long;
 typedef unsigned char u_char;
-typedef struct in_addr IN_ADDR, *PIN_ADDR;
+typedef struct in_addr IN_ADDR, * PIN_ADDR;
 
 #define ETH_ALEN				6		/* Octets in one ethernet addr	 */
 #define ETHER_HEADER_LENGTH		14		/* Ethernet header length */
@@ -57,12 +57,12 @@ typedef struct in_addr IN_ADDR, *PIN_ADDR;
 /// </summary>
 // --------------------------------------------------------------------------------
 
-typedef struct ether_header 
+typedef struct ether_header
 {
-	unsigned char	h_dest[ETH_ALEN];	/* destination eth addr	*/
-	unsigned char	h_source[ETH_ALEN];	/* source ether addr	*/
-	unsigned short	h_proto;		/* packet type ID field	*/
-} ether_header, *ether_header_ptr;
+    unsigned char	h_dest[ETH_ALEN];	/* destination eth addr	*/
+    unsigned char	h_source[ETH_ALEN];	/* source ether addr	*/
+    unsigned short	h_proto;		/* packet type ID field	*/
+} ether_header, * ether_header_ptr;
 
 // --------------------------------------------------------------------------------
 /// <summary>
@@ -72,21 +72,21 @@ typedef struct ether_header
 
 typedef struct arphdr
 {
-	unsigned short	ar_hrd;		/* format of hardware address	*/
-	unsigned short	ar_pro;		/* format of protocol address	*/
-	unsigned char	ar_hln;		/* length of hardware address	*/
-	unsigned char	ar_pln;		/* length of protocol address	*/
-	unsigned short	ar_op;		/* ARP opcode (command)		*/
-} arphdr, *arphdr_ptr;
+    unsigned short	ar_hrd;		/* format of hardware address	*/
+    unsigned short	ar_pro;		/* format of protocol address	*/
+    unsigned char	ar_hln;		/* length of hardware address	*/
+    unsigned char	ar_pln;		/* length of protocol address	*/
+    unsigned short	ar_op;		/* ARP opcode (command)		*/
+} arphdr, * arphdr_ptr;
 
-typedef struct	ether_arp 
+typedef struct	ether_arp
 {
-	struct	arphdr ea_hdr;	/* fixed-size header */
-	u_char	arp_sha[ETH_ALEN];	/* sender hardware address */
-	u_char	arp_spa[4];	/* sender protocol address */
-	u_char	arp_tha[ETH_ALEN];	/* target hardware address */
-	u_char	arp_tpa[4];	/* target protocol address */
-} ether_arp, *ether_arp_ptr;
+    struct	arphdr ea_hdr;	/* fixed-size header */
+    u_char	arp_sha[ETH_ALEN];	/* sender hardware address */
+    u_char	arp_spa[4];	/* sender protocol address */
+    u_char	arp_tha[ETH_ALEN];	/* target hardware address */
+    u_char	arp_tpa[4];	/* target protocol address */
+} ether_arp, * ether_arp_ptr;
 
 #define	arp_hrd	ea_hdr.ar_hrd
 #define	arp_pro	ea_hdr.ar_pro
@@ -100,21 +100,21 @@ typedef struct	ether_arp
 /// </summary>
 // --------------------------------------------------------------------------------
 
-typedef struct iphdr 
+typedef struct iphdr
 {
-	u_char	ip_hl:4,		/* header length */
-			ip_v:4;			/* version */
-	u_char	ip_tos;			/* type of service */
-	u_short	ip_len;			/* total length */
-	u_short	ip_id;			/* identification */
-	u_short	ip_off;			/* fragment offset field */
+    u_char	ip_hl : 4,		/* header length */
+        ip_v : 4;			/* version */
+    u_char	ip_tos;			/* type of service */
+    u_short	ip_len;			/* total length */
+    u_short	ip_id;			/* identification */
+    u_short	ip_off;			/* fragment offset field */
 #define	IP_DF 0x4000		/* dont fragment flag */
 #define	IP_MF 0x2000		/* more fragments flag */
-	u_char	ip_ttl;			/* time to live */
-	u_char	ip_p;			/* protocol */
-	u_short	ip_sum;			/* checksum */
-	struct	in_addr ip_src,ip_dst;	/* source and dest address */
-} iphdr, *iphdr_ptr;
+    u_char	ip_ttl;			/* time to live */
+    u_char	ip_p;			/* protocol */
+    u_short	ip_sum;			/* checksum */
+    struct	in_addr ip_src, ip_dst;	/* source and dest address */
+} iphdr, * iphdr_ptr;
 
 // --------------------------------------------------------------------------------
 /// <summary>
@@ -124,11 +124,11 @@ typedef struct iphdr
 
 typedef struct	udphdr
 {
-	u_short	th_sport;		/* source port */
-	u_short	th_dport;		/* destination port */
-	u_short	length;			/* data length */
-	u_short	th_sum;			/* checksum */
-} udphdr, *udphdr_ptr;
+    u_short	th_sport;		/* source port */
+    u_short	th_dport;		/* destination port */
+    u_short	length;			/* data length */
+    u_short	th_sum;			/* checksum */
+} udphdr, * udphdr_ptr;
 
 typedef	u_long	tcp_seq;
 
@@ -139,34 +139,34 @@ typedef	u_long	tcp_seq;
 // --------------------------------------------------------------------------------
 
 typedef struct tcphdr {
-	u_short	th_sport;		/* source port */
-	u_short	th_dport;		/* destination port */
-	tcp_seq	th_seq;			/* sequence number */
-	tcp_seq	th_ack;			/* acknowledgement number */
-	u_char	th_x2:4,		/* (unused) */
-			th_off:4;		/* data offset */
+    u_short	th_sport;		/* source port */
+    u_short	th_dport;		/* destination port */
+    tcp_seq	th_seq;			/* sequence number */
+    tcp_seq	th_ack;			/* acknowledgement number */
+    u_char	th_x2 : 4,		/* (unused) */
+        th_off : 4;		/* data offset */
 #define TCP_NO_OPTIONS	0x05
-	u_char	th_flags;
+    u_char	th_flags;
 #define	TH_FIN	0x01
 #define	TH_SYN	0x02
 #define	TH_RST	0x04
 #define	TH_PSH	0x08
 #define	TH_ACK	0x10
 #define	TH_URG	0x20
-	u_short	th_win;			/* window */
-	u_short	th_sum;			/* checksum */
-	u_short	th_urp;			/* urgent pointer */
-} tcphdr, *tcphdr_ptr;
+    u_short	th_win;			/* window */
+    u_short	th_sum;			/* checksum */
+    u_short	th_urp;			/* urgent pointer */
+} tcphdr, * tcphdr_ptr;
 
 typedef struct pseudo_header
 {
-  struct in_addr source_address;
-  struct in_addr dest_address;
-  unsigned char placeholder;
-  unsigned char protocol;
-  unsigned short tcp_length;
+    struct in_addr source_address;
+    struct in_addr dest_address;
+    unsigned char placeholder;
+    unsigned char protocol;
+    unsigned short tcp_length;
 
-}pseudo_header, *pseudo_header_ptr;
+}pseudo_header, * pseudo_header_ptr;
 
 /// <summary>Protocols for IPv6</summary>
 
@@ -184,19 +184,19 @@ typedef struct pseudo_header
 /// </summary>
 // --------------------------------------------------------------------------------
 
-typedef struct ipv6hdr 
-{	
-	unsigned char	ip6_class_hi : 4,
-					ip6_v : 4;			// 4  bits = version #
-	unsigned char	ip6_flow_hi : 4, 
-					ip6_class_lo : 4;	// 8  bits = Traffic class,
-	unsigned short	ip6_flow_lo;		// 20 bits = flow label
-	unsigned short	ip6_len;			// Payload length
-	unsigned char	ip6_next;			// Next Header
-	unsigned char	ip6_hops;			// Hop Limit
-	IN6_ADDR		ip6_src;			// Source Address
-	IN6_ADDR		ip6_dst;			// Destination Address
-} ipv6hdr, *ipv6hdr_ptr;
+typedef struct ipv6hdr
+{
+    unsigned char	ip6_class_hi : 4,
+        ip6_v : 4;			// 4  bits = version #
+    unsigned char	ip6_flow_hi : 4,
+        ip6_class_lo : 4;	// 8  bits = Traffic class,
+    unsigned short	ip6_flow_lo;		// 20 bits = flow label
+    unsigned short	ip6_len;			// Payload length
+    unsigned char	ip6_next;			// Next Header
+    unsigned char	ip6_hops;			// Hop Limit
+    IN6_ADDR		ip6_src;			// Source Address
+    IN6_ADDR		ip6_dst;			// Destination Address
+} ipv6hdr, * ipv6hdr_ptr;
 
 // --------------------------------------------------------------------------------
 /// <summary>
@@ -205,10 +205,10 @@ typedef struct ipv6hdr
 // --------------------------------------------------------------------------------
 
 typedef struct ipv6ext {
-	unsigned char    ip6_next;		// Next Header
-	unsigned char    ip6_len;		// number of bytes in this header 
-	unsigned char    ip6_data[2];	// optional data
-}ipv6ext, *ipv6ext_ptr;
+    unsigned char    ip6_next;		// Next Header
+    unsigned char    ip6_len;		// number of bytes in this header 
+    unsigned char    ip6_data[2];	// optional data
+}ipv6ext, * ipv6ext_ptr;
 
 typedef struct ipv6ext_frag
 {
@@ -216,15 +216,15 @@ typedef struct ipv6ext_frag
     unsigned char		ip6_reserved;   // reserved field
     unsigned short		ip6_offlg;      // offset, reserved, and flag
     unsigned int		ip6_ident;      // identification
-}ipv6ext_frag, *ipv6ext_frag_ptr;
+}ipv6ext_frag, * ipv6ext_frag_ptr;
 
 typedef struct mss_tcp_options {
 #define	MSS_TYPE	0x02
 #define	SACK_TYPE	0x04
-	u_char  mss_type;
-	u_char  mss_option_length;
-	u_short mss_value;
-}mss_tcp_options, *mss_tcp_options_ptr;
+    u_char  mss_type;
+    u_char  mss_option_length;
+    u_short mss_value;
+}mss_tcp_options, * mss_tcp_options_ptr;
 
 // --------------------------------------------------------------------------------
 /// <summary>
@@ -233,12 +233,12 @@ typedef struct mss_tcp_options {
 // --------------------------------------------------------------------------------
 
 typedef struct icmphdr {
-	unsigned char type;          // ICMP packet type
-	unsigned char code;          // Type sub code
-	unsigned short checksum;
-	unsigned short id;
-	unsigned short seq;
-}icmphdr, *icmphdr_ptr;
+    unsigned char type;          // ICMP packet type
+    unsigned char code;          // Type sub code
+    unsigned short checksum;
+    unsigned short id;
+    unsigned short seq;
+}icmphdr, * icmphdr_ptr;
 
 // --------------------------------------------------------------------------------
 /// <summary>
@@ -247,9 +247,9 @@ typedef struct icmphdr {
 // -------------------------------------------------------------------------------
 
 typedef struct icmpv6hdr {
-	unsigned char type;          // ICMP packet type
-	unsigned char code;          // Type sub code
-	unsigned short checksum;
+    unsigned char type;          // ICMP packet type
+    unsigned char code;          // Type sub code
+    unsigned short checksum;
 }icmpv6hdr, * icmpv6hdr_ptr;
 
 // --------------------------------------------------------------------------------
@@ -264,13 +264,13 @@ typedef struct icmpv6hdr {
 // --------------------------------------------------------------------------------
 
 typedef struct dns_header {
-	unsigned short id;
-	unsigned short flags;
-	unsigned short qdcount;
-	unsigned short ancount;
-	unsigned short nscount;
-	unsigned short arcount;
-}dns_header, *dns_header_ptr;
+    unsigned short id;
+    unsigned short flags;
+    unsigned short qdcount;
+    unsigned short ancount;
+    unsigned short nscount;
+    unsigned short arcount;
+}dns_header, * dns_header_ptr;
 
 // --------------------------------------------------------------------------------
 /// <summary>
@@ -285,15 +285,15 @@ typedef struct dns_header {
 // --------------------------------------------------------------------------------
 
 typedef struct qr_record {
-	uint16_t type;
-	uint16_t clas;
-} qr_record, *qr_record_ptr;
+    uint16_t type;
+    uint16_t clas;
+} qr_record, * qr_record_ptr;
 
 typedef struct res_record {
-	uint16_t type;
-	uint16_t clas;
-	uint32_t ttl;
-	uint16_t rdlength;
-} res_record, *res_record_ptr;
+    uint16_t type;
+    uint16_t clas;
+    uint32_t ttl;
+    uint16_t rdlength;
+} res_record, * res_record_ptr;
 
 #pragma pack()

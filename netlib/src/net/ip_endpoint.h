@@ -23,7 +23,7 @@ namespace net
         /// <param name="port">TCP/UDP port number</param>
         /// <param name="scope">interface scope ID</param>
         ip_endpoint(const T& ip, const unsigned short port,
-                    const std::optional<uint32_t> scope = std::nullopt) : ip(ip), port(port)
+            const std::optional<uint32_t> scope = std::nullopt) : ip(ip), port(port)
         {
             if (scope)
             {
@@ -81,7 +81,7 @@ namespace net
         /// <summary>
         /// Endpoint port value
         /// </summary>
-        uint16_t port{0};
+        uint16_t port{ 0 };
 
         /// <summary>
         /// Optional interface scope ID
@@ -98,6 +98,11 @@ namespace net
     template <typename T>
     struct ip_session
     {
+        /// <summary>
+        /// Default constructor
+        /// </summary>
+        ip_session() = default;
+
         /// <summary>
         /// Constructs object from provided local and remote IP addresses and ports
         /// </summary>
@@ -127,8 +132,8 @@ namespace net
         ip_session(
             const ip_endpoint<T>& local_endpoint,
             const ip_endpoint<T>& remote_endpoint) :
-            local{local_endpoint},
-            remote{remote_endpoint}
+            local{ local_endpoint },
+            remote{ remote_endpoint }
         {
         }
 
@@ -168,7 +173,7 @@ namespace std
     /// </summary>
     /// <typeparam name="T">net::ip_address_v4 or net::ip_address_v6</typeparam>
     template <typename T>
-    struct hash<net::ip_endpoint<T>> // NOLINT(cert-dcl58-cpp)
+    struct hash<net::ip_endpoint<T>>  // NOLINT(cert-dcl58-cpp)
     {
         using argument_type = net::ip_endpoint<T>;
         using result_type = std::size_t;
@@ -178,7 +183,7 @@ namespace std
             const auto h1(std::hash<std::size_t>{}(
                 std::hash<T>{}(endpoint.ip) ^
                 static_cast<unsigned long>(endpoint.port)
-            ));
+                ));
 
             return h1;
         }
@@ -189,7 +194,7 @@ namespace std
     /// </summary>
     /// <typeparam name="T">net::ip_address_v4 or net::ip_address_v6</typeparam>
     template <typename T>
-    struct hash<net::ip_session<T>> // NOLINT(cert-dcl58-cpp)
+    struct hash<net::ip_session<T>>  // NOLINT(cert-dcl58-cpp)
     {
         using argument_type = net::ip_session<T>;
         using result_type = std::size_t;
@@ -201,7 +206,7 @@ namespace std
                 static_cast<unsigned long>(endpoint.local.port) ^
                 std::hash<net::ip_endpoint<T>>{}(endpoint.remote) ^
                 static_cast<unsigned long>(endpoint.remote.port)
-            ));
+                ));
 
             return h1;
         }

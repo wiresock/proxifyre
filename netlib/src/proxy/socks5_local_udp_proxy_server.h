@@ -2,69 +2,221 @@
 
 namespace proxy
 {
+    /**
+     * @brief SOCKS5 UDP proxy server implementation.
+     *
+     * This class implements a local UDP proxy server that relays UDP packets through a SOCKS5 proxy.
+     * It manages the lifecycle of proxy sockets, handles client connections, and coordinates
+     * asynchronous I/O operations using Windows I/O completion ports.
+     *
+     * @tparam T Proxy socket implementation type.
+     */
     template <typename T>
     class socks5_local_udp_proxy_server : public netlib::log::logger<socks5_local_udp_proxy_server<T>>
     {
     public:
+        /**
+         * @brief Logging level type alias.
+         *
+         * Alias for the logging level enumeration used by the proxy server.
+         */
         using log_level = netlib::log::log_level;
+
+        /**
+         * @brief Logger type alias.
+         *
+         * Alias for the logger base class used for logging within the proxy server.
+         */
         using logger = netlib::log::logger<socks5_local_udp_proxy_server>;
+
+        /**
+         * @brief Negotiation context type alias.
+         *
+         * Alias for the negotiation context type defined by the proxy socket implementation (T).
+         * Used to store authentication and session information for SOCKS5 negotiation.
+         */
         using negotiate_context_t = typename T::negotiate_context_t;
+
+        /**
+         * @brief Address type alias.
+         *
+         * Alias for the address type defined by the proxy socket implementation (T).
+         * Represents an IPv4 or IPv6 address, depending on the template parameter.
+         */
         using address_type_t = typename T::address_type_t;
+
+        /**
+         * @brief Per-I/O context type alias.
+         *
+         * Alias for the per-I/O context type defined by the proxy socket implementation (T).
+         * Used for managing asynchronous I/O operations.
+         */
         using per_io_context_t = typename T::per_io_context_t;
 
+        /**
+         * @brief Query remote peer function signature.
+         *
+         * Function type that takes a local address and port, and returns a tuple containing:
+         * - The remote address to connect to,
+         * - The remote port,
+         * - A unique pointer to a negotiation context (for authentication/session).
+         */
         using query_remote_peer_t = std::tuple<address_type_t, uint16_t, std::unique_ptr<negotiate_context_t>>(
             address_type_t, uint16_t);
 
     private:
+        /**
+         * @brief Maximum number of simultaneous proxy connections.
+         *
+         * This constant defines the maximum number of concurrent connections
+         * the proxy server will track in its internal connection array.
+         */
         constexpr static size_t connections_array_size = 64;
 
+        /**
+         * @brief Mutex for synchronizing access to internal data structures.
+         *
+         * Used to protect shared resources such as the proxy_sockets_ map
+         * from concurrent access by multiple threads.
+         */
         std::mutex lock_;
 
+        /**
+         * @brief Thread object for the main proxy server loop.
+         *
+         * Handles the main server operations, such as accepting and processing client requests.
+         */
         std::thread proxy_server_;
+
+        /**
+         * @brief Thread object for client cleanup operations.
+         *
+         * Periodically checks and removes inactive or closed client connections.
+         */
         std::thread check_clients_thread_;
 
+        /**
+         * @brief Map of active proxy sockets indexed by local UDP port.
+         *
+         * Each entry represents a client session managed by the proxy server.
+         */
         std::map<uint16_t, std::unique_ptr<T>> proxy_sockets_;
 
-        std::atomic_bool end_server_{true}; // set to true on proxy termination
-        SOCKET server_socket_{INVALID_SOCKET};
+        /**
+         * @brief Indicates whether the server is terminating.
+         *
+         * Set to true when the server is stopping or has stopped.
+         */
+        std::atomic_bool end_server_{ true }; // set to true on proxy termination
 
-        packet_pool packet_pool_{};
+        /**
+         * @brief UDP server socket handle.
+         *
+         * The main socket used to receive and send UDP packets for the proxy server.
+         */
+        SOCKET server_socket_{ INVALID_SOCKET };
 
+        /**
+         * @brief Memory pool for efficient allocation and reuse of packet buffers.
+         */
+        std::shared_ptr<packet_pool> packet_pool_{};
+
+        /**
+         * @brief Buffer for receiving UDP packets from clients.
+         */
         std::array<char, T::send_receive_buffer_size> server_receive_buffer_{};
-        WSABUF server_recv_buf_{static_cast<ULONG>(server_receive_buffer_.size()), server_receive_buffer_.data()};
-        per_io_context_t server_io_context_{proxy_io_operation::relay_io_read, nullptr, true};
-        SOCKADDR_STORAGE recv_from_sa_{};
-        INT recv_from_sa_size_{sizeof(SOCKADDR_STORAGE)};
 
+        /**
+         * @brief WSABUF structure for overlapped I/O operations on the server socket.
+         */
+        WSABUF server_recv_buf_{ static_cast<ULONG>(server_receive_buffer_.size()), server_receive_buffer_.data() };
+
+        /**
+         * @brief Per-I/O context for the server socket's read operations.
+         */
+        per_io_context_t server_io_context_{ proxy_io_operation::relay_io_read, nullptr, true };
+
+        /**
+         * @brief Storage for the address of the sender of the last received UDP packet.
+         */
+        SOCKADDR_STORAGE recv_from_sa_{};
+
+        /**
+         * @brief Size of the sender address structure.
+         */
+        INT recv_from_sa_size_{ sizeof(SOCKADDR_STORAGE) };
+
+        /**
+         * @brief Local UDP port number the proxy server is bound to.
+         */
         uint16_t proxy_port_;
+
+        /**
+         * @brief Reference to the I/O completion port used for asynchronous operations.
+         */
         winsys::io_completion_port& completion_port_;
-        ULONG_PTR completion_key_{0};
+
+        /**
+         * @brief Completion key associated with the server socket in the I/O completion port.
+         */
+        ULONG_PTR completion_key_{ 0 };
+
+        /**
+         * @brief Function to query remote peer information for a given local address and port.
+         */
         std::function<query_remote_peer_t> query_remote_peer_;
-        /// <summary>message logging function</summary>
+
+        /// <summary>
+        /// Message logging function.
+        /// </summary>
         std::function<void(const char*)> log_printer_;
-        /// <summary>logging level</summary>
+
+        /// <summary>
+        /// Logging level for the proxy server.
+        /// </summary>
         netlib::log::log_level log_level_;
 
     public:
+        /**
+         * @brief Constructs a SOCKS5 local UDP proxy server.
+         *
+         * Initializes the proxy server with the specified UDP port, I/O completion port,
+         * remote peer query function, logging level, and optional log stream.
+         *
+         * @param proxy_port The local UDP port to bind the proxy server to.
+         * @param completion_port Reference to the I/O completion port for asynchronous operations.
+         * @param query_remote_peer_fn Function to resolve the remote peer for a given local address/port.
+         * @param log_level The logging level for the server (default: error).
+         * @param log_stream Optional output stream for logging (default: std::nullopt).
+         *
+         * @throws std::runtime_error if the server socket cannot be created or bound.
+         */
         socks5_local_udp_proxy_server(const uint16_t proxy_port, winsys::io_completion_port& completion_port,
-                                      const std::function<query_remote_peer_t> query_remote_peer_fn,
-                                      const log_level log_level = log_level::error,
-                                      const std::optional<std::reference_wrapper<std::ostream>> log_stream =
-                                          std::nullopt)
+            const std::function<query_remote_peer_t>& query_remote_peer_fn,
+            const log_level log_level = log_level::error,
+            const std::optional<std::reference_wrapper<std::ostream>> log_stream =
+            std::nullopt)
             : logger(log_level, log_stream),
-              proxy_port_(proxy_port),
-              completion_port_(completion_port),
-              query_remote_peer_(query_remote_peer_fn)
+            proxy_port_(proxy_port),
+            completion_port_(completion_port),
+            query_remote_peer_(query_remote_peer_fn)
         {
             if (!create_server_socket())
             {
                 throw std::runtime_error("socks5_local_udp_proxy_server: failed to create server socket.");
             }
+
+            packet_pool_ = std::make_shared<packet_pool>();
         }
 
+        /**
+         * @brief Destructor. Cleans up resources and stops the server if running.
+         *
+         * Closes the server socket and calls stop() if the server is still running.
+         */
         ~socks5_local_udp_proxy_server()
         {
-            if (server_socket_ != INVALID_SOCKET)
+            if (server_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
             {
                 closesocket(server_socket_);
                 server_socket_ = INVALID_SOCKET;
@@ -74,19 +226,37 @@ namespace proxy
                 stop();
         }
 
+        // Deleted copy constructor to prevent copying.
         socks5_local_udp_proxy_server(const socks5_local_udp_proxy_server& other) = delete;
 
+        // Deleted move constructor to prevent moving.
         socks5_local_udp_proxy_server(socks5_local_udp_proxy_server&& other) noexcept = delete;
 
+        // Deleted copy assignment operator to prevent copying.
         socks5_local_udp_proxy_server& operator=(const socks5_local_udp_proxy_server& other) = delete;
 
+        // Deleted move assignment operator to prevent moving.
         socks5_local_udp_proxy_server& operator=(socks5_local_udp_proxy_server&& other) noexcept = delete;
 
+        /**
+         * @brief Gets the local UDP port the proxy server is bound to.
+         *
+         * @return The UDP port number.
+         */
         [[nodiscard]] uint16_t proxy_port() const
         {
             return proxy_port_;
         }
 
+        /**
+         * @brief Starts the SOCKS5 local UDP proxy server.
+         *
+         * Associates the server socket with the I/O completion port and begins listening for UDP packets.
+         * If the server is already running, this function is a no-op and returns true.
+         * On failure, the server socket is closed and the server is marked as stopped.
+         *
+         * @return True if the server started successfully or was already running, false otherwise.
+         */
         bool start()
         {
             if (end_server_ == false)
@@ -97,7 +267,7 @@ namespace proxy
 
             end_server_ = false;
 
-            if (server_socket_ != INVALID_SOCKET)
+            if (server_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
             {
                 if (auto [associate_status, io_key] = completion_port_.associate_socket(
                     server_socket_,
@@ -113,7 +283,7 @@ namespace proxy
 
                         auto io_context = static_cast<per_io_context_t*>(povlp);
 
-                        //if ((io_context->is_local == true) && (io_context->io_operation == proxy_io_operation::relay_io_read))
+                        // If this is the server socket's read operation
                         if (io_context == &server_io_context_)
                         {
                             // Server socket read operation complete
@@ -129,7 +299,7 @@ namespace proxy
                                         break;
                                     }
 
-                                    io_context->wsa_buf = packet_pool_.allocate(num_bytes);
+                                    io_context->wsa_buf = packet_pool_->allocate(num_bytes);
 
                                     if (!io_context->wsa_buf)
                                     {
@@ -139,8 +309,7 @@ namespace proxy
 
                                     io_context->wsa_buf->len = num_bytes;
                                     memmove(io_context->wsa_buf->buf, server_receive_buffer_.data(), num_bytes);
-                                }
-                                while (false);
+                                } while (false);
                             }
                         }
 
@@ -215,7 +384,7 @@ namespace proxy
                 }
                 else
                 {
-                    if (server_socket_ != INVALID_SOCKET)
+                    if (server_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                     {
                         closesocket(server_socket_);
                     }
@@ -230,6 +399,17 @@ namespace proxy
             return true;
         }
 
+        /**
+         * @brief Stops the SOCKS5 local UDP proxy server and releases all resources.
+         *
+         * This method signals the server to stop, joins any running threads,
+         * and clears all active proxy socket sessions. If the server is already stopped,
+         * the method returns immediately.
+         *
+         * - Sets the end_server_ flag to true to indicate shutdown.
+         * - Joins the proxy server and client cleanup threads if they are running.
+         * - Clears the proxy_sockets_ map, releasing all associated resources.
+         */
         void stop()
         {
             if (end_server_ == true)
@@ -257,15 +437,18 @@ namespace proxy
         }
 
     private:
-        // ********************************************************************************
-        /// <summary>
-        /// Queries remote host information for outgoing connection by local peer IP address 
-        /// and port 
-        /// </summary>
-        /// <param name="accepted_peer_address">IP address</param>
-        /// <param name="accepted_peer_port">UDP port</param>
-        /// <returns>tuple of information required to connect to the remote peer</returns>
-        // ********************************************************************************
+        /**
+         * @brief Queries remote host information for outgoing connection by local peer IP address and port.
+         *
+         * This method uses the configured query_remote_peer_ function to determine the remote peer
+         * (address, port, and negotiation context) for a given local peer address and UDP port.
+         * If no query function is set, it returns a default-constructed tuple with empty address,
+         * port 0, and nullptr negotiation context.
+         *
+         * @param accepted_peer_address The local peer's IP address.
+         * @param accepted_peer_port The local peer's UDP port.
+         * @return Tuple containing the remote address, remote port, and a unique pointer to the negotiation context.
+         */
         std::tuple<address_type_t, uint16_t, std::unique_ptr<negotiate_context_t>> get_remote_peer(
             address_type_t accepted_peer_address, unsigned short accepted_peer_port) const
         {
@@ -277,20 +460,31 @@ namespace proxy
             return std::make_tuple(address_type_t{}, 0, nullptr);
         }
 
+        /**
+         * @brief Creates and binds the UDP server socket for the proxy server.
+         *
+         * This method creates a UDP socket (IPv4 or IPv6 depending on address_type_t::af_type),
+         * binds it to the specified proxy_port_, and updates proxy_port_ if it was initially zero.
+         * On failure, the socket is closed and INVALID_SOCKET is set.
+         *
+         * @return True if the socket was successfully created and bound, false otherwise.
+         */
         bool create_server_socket()
         {
             server_socket_ = WSASocket(address_type_t::af_type, SOCK_DGRAM, IPPROTO_UDP, nullptr, 0,
-                                       WSA_FLAG_OVERLAPPED);
+                WSA_FLAG_OVERLAPPED);
 
-            if (server_socket_ == INVALID_SOCKET)
+            if (server_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
             {
                 return false;
             }
 
             if constexpr (address_type_t::af_type == AF_INET)
             {
-                sockaddr_in service{address_type_t::af_type, htons(proxy_port_), INADDR_ANY};
-                // NOLINT(clang-diagnostic-missing-field-initializers)
+                sockaddr_in service{};
+                service.sin_family = address_type_t::af_type;
+                service.sin_port = htons(proxy_port_);
+                service.sin_addr.s_addr = htonl(INADDR_ANY);
 
                 if (const auto status = bind(server_socket_, reinterpret_cast<SOCKADDR*>(&service), sizeof(service));
                     status == SOCKET_ERROR)
@@ -317,7 +511,7 @@ namespace proxy
             }
             else
             {
-                sockaddr_in6 service{address_type_t::af_type, htons(proxy_port_), 0, in6addr_any};
+                sockaddr_in6 service{ address_type_t::af_type, htons(proxy_port_), 0, in6addr_any };
 
                 if (const auto status = bind(server_socket_, reinterpret_cast<SOCKADDR*>(&service), sizeof(service));
                     status == SOCKET_ERROR)
@@ -346,10 +540,21 @@ namespace proxy
             return true;
         }
 
+        /**
+         * @brief Establishes a TCP connection to the specified SOCKS5 proxy server.
+         *
+         * This method creates a non-blocking TCP socket (IPv4 or IPv6 depending on address_type_t::af_type),
+         * binds it to a local ephemeral port, and connects it to the given SOCKS5 proxy server address and port.
+         * On failure, the socket is closed and INVALID_SOCKET is returned.
+         *
+         * @param socks_server_address The address of the SOCKS5 proxy server to connect to.
+         * @param socks_server_port The port of the SOCKS5 proxy server.
+         * @return A connected TCP SOCKET handle, or INVALID_SOCKET on failure.
+         */
         SOCKET connect_to_socks5_proxy(address_type_t socks_server_address, const uint16_t socks_server_port)
         {
             auto socks_tcp_socket = WSASocket(address_type_t::af_type, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
-                                              WSA_FLAG_OVERLAPPED);
+                WSA_FLAG_OVERLAPPED);
 
             if (socks_tcp_socket == INVALID_SOCKET)
             {
@@ -358,7 +563,7 @@ namespace proxy
 
             if constexpr (address_type_t::af_type == AF_INET)
             {
-                sockaddr_in sa_local = {0}; // NOLINT(clang-diagnostic-missing-field-initializers)
+                sockaddr_in sa_local{};
                 sa_local.sin_family = address_type_t::af_type;
                 sa_local.sin_port = htons(0);
                 sa_local.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -372,7 +577,7 @@ namespace proxy
             }
             else
             {
-                sockaddr_in6 sa_local = {0}; // NOLINT(clang-diagnostic-missing-field-initializers)
+                sockaddr_in6 sa_local{};
                 sa_local.sin6_family = address_type_t::af_type;
                 sa_local.sin6_port = htons(0);
                 sa_local.sin6_addr = in6addr_any;
@@ -388,7 +593,7 @@ namespace proxy
             // connect to server
             if constexpr (address_type_t::af_type == AF_INET)
             {
-                sockaddr_in sa_service = {0}; // NOLINT(clang-diagnostic-missing-field-initializers)
+                sockaddr_in sa_service{};
                 sa_service.sin_family = address_type_t::af_type;
                 sa_service.sin_addr = socks_server_address;
                 sa_service.sin_port = htons(socks_server_port);
@@ -402,7 +607,7 @@ namespace proxy
             }
             else
             {
-                sockaddr_in6 sa_service = {0}; // NOLINT(clang-diagnostic-missing-field-initializers)
+                sockaddr_in6 sa_service{};
                 sa_service.sin6_family = address_type_t::af_type;
                 sa_service.sin6_addr = socks_server_address;
                 sa_service.sin6_port = htons(socks_server_port);
@@ -418,9 +623,21 @@ namespace proxy
             return socks_tcp_socket;
         }
 
+        /**
+         * @brief Performs SOCKS5 negotiation and sends the UDP ASSOCIATE command.
+         *
+         * This method negotiates authentication with the SOCKS5 proxy server over the provided TCP socket,
+         * using either "NO AUTHENTICATION REQUIRED" or "USERNAME/PASSWORD" (RFC 1929) as needed.
+         * If authentication succeeds, it sends a UDP ASSOCIATE command to the proxy and retrieves the
+         * UDP port assigned by the proxy for relaying UDP packets.
+         *
+         * @param socks_tcp_socket The connected TCP socket to the SOCKS5 proxy server.
+         * @param negotiate_ctx Unique pointer to the negotiation context, containing optional credentials.
+         * @return The UDP port assigned by the SOCKS5 proxy for UDP relay, or std::nullopt on failure.
+         */
         [[nodiscard]] std::optional<uint16_t> associate_to_socks5_proxy(const SOCKET socks_tcp_socket,
-                                                                        std::unique_ptr<negotiate_context_t>&
-                                                                        negotiate_ctx) const noexcept
+            std::unique_ptr<negotiate_context_t>&
+            negotiate_ctx) const noexcept
         {
             using namespace std::string_literals;
 
@@ -442,29 +659,29 @@ namespace proxy
             }
 
             auto result = send(socks_tcp_socket, reinterpret_cast<const char*>(&ident_req),
-                               static_cast<int>(socks5_ident_req_size), 0);
+                static_cast<int>(socks5_ident_req_size), 0);
             if (result == SOCKET_ERROR)
             {
-                print_log(log_level::info,
-                          "[SOCKS5]: associate_to_socks5_proxy: Failed to send socks5_ident_req: "s + std::to_string(
-                              WSAGetLastError()));
+                logger::print_log(log_level::info,
+                    "[SOCKS5]: associate_to_socks5_proxy: Failed to send socks5_ident_req: "s + std::to_string(
+                        WSAGetLastError()));
                 return {};
             }
 
             result = recv(socks_tcp_socket, reinterpret_cast<char*>(&ident_resp), sizeof(ident_resp), 0);
             if (result == SOCKET_ERROR)
             {
-                print_log(log_level::info,
-                          "[SOCKS5]: associate_to_socks5_proxy: Failed to receive socks5_ident_resp: "s +
-                          std::to_string(WSAGetLastError()));
+                logger::print_log(log_level::info,
+                    "[SOCKS5]: associate_to_socks5_proxy: Failed to receive socks5_ident_resp: "s +
+                    std::to_string(WSAGetLastError()));
                 return {};
             }
 
             if ((ident_resp.version != 5) ||
                 (ident_resp.method == 0xFF))
             {
-                print_log(log_level::info,
-                          "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 authentication has failed: "s);
+                logger::print_log(log_level::info,
+                    "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 authentication has failed: "s);
                 return {};
             }
 
@@ -472,66 +689,66 @@ namespace proxy
             {
                 if (!negotiate_ctx->socks5_username.has_value())
                 {
-                    print_log(log_level::info,
-                              "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but USERNAME is not provided: "s);
+                    logger::print_log(log_level::info,
+                        "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but USERNAME is not provided: "s);
                     return {};
                 }
 
                 if (negotiate_ctx->socks5_username.value().length() > socks5_username_max_length || negotiate_ctx->
                     socks5_username.value().length() < 1)
                 {
-                    print_log(log_level::info,
-                              "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but USERNAME exceeds maximum possible length: "s);
+                    logger::print_log(log_level::info,
+                        "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but USERNAME exceeds maximum possible length: "s);
                     return {};
                 }
 
                 if (!negotiate_ctx->socks5_password.has_value())
                 {
-                    print_log(log_level::info,
-                              "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but PASSWORD is not provided: "s);
+                    logger::print_log(log_level::info,
+                        "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but PASSWORD is not provided: "s);
                     return {};
                 }
 
                 if (negotiate_ctx->socks5_password.value().length() > socks5_username_max_length || negotiate_ctx->
                     socks5_password.value().length() < 1)
                 {
-                    print_log(log_level::info,
-                              "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but USERNAME exceeds maximum possible length: "s);
+                    logger::print_log(log_level::info,
+                        "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but USERNAME exceeds maximum possible length: "s);
                     return {};
                 }
 
                 const socks5_username_auth auth_req(negotiate_ctx->socks5_username.value(),
-                                                    negotiate_ctx->socks5_password.value());
+                    negotiate_ctx->socks5_password.value());
 
                 result = send(socks_tcp_socket, reinterpret_cast<const char*>(&auth_req),
-                              3 + static_cast<int>(negotiate_ctx->socks5_username.value().length()) + static_cast<int>(
-                                  negotiate_ctx->socks5_password.value().length()), 0);
+                    3 + static_cast<int>(negotiate_ctx->socks5_username.value().length()) + static_cast<int>(
+                        negotiate_ctx->socks5_password.value().length()), 0);
                 if (result == SOCKET_ERROR)
                 {
-                    print_log(log_level::info,
-                              "[SOCKS5]: associate_to_socks5_proxy: Failed to send socks5_username_auth: "s +
-                              std::to_string(WSAGetLastError()));
+                    logger::print_log(log_level::info,
+                        "[SOCKS5]: associate_to_socks5_proxy: Failed to send socks5_username_auth: "s +
+                        std::to_string(WSAGetLastError()));
                     return {};
                 }
 
                 result = recv(socks_tcp_socket, reinterpret_cast<char*>(&ident_resp), sizeof(ident_resp), 0);
                 if (result == SOCKET_ERROR)
                 {
-                    print_log(log_level::info,
-                              "[SOCKS5]: associate_to_socks5_proxy: Failed to receive socks5_ident_resp: "s +
-                              std::to_string(WSAGetLastError()));
+                    logger::print_log(log_level::info,
+                        "[SOCKS5]: associate_to_socks5_proxy: Failed to receive socks5_ident_resp: "s +
+                        std::to_string(WSAGetLastError()));
                     return {};
                 }
 
                 if (ident_resp.method != 0x0)
                 {
-                    print_log(log_level::info,
-                              "[SOCKS5]: associate_to_socks5_proxy: USERNAME/PASSWORD authentication has failed!"s);
+                    logger::print_log(log_level::info,
+                        "[SOCKS5]: associate_to_socks5_proxy: USERNAME/PASSWORD authentication has failed!"s);
                     return {};
                 }
 
-                print_log(log_level::info,
-                          "[SOCKS5]: associate_to_socks5_proxy: USERNAME/PASSWORD authentication SUCCESS"s);
+                logger::print_log(log_level::info,
+                    "[SOCKS5]: associate_to_socks5_proxy: USERNAME/PASSWORD authentication SUCCESS"s);
             }
 
             associate_req.version = 5;
@@ -550,36 +767,55 @@ namespace proxy
             result = send(socks_tcp_socket, reinterpret_cast<const char*>(&associate_req), sizeof(associate_req), 0);
             if (result == SOCKET_ERROR)
             {
-                print_log(log_level::info,
-                          "[SOCKS5]: associate_to_socks5_proxy: Failed to send SOCKS5 ASSOCIATE request: "s +
-                          std::to_string(WSAGetLastError()));
+                logger::print_log(log_level::info,
+                    "[SOCKS5]: associate_to_socks5_proxy: Failed to send SOCKS5 ASSOCIATE request: "s +
+                    std::to_string(WSAGetLastError()));
                 return {};
             }
 
             result = recv(socks_tcp_socket, reinterpret_cast<char*>(&associate_resp), sizeof(associate_resp), 0);
             if (result == SOCKET_ERROR)
             {
-                print_log(log_level::info,
-                          "[SOCKS5]: associate_to_socks5_proxy: Failed to receive SOCKS5 ASSOCIATE response: "s +
-                          std::to_string(WSAGetLastError()));
+                logger::print_log(log_level::info,
+                    "[SOCKS5]: associate_to_socks5_proxy: Failed to receive SOCKS5 ASSOCIATE response: "s +
+                    std::to_string(WSAGetLastError()));
                 return {};
             }
 
             if ((associate_resp.version != 5) ||
                 (associate_resp.reply != 0))
             {
-                print_log(log_level::info,
-                          "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 ASSOCIATE has failed: "s);
+                logger::print_log(log_level::info,
+                    "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 ASSOCIATE has failed: "s);
                 return {};
             }
 
-            print_log(log_level::info,
-                      "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 ASSOCIATE SUCCESS port: "s + std::to_string(
-                          ntohs(associate_resp.bind_port)));
+            logger::print_log(log_level::info,
+                "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 ASSOCIATE SUCCESS port: "s + std::to_string(
+                    ntohs(associate_resp.bind_port)));
 
             return ntohs(associate_resp.bind_port);
         }
 
+        /**
+         * @brief Establishes a UDP relay session to a remote host through a SOCKS5 proxy.
+         *
+         * This method is responsible for setting up a UDP relay for a new client connection.
+         * It determines the local peer's address and port from the last received UDP packet,
+         * checks if a proxy socket for this client already exists, and if not:
+         *   - Resolves the remote SOCKS5 proxy address, port, and negotiation context.
+         *   - Establishes a TCP connection to the SOCKS5 proxy and performs authentication/negotiation.
+         *   - Issues a UDP ASSOCIATE command to the proxy and retrieves the assigned UDP port.
+         *   - Creates and binds a UDP socket for relaying packets to the proxy.
+         *   - Connects the UDP socket to the proxy and stores the session in the proxy_sockets_ map.
+         *   - Associates the new proxy socket with the I/O completion port and starts it.
+         *
+         * If any step fails, all resources are cleaned up and the method returns false.
+         *
+         * @param io_context Pointer to the per-I/O context structure for the current operation.
+         *                   On success, its proxy_socket_ptr is set to the active proxy socket.
+         * @return True if the relay session was established or already exists, false on failure.
+         */
         bool connect_to_remote_host(per_io_context_t* io_context)
         {
             uint16_t local_peer_port = 0;
@@ -610,7 +846,7 @@ namespace proxy
             auto [remote_address, remote_port, negotiate_ctx] =
                 get_remote_peer(local_peer_address, local_peer_port);
 
-            print_log(log_level::debug,
+            logger::print_log(log_level::debug,
                       std::string("connect_to_remote_host: Connect to SOCKS5 proxy and send ASSOCIATE command: ") +
                       std::string{remote_address} + " : " +
                       std::to_string(remote_port));
@@ -618,7 +854,7 @@ namespace proxy
             auto socks5_tcp_socket = connect_to_socks5_proxy(remote_address, remote_port);
             if (socks5_tcp_socket == INVALID_SOCKET)
             {
-                print_log(log_level::debug,
+                logger::print_log(log_level::debug,
                           std::string("connect_to_remote_host: Failed to connect to SOCKS5 proxy: ") + std::string{
                               remote_address
                           } + " : " +
@@ -629,7 +865,7 @@ namespace proxy
             auto udp_port = associate_to_socks5_proxy(socks5_tcp_socket, negotiate_ctx);
             if (!udp_port.has_value())
             {
-                print_log(log_level::debug,
+                logger::print_log(log_level::debug,
                           std::string("connect_to_remote_host: ASSOCIATE command has failed: ") + std::string{
                               remote_address
                           } + " : " +
@@ -639,7 +875,7 @@ namespace proxy
                 return false;
             }
 
-            print_log(log_level::debug,
+            logger::print_log(log_level::debug,
                       std::string("connect_to_remote_host:  UDP connect: ") + std::string{remote_address} + " : " +
                       std::to_string(udp_port.value()));
 
@@ -653,7 +889,7 @@ namespace proxy
 
             if constexpr (address_type_t::af_type == AF_INET)
             {
-                sockaddr_in sa_local = {0}; // NOLINT(clang-diagnostic-missing-field-initializers)
+                sockaddr_in sa_local{};
                 sa_local.sin_family = address_type_t::af_type;
                 sa_local.sin_port = htons(0);
                 sa_local.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -668,7 +904,7 @@ namespace proxy
             }
             else
             {
-                sockaddr_in6 sa_local = {0}; // NOLINT(clang-diagnostic-missing-field-initializers)
+                sockaddr_in6 sa_local{};
                 sa_local.sin6_family = address_type_t::af_type;
                 sa_local.sin6_port = htons(0);
                 sa_local.sin6_addr = in6addr_any;
@@ -685,7 +921,7 @@ namespace proxy
             // connect to server
             if constexpr (address_type_t::af_type == AF_INET)
             {
-                sockaddr_in sa_service = {0}; // NOLINT(clang-diagnostic-missing-field-initializers)
+                sockaddr_in sa_service{};
                 sa_service.sin_family = address_type_t::af_type;
                 sa_service.sin_addr = remote_address;
                 sa_service.sin_port = htons(udp_port.value());
@@ -700,7 +936,7 @@ namespace proxy
             }
             else
             {
-                sockaddr_in6 sa_service = {0}; // NOLINT(clang-diagnostic-missing-field-initializers)
+                sockaddr_in6 sa_service{};
                 sa_service.sin6_family = address_type_t::af_type;
                 sa_service.sin6_addr = remote_address;
                 sa_service.sin6_port = htons(remote_port);
@@ -719,7 +955,7 @@ namespace proxy
                                                            socks5_tcp_socket, packet_pool_, server_socket_,
                                                            recv_from_sa_, remote_socket, remote_address,
                                                            udp_port.value(), std::move(negotiate_ctx),
-                                                           log_level_, log_stream_));
+                                                           log_level_, logger::log_stream_));
 
             if (result)
             {
@@ -737,6 +973,17 @@ namespace proxy
             return result;
         }
 
+        /**
+         * @brief Periodically cleans up inactive or closed proxy socket sessions.
+         *
+         * This thread routine runs in the background while the server is active. It acquires a lock
+         * on the proxy_sockets_ map, iterates through all active proxy socket sessions, and removes
+         * any that are ready for removal (e.g., due to client disconnect or error). The cleanup
+         * operation is performed once per second to minimize resource usage and ensure timely
+         * release of unused sockets.
+         *
+         * The thread exits automatically when the server is stopped (end_server_ is set to true).
+         */
         void clear_thread()
         {
             while (end_server_ == false)

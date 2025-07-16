@@ -1,49 +1,198 @@
 #pragma once
 namespace proxy
 {
+    /**
+     * @class tcp_proxy_server
+     * @brief Implements a generic asynchronous TCP proxy server using I/O completion ports.
+     *
+     * This class manages the lifecycle and I/O operations of a TCP proxy server that relays connections
+     * between local clients and remote peers. It is designed to be highly scalable and efficient by leveraging
+     * Windows overlapped I/O and completion ports, and supports both IPv4 and IPv6 through its template parameter.
+     *
+     * Key features:
+     * - Listens for incoming TCP connections on a configurable port.
+     * - For each accepted connection, queries the remote peer endpoint and negotiation context using a user-supplied callback.
+     * - Establishes a connection to the remote peer and relays data between the local client and remote server.
+     * - Manages all sockets and I/O operations asynchronously using a thread pool and completion port.
+     * - Provides thread-safe management of active proxy sessions and supports dynamic cleanup of idle or closed sessions.
+     * - Integrates with a logging framework for diagnostics and debugging.
+     *
+     * Template parameter:
+     * @tparam T The proxy socket type to use for each proxied connection. Must provide:
+     *   - negotiate_context_t: Type holding negotiation context (e.g., credentials, target address).
+     *   - address_type_t: Address type (e.g., IPv4 or IPv6).
+     *   - per_io_context_t: Per-I/O context type for managing asynchronous operations.
+     *
+     * Public interface:
+     * - tcp_proxy_server(uint16_t proxy_port, winsys::io_completion_port&, std::function<query_remote_peer_t>, ...)
+     *      Constructs and initializes the proxy server, binding to the specified port.
+     * - ~tcp_proxy_server()
+     *      Cleans up all resources and stops the server.
+     * - bool start()
+     *      Starts the proxy server, accepting connections and relaying data.
+     * - void stop()
+     *      Stops the proxy server and all active sessions.
+     * - uint16_t proxy_port() const
+     *      Returns the local listening port.
+     * - std::vector<negotiate_context_t> query_current_sessions_ctx()
+     *      Returns the negotiation contexts for all active sessions.
+     *
+     * Not copyable or movable.
+     *
+     * Internal details:
+     * - Uses a vector of socket/event/context tuples to track pending and active connections.
+     * - Uses multiple threads for accepting connections, connecting to remote hosts, and cleaning up idle sessions.
+     * - Associates sockets with the I/O completion port for efficient asynchronous I/O.
+     * - Thread safety is ensured via shared_mutex and atomic flags.
+     */
     template <typename T>
     class tcp_proxy_server : public netlib::log::logger<tcp_proxy_server<T>>
     {
     public:
+        /**
+         * @brief Type alias for the logging level enumeration used by the proxy server.
+         */
         using log_level = netlib::log::log_level;
+
+        /**
+         * @brief Type alias for the logger base class used for logging within the proxy server.
+         */
         using logger = netlib::log::logger<tcp_proxy_server>;
+
+        /**
+         * @brief Type alias for the negotiation context type used by the proxy socket.
+         *
+         * This type holds information required for session negotiation, such as credentials or
+         * target addresses, and is defined by the proxy socket type T.
+         */
         using negotiate_context_t = typename T::negotiate_context_t;
+
+        /**
+         * @brief Type alias for the address type (e.g., IPv4 or IPv6) used by the proxy socket.
+         */
         using address_type_t = typename T::address_type_t;
+
+        /**
+         * @brief Type alias for the per-I/O context type used for managing asynchronous operations.
+         */
         using per_io_context_t = typename T::per_io_context_t;
 
+        /**
+         * @brief Type alias for the callback function used to query remote peer information.
+         *
+         * The callback takes an address and port and returns a tuple containing the remote address,
+         * remote port, and a unique pointer to the negotiation context for the session.
+         */
         using query_remote_peer_t = std::tuple<address_type_t, uint16_t, std::unique_ptr<negotiate_context_t>>(
             address_type_t, uint16_t);
 
     private:
+        /**
+         * @brief Maximum number of simultaneous connections/events the server can track.
+         *
+         * This constant defines the reserved size for the internal connection/event arrays.
+         */
         constexpr static size_t connections_array_size = 64;
 
+        /**
+         * @brief The TCP port number on which the proxy server listens for incoming connections.
+         */
         uint16_t proxy_port_;
+
+        /**
+         * @brief Reference to the I/O completion port used for asynchronous socket operations.
+         *
+         * This enables scalable, efficient handling of multiple concurrent I/O operations.
+         */
         winsys::io_completion_port& completion_port_;
+
+        /**
+         * @brief Callback function to query remote peer information for each new connection.
+         *
+         * This function is invoked with the local peer's address and port, and returns a tuple
+         * containing the remote address, remote port, and a unique pointer to the negotiation context.
+         */
         std::function<query_remote_peer_t> query_remote_peer_;
 
+        /**
+         * @brief Shared mutex for synchronizing access to internal data structures.
+         *
+         * Used to protect concurrent access to the proxy socket and event arrays.
+         */
         std::shared_mutex lock_;
 
+        /**
+         * @brief Thread for accepting incoming client connections and dispatching them.
+         */
         std::thread proxy_server_;
+
+        /**
+         * @brief Thread for periodically checking and cleaning up closed or idle client sessions.
+         */
         std::thread check_clients_thread_;
+
+        /**
+         * @brief Thread for handling asynchronous connections to remote hosts.
+         */
         std::thread connect_to_remote_host_thread_;
 
+        /**
+         * @brief Vector of active proxy socket instances, one per client session.
+         */
         std::vector<std::unique_ptr<T>> proxy_sockets_;
+
+        /**
+         * @brief Array of tuples tracking events, sockets, and negotiation contexts for pending connections.
+         *
+         * Each tuple contains:
+         * - WSAEVENT: Event handle for overlapped I/O notification.
+         * - SOCKET:   Local client socket.
+         * - SOCKET:   Remote server socket.
+         * - std::unique_ptr<negotiate_context_t>: Negotiation context for the session.
+         */
         std::vector<std::tuple<WSAEVENT, SOCKET, SOCKET, std::unique_ptr<negotiate_context_t>>> sock_array_events_;
 
-        std::atomic_bool end_server_{true}; // set to true on proxy termination
-        SOCKET server_socket_{INVALID_SOCKET};
+        /**
+         * @brief Atomic flag indicating whether the server is shutting down or has terminated.
+         */
+        std::atomic_bool end_server_{ true };
 
-        ULONG_PTR completion_key_{0};
+        /**
+         * @brief The main listening socket for incoming client connections.
+         */
+        SOCKET server_socket_{ INVALID_SOCKET };
+
+        /**
+         * @brief Completion key associated with the I/O completion port for this server.
+         */
+        ULONG_PTR completion_key_{ 0 };
 
     public:
+        /**
+         * @brief Constructs a tcp_proxy_server instance and binds it to the specified port.
+         *
+         * Initializes the TCP proxy server, sets up the I/O completion port, and prepares the
+         * callback for remote peer queries. Throws a std::runtime_error if the server socket
+         * cannot be created or bound.
+         *
+         * @param proxy_port         The TCP port number to listen on for incoming client connections.
+         * @param completion_port    Reference to the I/O completion port for asynchronous operations.
+         * @param query_remote_peer_fn
+         *        Callback function to determine the remote peer address, port, and negotiation context
+         *        for each new client connection.
+         * @param log_level          Logging level for this server instance (default: error).
+         * @param log_stream         Optional output stream for logging (default: std::nullopt).
+         *
+         * @throws std::runtime_error if the server socket cannot be created or bound.
+         */
         tcp_proxy_server(const uint16_t proxy_port, winsys::io_completion_port& completion_port,
-                         const std::function<query_remote_peer_t> query_remote_peer_fn,
-                         const log_level log_level = log_level::error,
-                         const std::optional<std::reference_wrapper<std::ostream>> log_stream = std::nullopt)
+            const std::function<query_remote_peer_t>& query_remote_peer_fn,
+            const log_level log_level = log_level::error,
+            const std::optional<std::reference_wrapper<std::ostream>> log_stream = std::nullopt)
             : logger(log_level, log_stream),
-              proxy_port_(proxy_port),
-              completion_port_(completion_port),
-              query_remote_peer_(query_remote_peer_fn)
+            proxy_port_(proxy_port),
+            completion_port_(completion_port),
+            query_remote_peer_(query_remote_peer_fn)
         {
             if (!create_server_socket())
             {
@@ -51,9 +200,15 @@ namespace proxy
             }
         }
 
+        /**
+         * @brief Destructor for the tcp_proxy_server class.
+         *
+         * Cleans up resources by shutting down and closing the server socket if it is still open.
+         * If the server is still running, calls stop() to ensure all threads and sessions are properly terminated.
+         */
         ~tcp_proxy_server()
         {
-            if (server_socket_ != INVALID_SOCKET)
+            if (server_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
             {
                 shutdown(server_socket_, SD_BOTH);
                 closesocket(server_socket_);
@@ -64,19 +219,49 @@ namespace proxy
                 stop();
         }
 
+        /**
+         * @brief Deleted copy constructor to prevent copying of tcp_proxy_server instances.
+         */
         tcp_proxy_server(const tcp_proxy_server& other) = delete;
 
+        /**
+         * @brief Deleted move constructor to prevent moving of tcp_proxy_server instances.
+         */
         tcp_proxy_server(tcp_proxy_server&& other) noexcept = delete;
 
+        /**
+         * @brief Deleted copy assignment operator to prevent copying of tcp_proxy_server instances.
+         */
         tcp_proxy_server& operator=(const tcp_proxy_server& other) = delete;
 
+        /**
+         * @brief Deleted move assignment operator to prevent moving of tcp_proxy_server instances.
+         */
         tcp_proxy_server& operator=(tcp_proxy_server&& other) noexcept = delete;
 
+        /**
+         * @brief Returns the TCP port number on which the proxy server is listening.
+         * @return The local proxy port number.
+         */
         [[nodiscard]] uint16_t proxy_port() const
         {
             return proxy_port_;
         }
 
+        /**
+         * @brief Starts the TCP proxy server and its worker threads.
+         *
+         * This method initializes the server for accepting new client connections and relaying data.
+         * It performs the following steps:
+         * - Checks if the server is already running; if so, returns true immediately.
+         * - Reserves space for connection events and sockets.
+         * - Creates the initial event and socket tuple for accepting connections.
+         * - Associates the listening socket with the I/O completion port and sets up the callback handler.
+         * - If association fails, cleans up resources and returns false.
+         * - Launches the main proxy server thread, client cleanup thread, and remote host connection thread.
+         *
+         * @return true if the server was started successfully or is already running; false if initialization failed.
+         */
         bool start()
         {
             if (end_server_ == false)
@@ -177,6 +362,18 @@ namespace proxy
             return true;
         }
 
+        /**
+         * @brief Stops the TCP proxy server and cleans up all resources.
+         *
+         * This method performs a graceful shutdown of the proxy server. It:
+         * - Sets the end_server_ flag to true to signal all worker threads to terminate.
+         * - Closes the main listening socket and marks it as invalid.
+         * - Signals the event associated with the first socket array entry to wake up any waiting threads.
+         * - Joins (waits for) the proxy server, client cleanup, and remote host connection threads if they are running.
+         * - Clears the arrays of socket events and active proxy sockets to release all associated resources.
+         *
+         * If the server is already stopped, this method returns immediately.
+         */
         void stop()
         {
             if (end_server_ == true)
@@ -191,7 +388,7 @@ namespace proxy
             server_socket_ = INVALID_SOCKET;
 
             {
-                std::shared_lock<std::shared_mutex> lock(lock_);
+                std::unique_lock lock(lock_);
                 ::WSASetEvent(std::get<0>(sock_array_events_[0]));
             }
 
@@ -221,6 +418,15 @@ namespace proxy
             }
         }
 
+        /**
+         * @brief Retrieves the negotiation contexts for all active proxy sessions.
+         *
+         * This method acquires a shared lock to ensure thread-safe access to the internal
+         * proxy socket list. It then iterates over all active proxy socket instances and
+         * extracts their negotiation context, returning a vector of these contexts.
+         *
+         * @return std::vector<negotiate_context_t> containing the negotiation context for each active session.
+         */
         std::vector<negotiate_context_t> query_current_sessions_ctx()
         {
             std::shared_lock lock(lock_);
@@ -228,9 +434,9 @@ namespace proxy
             result.reserve(proxy_sockets_.size());
 
             std::transform(proxy_sockets_.cbegin(), proxy_sockets_.cend(), std::back_inserter(result), [](auto&& e)
-            {
-                return *reinterpret_cast<negotiate_context_t*>(e->get_negotiate_ctx());
-            });
+                {
+                    return *reinterpret_cast<negotiate_context_t*>(e->get_negotiate_ctx());
+                });
 
             return result;
         }
@@ -238,10 +444,16 @@ namespace proxy
     private:
         // ********************************************************************************
         /// <summary>
-        /// Queries remote host information for outgoing connection by locally accepted socket
+        /// Queries remote host information for an outgoing connection by a locally accepted socket.
         /// </summary>
-        /// <param name="accepted">locally accepted TCP socket</param>
-        /// <returns>tuple of information required to connect to the remote peer</returns>
+        /// <param name="accepted">The locally accepted TCP socket for which to query remote peer information.</param>
+        /// <returns>
+        /// A tuple containing:
+        ///   - The remote peer address (address_type_t)
+        ///   - The remote peer port (uint16_t)
+        ///   - A unique pointer to the negotiation context (std::unique_ptr<negotiate_context_t>)
+        /// If the query fails, returns a tuple with default-constructed values.
+        /// </returns>
         // ********************************************************************************
         std::tuple<address_type_t, uint16_t, std::unique_ptr<negotiate_context_t>> get_remote_peer(
             const SOCKET accepted) const
@@ -282,12 +494,25 @@ namespace proxy
             return std::make_tuple(address_type_t{}, 0, nullptr);
         }
 
+        /**
+         * @brief Creates and binds the server's listening socket.
+         *
+         * This method creates a new overlapped TCP socket using the address family specified by
+         * address_type_t. It then binds the socket to the configured proxy port and any local address
+         * (IPv4 or IPv6, depending on the template parameter). If the port is set to 0, the method
+         * retrieves the actual port assigned by the system after binding. Finally, it puts the socket
+         * into listening mode for incoming connections.
+         *
+         * If any step fails, the socket is closed and the method returns false.
+         *
+         * @return true if the server socket was successfully created, bound, and set to listen; false otherwise.
+         */
         bool create_server_socket()
         {
             server_socket_ = WSASocket(address_type_t::af_type, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
-                                       WSA_FLAG_OVERLAPPED);
+                WSA_FLAG_OVERLAPPED);
 
-            if (server_socket_ == INVALID_SOCKET)
+            if (server_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
             {
                 return false;
             }
@@ -363,6 +588,22 @@ namespace proxy
             return true;
         }
 
+        /**
+         * @brief Establishes an asynchronous connection to a remote host for a given accepted client socket.
+         *
+         * This method performs the following steps:
+         * - Queries the remote peer address, port, and negotiation context using get_remote_peer().
+         * - If the remote port is invalid, returns false.
+         * - Creates a new overlapped socket for the remote connection.
+         * - Binds the remote socket to an ephemeral local port and any local address (IPv4 or IPv6).
+         * - Sets the remote socket to non-blocking mode.
+         * - Registers the remote socket and associated event/context in the internal tracking array.
+         * - Initiates a non-blocking connect() to the remote peer.
+         * - If the connection fails immediately (other than WSAEWOULDBLOCK), cleans up and returns false.
+         *
+         * @param accepted The accepted client SOCKET for which to establish a remote connection.
+         * @return true if the connection initiation was successful; false otherwise.
+         */
         bool connect_to_remote_host(SOCKET accepted)
         {
             auto [remote_ip, remote_port, negotiate_ctx] = get_remote_peer(accepted);
@@ -370,14 +611,15 @@ namespace proxy
             if (!remote_port)
                 return false;
 
-            print_log(log_level::debug, std::string("connect_to_remote_host:  ") + std::string{remote_ip} + " : " +
-                      std::to_string(remote_port));
+            logger::print_log(log_level::debug, std::string("connect_to_remote_host:  ") + std::string{ remote_ip } + " : " +
+                std::to_string(remote_port));
 
             auto remote_socket = WSASocket(address_type_t::af_type, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
-                                           WSA_FLAG_OVERLAPPED);
+                WSA_FLAG_OVERLAPPED);
 
             if (remote_socket == INVALID_SOCKET)
             {
+                logger::print_log(log_level::error, "Failed to create remote socket: " + std::to_string(WSAGetLastError()));
                 return false;
             }
 
@@ -478,6 +720,17 @@ namespace proxy
             return true;
         }
 
+        /**
+         * @brief Main thread routine for accepting and dispatching incoming client connections.
+         *
+         * This method runs in a dedicated thread and continuously accepts new TCP client connections
+         * on the server's listening socket as long as the server is running. For each accepted connection:
+         * - If the server is shutting down or the accept fails, the loop exits.
+         * - Attempts to establish a connection to the corresponding remote host using connect_to_remote_host().
+         * - If the remote connection setup fails, the accepted client socket is closed immediately.
+         *
+         * The thread terminates when the server is stopped or a fatal error occurs on accept.
+         */
         void start_proxy_thread()
         {
             while (end_server_ == false)
@@ -487,9 +740,15 @@ namespace proxy
                 //
                 const auto accepted = WSAAccept(server_socket_, nullptr, nullptr, nullptr, 0);
 
-                if ((accepted == static_cast<UINT_PTR>(SOCKET_ERROR)) || end_server_)
+                if (accepted == static_cast<SOCKET>(INVALID_SOCKET) || end_server_)
                 {
                     break;
+                }
+
+                if (sock_array_events_.size() >= connections_array_size) {
+                    logger::print_log(log_level::warning, "Too many pending connections, rejecting new client.");
+                    closesocket(accepted);
+                    continue;
                 }
 
                 if (const auto connected = connect_to_remote_host(accepted); !connected)
@@ -499,6 +758,24 @@ namespace proxy
             }
         }
 
+        /**
+         * @brief Thread routine for handling asynchronous connections to remote hosts.
+         *
+         * This method runs in a dedicated thread and manages the completion of non-blocking connect operations
+         * for remote sockets. It operates as follows:
+         * - Continuously builds a list of WSAEVENT handles corresponding to pending remote connection attempts.
+         * - Waits for any of these events to be signaled, indicating a completed connection attempt.
+         * - If a connection event (other than the first) is signaled, finalizes the session:
+         *   - Closes the event handle.
+         *   - Constructs a new proxy socket instance for the completed connection, associates it with the I/O completion port,
+         *     and starts the proxy session.
+         *   - Removes the processed entry from the tracking array.
+         * - If the first event is signaled, resets it and continues.
+         * - On server shutdown, cleans up all remaining events and sockets in the tracking array.
+         *
+         * Thread safety is ensured via shared and exclusive locks as needed.
+         * The thread exits when the server is stopped.
+         */
         void connect_to_remote_host_thread()
         {
             std::vector<WSAEVENT> wait_events;
@@ -513,14 +790,14 @@ namespace proxy
                     std::shared_lock lock(lock_);
 
                     std::transform(sock_array_events_.cbegin(), sock_array_events_.cend(),
-                                   std::back_inserter(wait_events), [](auto&& e)
-                                   {
-                                       return std::get<0>(e);
-                                   });
+                        std::back_inserter(wait_events), [](auto&& e)
+                        {
+                            return std::get<0>(e);
+                        });
                 }
 
                 const auto event_index = wait_for_multiple_objects(static_cast<DWORD>(wait_events.size()),
-                                                                   wait_events.data(), INFINITE);
+                    wait_events.data(), INFINITE);
 
                 if (end_server_ == true)
                     break;
@@ -535,7 +812,7 @@ namespace proxy
                         std::get<1>(sock_array_events_[event_index]),
                         std::get<2>(sock_array_events_[event_index]),
                         std::move(std::get<3>(sock_array_events_[event_index])),
-                        log_level_, log_stream_));
+                        logger::log_level_, logger::log_stream_));
 
                     proxy_sockets_.back()->associate_to_completion_port(completion_key_, completion_port_);
                     proxy_sockets_.back()->start();
@@ -574,6 +851,15 @@ namespace proxy
             }
         }
 
+        /**
+         * @brief Thread routine for cleaning up closed or idle proxy sessions.
+         *
+         * This method runs in a dedicated thread and periodically scans the list of active proxy socket
+         * instances. It removes any sockets that are ready for removal (e.g., closed or idle sessions)
+         * from the internal proxy_sockets_ vector. The cleanup operation is protected by a lock to ensure
+         * thread safety. The thread sleeps for 1 second between cleanup cycles and exits when the server
+         * is stopped.
+         */
         void clear_thread()
         {
             while (end_server_ == false)
@@ -582,9 +868,9 @@ namespace proxy
                     std::lock_guard lock(lock_);
 
                     proxy_sockets_.erase(std::remove_if(proxy_sockets_.begin(), proxy_sockets_.end(), [](auto&& a)
-                    {
-                        return a->is_ready_for_removal();
-                    }), proxy_sockets_.end());
+                        {
+                            return a->is_ready_for_removal();
+                        }), proxy_sockets_.end());
                 }
 
                 using namespace std::chrono_literals;
@@ -593,16 +879,23 @@ namespace proxy
         }
 
         /**
-         * Function that waits for multiple objects (e.g. threads or processes)
-         * @param count Number of objects to wait for
-         * @param handles Array of handles to the objects
-         * @param ms Maximum time to wait for, in milliseconds
-         * @return WAIT_OBJECT_0 if the function succeeds, WAIT_TIMEOUT if the function times out
+         * @brief Waits for one or more objects (such as threads or events) to become signaled.
+         *
+         * This static utility function provides a scalable way to wait for multiple synchronization objects,
+         * such as thread or event handles, to become signaled. If the number of handles exceeds the platform's
+         * MAXIMUM_WAIT_OBJECTS, the function recursively splits the array and waits on subsets, using a randomized
+         * order to avoid starvation. For a manageable number of handles, it delegates to the native
+         * ::WaitForMultipleObjects API.
+         *
+         * @param count   The number of handles in the array.
+         * @param handles Pointer to an array of HANDLEs to wait on.
+         * @param ms      The maximum time to wait, in milliseconds. Use INFINITE for no timeout.
+         * @return WAIT_OBJECT_0 + index of the signaled handle if successful, WAIT_TIMEOUT if the wait timed out.
          */
         static DWORD wait_for_multiple_objects(const DWORD count, const HANDLE* handles, const DWORD ms)
         {
             // Thread local seed for rand_r
-            static thread_local auto seed = static_cast<uint32_t>(time(nullptr));
+            thread_local auto seed = static_cast<uint32_t>(time(nullptr));
 
             // Initial result set to timeout
             DWORD result = WAIT_TIMEOUT;
@@ -635,8 +928,7 @@ namespace proxy
                             if (result >= WAIT_OBJECT_0 && result < WAIT_OBJECT_0 + split) result += split;
                         }
                     }
-                }
-                while (ms == INFINITE && result == WAIT_TIMEOUT);
+                } while (ms == INFINITE && result == WAIT_TIMEOUT);
             }
             else
             {

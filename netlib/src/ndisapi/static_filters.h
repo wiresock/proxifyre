@@ -2,29 +2,29 @@
 
 namespace ndisapi
 {
-    template <typename T>
+    template<typename T>
     concept ip_address = std::is_same_v<T, net::ip_address_v4> || std::is_same_v<T, net::ip_address_v6>;
 
     /// <summary>
     /// Enum representing the possible actions that can be taken on a packet.
     /// </summary>
-    enum class action_t : uint8_t
+    enum class action_t
     {
-        pass, ///< Allow the packet to pass through.
-        drop, ///< Drop the packet.
-        redirect, ///< Redirect the packet to another destination.
-        pass_redirect, ///< Allow the packet to pass and also redirect it.
-        drop_redirect ///< Drop the packet and also redirect it.
+        pass,           ///< Allow the packet to pass through.
+        drop,           ///< Drop the packet.
+        redirect,       ///< Redirect the packet to another destination.
+        pass_redirect,  ///< Allow the packet to pass and also redirect it.
+        drop_redirect   ///< Drop the packet and also redirect it.
     };
 
     /// <summary>
     /// Enum representing the direction of the packet.
     /// </summary>
-    enum class direction_t: uint8_t
+    enum class direction_t
     {
-        in, ///< Incoming packet.
-        out, ///< Outgoing packet.
-        both ///< Both incoming and outgoing packets.
+        in,     ///< Incoming packet.
+        out,    ///< Outgoing packet.
+        both    ///< Both incoming and outgoing packets.
     };
 
     template <ip_address T>
@@ -54,35 +54,6 @@ namespace ndisapi
         action_t action_ = action_t::pass;
 
     public:
-        /// <summary>
-        /// Comparison operator for the filter class.
-        /// </summary>
-        /// <param name="other">The filter object to compare with.</param>
-        /// <returns>True if all fields are equal, otherwise false.</returns>
-        bool operator==(const filter& other) const
-        {
-            return adapter_handle_ == other.adapter_handle_ &&
-                source_hw_address_ == other.source_hw_address_ &&
-                dest_hw_address_ == other.dest_hw_address_ &&
-                ether_type_ == other.ether_type_ &&
-                source_address_ == other.source_address_ &&
-                dest_address_ == other.dest_address_ &&
-                source_port_ == other.source_port_ &&
-                dest_port_ == other.dest_port_ &&
-                protocol_ == other.protocol_ &&
-                direction_ == other.direction_ &&
-                action_ == other.action_;
-        }
-
-        /// <summary>
-        /// Inequality operator for the filter class.
-        /// </summary>
-        /// <param name="other">The filter object to compare with.</param>
-        /// <returns>True if any field is not equal, otherwise false.</returns>
-        bool operator!=(const filter& other) const
-        {
-            return !(*this == other);
-        }
 
         /// <summary>
         /// Default constructor for the filter class.
@@ -103,21 +74,10 @@ namespace ndisapi
         /// </summary>
         /// <param name="direction">The direction to set.</param>
         /// <returns>A reference to the filter object.</returns>
-        filter& set_direction(const direction_t direction) &
+        filter& set_direction(const direction_t direction)
         {
             direction_ = direction;
             return *this;
-        }
-
-        /// <summary>
-        /// Sets the direction of the packet.
-        /// </summary>
-        /// <param name="direction">The direction to set.</param>
-        /// <returns>A moved instance of the filter object.</returns>
-        filter set_direction(const direction_t direction) &&
-        {
-            direction_ = direction;
-            return std::move(*this);
         }
 
         /// <summary>
@@ -134,21 +94,10 @@ namespace ndisapi
         /// </summary>
         /// <param name="action">The action to set.</param>
         /// <returns>A reference to the filter object.</returns>
-        filter& set_action(const action_t action) &
+        filter& set_action(const action_t action)
         {
             action_ = action;
             return *this;
-        }
-
-        /// <summary>
-        /// Sets the action to be taken on the packet.
-        /// </summary>
-        /// <param name="action">The action to set.</param>
-        /// <returns>A moved instance of the filter object.</returns>
-        filter set_action(const action_t action) &&
-        {
-            action_ = action;
-            return std::move(*this);
         }
 
         /// <summary>
@@ -165,21 +114,10 @@ namespace ndisapi
         /// </summary>
         /// <param name="adapter_handle">The network interface handle to set.</param>
         /// <returns>A reference to the filter object.</returns>
-        filter& set_adapter_handle(HANDLE adapter_handle) &
+        filter& set_adapter_handle(HANDLE adapter_handle)
         {
             adapter_handle_ = adapter_handle;
             return *this;
-        }
-
-        /// <summary>
-        /// Sets the network interface handle.
-        /// </summary>
-        /// <param name="adapter_handle">The network interface handle to set.</param>
-        /// <returns>A moved instance of the filter object.</returns>
-        filter set_adapter_handle(HANDLE adapter_handle) &&
-        {
-            adapter_handle_ = adapter_handle;
-            return std::move(*this);
         }
 
         /// <summary>
@@ -196,21 +134,10 @@ namespace ndisapi
         /// </summary>
         /// <param name="source_address">The source MAC address to set.</param>
         /// <returns>A reference to the filter object.</returns>
-        filter& set_source_hw_address(const net::mac_address& source_address) &
+        filter& set_source_hw_address(const net::mac_address& source_address)
         {
             source_hw_address_ = source_address;
             return *this;
-        }
-
-        /// <summary>
-        /// Sets the source MAC address.
-        /// </summary>
-        /// <param name="source_address">The source MAC address to set.</param>
-        /// <returns>A moved instance of the filter object.</returns>
-        filter set_source_hw_address(const net::mac_address& source_address) &&
-        {
-            source_hw_address_ = source_address;
-            return std::move(*this);
         }
 
         /// <summary>
@@ -227,21 +154,10 @@ namespace ndisapi
         /// </summary>
         /// <param name="dest_address">The destination MAC address to set.</param>
         /// <returns>A reference to the filter object.</returns>
-        filter& set_dest_hw_address(const net::mac_address& dest_address) &
+        filter& set_dest_hw_address(const net::mac_address& dest_address)
         {
             dest_hw_address_ = dest_address;
             return *this;
-        }
-
-        /// <summary>
-        /// Sets the destination MAC address.
-        /// </summary>
-        /// <param name="dest_address">The destination MAC address to set.</param>
-        /// <returns>A moved instance of the filter object.</returns>
-        filter set_dest_hw_address(const net::mac_address& dest_address) &&
-        {
-            dest_hw_address_ = dest_address;
-            return std::move(*this);
         }
 
         /// <summary>
@@ -258,21 +174,10 @@ namespace ndisapi
         /// </summary>
         /// <param name="ether_type">The Ethernet type to set.</param>
         /// <returns>A reference to the filter object.</returns>
-        filter& set_ether_type(const uint16_t ether_type) &
+        filter& set_ether_type(const uint16_t ether_type)
         {
             ether_type_ = ether_type;
             return *this;
-        }
-
-        /// <summary>
-        /// Sets the Ethernet type.
-        /// </summary>
-        /// <param name="ether_type">The Ethernet type to set.</param>
-        /// <returns>A moved instance of the filter object.</returns>
-        filter set_ether_type(const uint16_t ether_type) &&
-        {
-            ether_type_ = ether_type;
-            return std::move(*this);
         }
 
         /// <summary>
@@ -289,21 +194,10 @@ namespace ndisapi
         /// </summary>
         /// <param name="source_address">The source IP address to set.</param>
         /// <returns>A reference to the filter object.</returns>
-        filter& set_source_address(const net::ip_subnet<T>& source_address) &
+        filter& set_source_address(const net::ip_subnet<T>& source_address)
         {
             source_address_ = source_address;
             return *this;
-        }
-
-        /// <summary>
-        /// Sets the source IP address.
-        /// </summary>
-        /// <param name="source_address">The source IP address to set.</param>
-        /// <returns>A moved instance of the filter object.</returns>
-        filter set_source_address(const net::ip_subnet<T>& source_address) &&
-        {
-            source_address_ = source_address;
-            return std::move(*this);
         }
 
         /// <summary>
@@ -320,21 +214,10 @@ namespace ndisapi
         /// </summary>
         /// <param name="dest_address">The destination IP address to set.</param>
         /// <returns>A reference to the filter object.</returns>
-        filter& set_dest_address(const net::ip_subnet<T>& dest_address) &
+        filter& set_dest_address(const net::ip_subnet<T>& dest_address)
         {
             dest_address_ = dest_address;
             return *this;
-        }
-
-        /// <summary>
-        /// Sets the destination IP address.
-        /// </summary>
-        /// <param name="dest_address">The destination IP address to set.</param>
-        /// <returns>A moved instance of the filter object.</returns>
-        filter set_dest_address(const net::ip_subnet<T>& dest_address) &&
-        {
-            dest_address_ = dest_address;
-            return std::move(*this);
         }
 
         /// <summary>
@@ -351,21 +234,10 @@ namespace ndisapi
         /// </summary>
         /// <param name="source_port">The source port to set.</param>
         /// <returns>A reference to the filter object.</returns>
-        filter& set_source_port(const std::pair<uint16_t, uint16_t>& source_port) &
+        filter& set_source_port(const std::pair<uint16_t, uint16_t>& source_port)
         {
             source_port_ = source_port;
             return *this;
-        }
-
-        /// <summary>
-        /// Sets the source port (TCP/UDP only).
-        /// </summary>
-        /// <param name="source_port">The source port to set.</param>
-        /// <returns>A moved instance of the filter object.</returns>
-        filter set_source_port(const std::pair<uint16_t, uint16_t>& source_port) &&
-        {
-            source_port_ = source_port;
-            return std::move(*this);
         }
 
         /// <summary>
@@ -382,21 +254,10 @@ namespace ndisapi
         /// </summary>
         /// <param name="dest_port">The destination port to set.</param>
         /// <returns>A reference to the filter object.</returns>
-        filter& set_dest_port(const std::pair<uint16_t, uint16_t>& dest_port) &
+        filter& set_dest_port(const std::pair<uint16_t, uint16_t>& dest_port)
         {
             dest_port_ = dest_port;
             return *this;
-        }
-
-        /// <summary>
-        /// Sets the destination port (TCP/UDP only).
-        /// </summary>
-        /// <param name="dest_port">The destination port to set.</param>
-        /// <returns>A moved instance of the filter object.</returns>
-        filter set_dest_port(const std::pair<uint16_t, uint16_t>& dest_port) &&
-        {
-            dest_port_ = dest_port;
-            return std::move(*this);
         }
 
         /// <summary>
@@ -413,21 +274,10 @@ namespace ndisapi
         /// </summary>
         /// <param name="protocol">The IP protocol to set.</param>
         /// <returns>A reference to the filter object.</returns>
-        filter& set_protocol(const uint8_t protocol) &
+        filter& set_protocol(const uint8_t protocol)
         {
             protocol_ = protocol;
             return *this;
-        }
-
-        /// <summary>
-        /// Sets the IP protocol.
-        /// </summary>
-        /// <param name="protocol">The IP protocol to set.</param>
-        /// <returns>A moved instance of the filter object.</returns>
-        filter set_protocol(const uint8_t protocol) &&
-        {
-            protocol_ = protocol;
-            return std::move(*this);
         }
     };
 
@@ -436,6 +286,7 @@ namespace ndisapi
         using log_level = netlib::log::log_level;
 
     public:
+
         /// <summary>
         /// Constructor for the static_filters class.
         /// </summary>
@@ -598,16 +449,14 @@ namespace ndisapi
         bool remove_filter(const uint32_t position)
         {
             // Check if the filter ID is within the bounds of the list size
-            if (position >= filters_.size())
-            {
+            if (position >= filters_.size()) {
                 return false; // Filter ID is out of bounds
             }
 
             auto it = filters_.begin();
             std::advance(it, position); // Move the iterator to the position of the filter to remove
 
-            if (RemoveStaticFilter(position))
-            {
+            if (RemoveStaticFilter(position)) {
                 filters_.erase(it); // Remove the filter from the list
                 return true; // Successfully removed
             }
@@ -624,10 +473,9 @@ namespace ndisapi
         void remove_filters_if(std::function<bool(const filter<T>&)> predicate)
         {
             size_t position = 0; // Start position tracking from 0
-            for (auto it = filters_.begin(); it != filters_.end();)
+            for (auto it = filters_.begin(); it != filters_.end(); )
             {
-                if ([[maybe_unused]] const bool removed = std::visit([&]<typename U>(U& arg) -> bool
-                {
+                if ([[maybe_unused]] const bool removed = std::visit([&]<typename U>(U& arg) -> bool {
                     using filter_type_t = std::decay_t<U>;
                     if constexpr (std::is_same_v<filter_type_t, filter<T>>)
                     {
@@ -637,8 +485,7 @@ namespace ndisapi
                             const bool success = RemoveStaticFilter(static_cast<uint32_t>(position));
                             if (!success)
                             {
-                                print_log(log_level::error,
-                                          "Failed to remove filter at position: " + std::to_string(position));
+                                print_log(log_level::error, "Failed to remove filter at position: " + std::to_string(position));
                             }
                             return success;
                         }
@@ -658,29 +505,6 @@ namespace ndisapi
         }
 
         /// <summary>
-        /// Checks if a filter is present in the list.
-        /// </summary>
-        /// <typeparam name="T">The type of the IP address (IPv4 or IPv6).</typeparam>
-        /// <param name="flt">The filter to check for.</param>
-        /// <returns>True if the filter is present; otherwise, false.</returns>
-        template <ip_address T>
-        bool contains(const filter<T>& flt) const
-        {
-            return std::ranges::any_of(filters_, [&flt](const auto& f)
-            {
-                return std::visit([&flt]<typename U>(const U& arg)
-                {
-                    using filter_type_t = std::decay_t<U>;
-                    if constexpr (std::is_same_v<filter_type_t, filter<T>>)
-                    {
-                        return arg == flt;
-                    }
-                    return false;
-                }, f);
-            });
-        }
-
-        /// <summary>
         /// Stores the current filter table to the driver.
         /// </summary>
         /// <returns>True if the filter table was successfully stored; otherwise, false.</returns>
@@ -689,8 +513,7 @@ namespace ndisapi
             try
             {
                 const size_t filter_size = filters_.size();
-                const auto table_buffer = std::make_unique<uint8_t[]>(
-                    sizeof(STATIC_FILTER_TABLE) + sizeof(STATIC_FILTER) * (filter_size - 1));
+                const auto table_buffer = std::make_unique<uint8_t[]>(sizeof(STATIC_FILTER_TABLE) + sizeof(STATIC_FILTER) * (filter_size - 1));
                 auto* filter_list = reinterpret_cast<PSTATIC_FILTER_TABLE>(table_buffer.get());
                 memset(filter_list, 0, sizeof(STATIC_FILTER_TABLE) + sizeof(STATIC_FILTER) * (filter_size - 1));
 
@@ -700,9 +523,9 @@ namespace ndisapi
                 for (auto it = filters_.begin(); it != filters_.end(); ++it, ++i)
                 {
                     std::visit([this, &i, &filter_list](auto&& arg)
-                    {
-                        to_static_filter(arg, filter_list->m_StaticFilters[i]);
-                    }, *it);
+                        {
+                            to_static_filter(arg, filter_list->m_StaticFilters[i]);
+                        }, *it);
                 }
 
                 SetPacketFilterTable(filter_list);
@@ -731,8 +554,7 @@ namespace ndisapi
             }
 
             // Allocate memory for the filter table
-            const auto table_buffer = std::make_unique<uint8_t[]>(
-                sizeof(STATIC_FILTER_TABLE) + sizeof(STATIC_FILTER) * (table_size - 1));
+            const auto table_buffer = std::make_unique<uint8_t[]>(sizeof(STATIC_FILTER_TABLE) + sizeof(STATIC_FILTER) * (table_size - 1));
             auto* filter_list = reinterpret_cast<PSTATIC_FILTER_TABLE>(table_buffer.get());
 
             if (!GetPacketFilterTable(filter_list))
@@ -748,23 +570,22 @@ namespace ndisapi
             for (size_t i = 0; i < table_size - 1; ++i) // Last entry is the default action, so we skip it
             {
                 // Determine the type of filter (IPv4 or IPv6) based on the union selector
-                switch (const auto& static_filter = filter_list->m_StaticFilters[i]; static_filter.m_NetworkFilter.
-                    m_dwUnionSelector)
+                switch (const auto& static_filter = filter_list->m_StaticFilters[i]; static_filter.m_NetworkFilter.m_dwUnionSelector)
                 {
                 case IPV4:
-                    {
-                        filter<net::ip_address_v4> new_filter;
-                        from_static_filter(static_filter, new_filter);
-                        filters_.emplace_back(std::move(new_filter));
-                        break;
-                    }
+                {
+                    filter<net::ip_address_v4> new_filter;
+                    from_static_filter(static_filter, new_filter);
+                    filters_.emplace_back(std::move(new_filter));
+                    break;
+                }
                 case IPV6:
-                    {
-                        filter<net::ip_address_v6> new_filter;
-                        from_static_filter(static_filter, new_filter);
-                        filters_.emplace_back(std::move(new_filter));
-                        break;
-                    }
+                {
+                    filter<net::ip_address_v6> new_filter;
+                    from_static_filter(static_filter, new_filter);
+                    filters_.emplace_back(std::move(new_filter));
+                    break;
+                }
                 default:
                     // Handle other types or log an error
                     break;
@@ -776,20 +597,14 @@ namespace ndisapi
 
         /// <summary>
         /// Resets the packet filter table in the driver.
-        ///
-        /// This function resets the packet filter table in the driver, removing all existing filters.
-        ///
-        /// @return True if the packet filter table was successfully reset; otherwise, false.
         /// </summary>
-        bool reset()
+        void reset() const
         {
-            // Clear the current filters list
-            filters_.clear();
-
-            return ResetPacketFilterTable();
+            SetPacketFilterTable(nullptr);
         }
 
     private:
+
         /// <summary>
         /// Converts a filter object to a STATIC_FILTER structure.
         /// </summary>
@@ -812,7 +627,7 @@ namespace ndisapi
             case direction_t::both:
                 static_filter.m_dwDirectionFlags = PACKET_FLAG_ON_SEND | PACKET_FLAG_ON_RECEIVE;
                 break;
-            default: // NOLINT(clang-diagnostic-covered-switch-default)
+            default:  // NOLINT(clang-diagnostic-covered-switch-default)
                 assert(false && "Unhandled direction_t value");
                 break;
             }
@@ -834,7 +649,7 @@ namespace ndisapi
             case action_t::drop_redirect:
                 static_filter.m_FilterAction = FILTER_PACKET_DROP_RDR;
                 break;
-            default: // NOLINT(clang-diagnostic-covered-switch-default)
+            default:  // NOLINT(clang-diagnostic-covered-switch-default)
                 assert(false && "Unhandled action_t value");
                 break;
             }
@@ -848,14 +663,14 @@ namespace ndisapi
                 {
                     static_filter.m_DataLinkFilter.m_Eth8023Filter.m_ValidFields |= ETH_802_3_SRC_ADDRESS;
                     memcpy(static_filter.m_DataLinkFilter.m_Eth8023Filter.m_SrcAddress,
-                           source_hw_address.value().get_data().data(), ETHER_ADDR_LENGTH);
+                        source_hw_address.value().get_data().data(), ETHER_ADDR_LENGTH);
                 }
 
                 if (auto dest_hw_address = filter.get_dest_hw_address(); dest_hw_address.has_value())
                 {
                     static_filter.m_DataLinkFilter.m_Eth8023Filter.m_ValidFields |= ETH_802_3_DEST_ADDRESS;
                     memcpy(static_filter.m_DataLinkFilter.m_Eth8023Filter.m_DestAddress,
-                           dest_hw_address.value().get_data().data(), ETHER_ADDR_LENGTH);
+                        dest_hw_address.value().get_data().data(), ETHER_ADDR_LENGTH);
                 }
 
                 if (auto ether_type = filter.get_ether_type(); ether_type.has_value())
@@ -883,19 +698,15 @@ namespace ndisapi
                     {
                         static_filter.m_NetworkFilter.m_IPv4.m_ValidFields |= IP_V4_FILTER_SRC_ADDRESS;
                         static_filter.m_NetworkFilter.m_IPv4.m_SrcAddress.m_AddressType = IP_SUBNET_V4_TYPE;
-                        static_filter.m_NetworkFilter.m_IPv4.m_SrcAddress.m_IpSubnet.m_Ip = source_address.value().
-                            get_address().S_un.S_addr;
-                        static_filter.m_NetworkFilter.m_IPv4.m_SrcAddress.m_IpSubnet.m_IpMask = source_address.value().
-                            get_mask().S_un.S_addr;
+                        static_filter.m_NetworkFilter.m_IPv4.m_SrcAddress.m_IpSubnet.m_Ip = source_address.value().get_address().S_un.S_addr;
+                        static_filter.m_NetworkFilter.m_IPv4.m_SrcAddress.m_IpSubnet.m_IpMask = source_address.value().get_mask().S_un.S_addr;
                     }
                     else if constexpr (std::is_same_v<T, net::ip_address_v6>)
                     {
                         static_filter.m_NetworkFilter.m_IPv6.m_ValidFields |= IP_V6_FILTER_SRC_ADDRESS;
                         static_filter.m_NetworkFilter.m_IPv6.m_SrcAddress.m_AddressType = IP_SUBNET_V6_TYPE;
-                        static_filter.m_NetworkFilter.m_IPv6.m_SrcAddress.m_IpSubnet.m_Ip = source_address.value().
-                            get_address();
-                        static_filter.m_NetworkFilter.m_IPv6.m_SrcAddress.m_IpSubnet.m_IpMask = source_address.value().
-                            get_mask();
+                        static_filter.m_NetworkFilter.m_IPv6.m_SrcAddress.m_IpSubnet.m_Ip = source_address.value().get_address();
+                        static_filter.m_NetworkFilter.m_IPv6.m_SrcAddress.m_IpSubnet.m_IpMask = source_address.value().get_mask();
                     }
                 }
 
@@ -905,19 +716,15 @@ namespace ndisapi
                     {
                         static_filter.m_NetworkFilter.m_IPv4.m_ValidFields |= IP_V4_FILTER_DEST_ADDRESS;
                         static_filter.m_NetworkFilter.m_IPv4.m_DestAddress.m_AddressType = IP_SUBNET_V4_TYPE;
-                        static_filter.m_NetworkFilter.m_IPv4.m_DestAddress.m_IpSubnet.m_Ip = dest_address.value().
-                            get_address().S_un.S_addr;
-                        static_filter.m_NetworkFilter.m_IPv4.m_DestAddress.m_IpSubnet.m_IpMask = dest_address.value().
-                            get_mask().S_un.S_addr;
+                        static_filter.m_NetworkFilter.m_IPv4.m_DestAddress.m_IpSubnet.m_Ip = dest_address.value().get_address().S_un.S_addr;
+                        static_filter.m_NetworkFilter.m_IPv4.m_DestAddress.m_IpSubnet.m_IpMask = dest_address.value().get_mask().S_un.S_addr;
                     }
                     else if constexpr (std::is_same_v<T, net::ip_address_v6>)
                     {
                         static_filter.m_NetworkFilter.m_IPv6.m_ValidFields |= IP_V6_FILTER_DEST_ADDRESS;
                         static_filter.m_NetworkFilter.m_IPv6.m_DestAddress.m_AddressType = IP_SUBNET_V6_TYPE;
-                        static_filter.m_NetworkFilter.m_IPv6.m_DestAddress.m_IpSubnet.m_Ip = dest_address.value().
-                            get_address();
-                        static_filter.m_NetworkFilter.m_IPv6.m_DestAddress.m_IpSubnet.m_IpMask = dest_address.value().
-                            get_mask();
+                        static_filter.m_NetworkFilter.m_IPv6.m_DestAddress.m_IpSubnet.m_Ip = dest_address.value().get_address();
+                        static_filter.m_NetworkFilter.m_IPv6.m_DestAddress.m_IpSubnet.m_IpMask = dest_address.value().get_mask();
                     }
                 }
 
@@ -972,8 +779,7 @@ namespace ndisapi
         template <ip_address T>
         void from_static_filter(const STATIC_FILTER& static_filter, filter<T>& filter)
         {
-            filter.set_adapter_handle(reinterpret_cast<HANDLE>(static_filter.m_Adapter.QuadPart));
-            // NOLINT(performance-no-int-to-ptr)
+            filter.set_adapter_handle(reinterpret_cast<HANDLE>(static_filter.m_Adapter.QuadPart));  // NOLINT(performance-no-int-to-ptr)
 
             // Direction
             if (static_filter.m_dwDirectionFlags & PACKET_FLAG_ON_RECEIVE)
@@ -1010,7 +816,7 @@ namespace ndisapi
             case FILTER_PACKET_DROP_RDR:
                 filter.set_action(action_t::drop_redirect);
                 break;
-            default: ;
+            default:;
             }
 
             // Data Link Layer
@@ -1020,14 +826,12 @@ namespace ndisapi
                 {
                     if (static_filter.m_DataLinkFilter.m_Eth8023Filter.m_ValidFields & ETH_802_3_SRC_ADDRESS)
                     {
-                        filter.set_source_hw_address(
-                            net::mac_address(static_filter.m_DataLinkFilter.m_Eth8023Filter.m_SrcAddress));
+                        filter.set_source_hw_address(net::mac_address(static_filter.m_DataLinkFilter.m_Eth8023Filter.m_SrcAddress));
                     }
 
                     if (static_filter.m_DataLinkFilter.m_Eth8023Filter.m_ValidFields & ETH_802_3_DEST_ADDRESS)
                     {
-                        filter.set_dest_hw_address(
-                            net::mac_address(static_filter.m_DataLinkFilter.m_Eth8023Filter.m_DestAddress));
+                        filter.set_dest_hw_address(net::mac_address(static_filter.m_DataLinkFilter.m_Eth8023Filter.m_DestAddress));
                     }
 
                     if (static_filter.m_DataLinkFilter.m_Eth8023Filter.m_ValidFields & ETH_802_3_PROTOCOL)
@@ -1047,19 +851,15 @@ namespace ndisapi
                         if (static_filter.m_NetworkFilter.m_IPv4.m_ValidFields & IP_V4_FILTER_SRC_ADDRESS)
                         {
                             filter.set_source_address(net::ip_subnet<T>(
-                                net::ip_address_v4(
-                                    ntohl(static_filter.m_NetworkFilter.m_IPv4.m_SrcAddress.m_IpSubnet.m_Ip)),
-                                net::ip_address_v4(
-                                    ntohl(static_filter.m_NetworkFilter.m_IPv4.m_SrcAddress.m_IpSubnet.m_IpMask))));
+                                net::ip_address_v4(ntohl(static_filter.m_NetworkFilter.m_IPv4.m_SrcAddress.m_IpSubnet.m_Ip)),
+                                net::ip_address_v4(ntohl(static_filter.m_NetworkFilter.m_IPv4.m_SrcAddress.m_IpSubnet.m_IpMask))));
                         }
 
                         if (static_filter.m_NetworkFilter.m_IPv4.m_ValidFields & IP_V4_FILTER_DEST_ADDRESS)
                         {
                             filter.set_dest_address(net::ip_subnet<T>(
-                                net::ip_address_v4(
-                                    ntohl(static_filter.m_NetworkFilter.m_IPv4.m_DestAddress.m_IpSubnet.m_Ip)),
-                                net::ip_address_v4(
-                                    ntohl(static_filter.m_NetworkFilter.m_IPv4.m_DestAddress.m_IpSubnet.m_IpMask))));
+                                net::ip_address_v4(ntohl(static_filter.m_NetworkFilter.m_IPv4.m_DestAddress.m_IpSubnet.m_Ip)),
+                                net::ip_address_v4(ntohl(static_filter.m_NetworkFilter.m_IPv4.m_DestAddress.m_IpSubnet.m_IpMask))));
                         }
                     }
                 }
@@ -1072,8 +872,7 @@ namespace ndisapi
                         {
                             filter.set_source_address(net::ip_subnet<net::ip_address_v6>(
                                 net::ip_address_v6(static_filter.m_NetworkFilter.m_IPv6.m_SrcAddress.m_IpSubnet.m_Ip),
-                                net::ip_address_v6(
-                                    static_filter.m_NetworkFilter.m_IPv6.m_SrcAddress.m_IpSubnet.m_IpMask)
+                                net::ip_address_v6(static_filter.m_NetworkFilter.m_IPv6.m_SrcAddress.m_IpSubnet.m_IpMask)
                             ));
                         }
 
@@ -1081,21 +880,18 @@ namespace ndisapi
                         {
                             filter.set_dest_address(net::ip_subnet<net::ip_address_v6>(
                                 net::ip_address_v6(static_filter.m_NetworkFilter.m_IPv6.m_DestAddress.m_IpSubnet.m_Ip),
-                                net::ip_address_v6(
-                                    static_filter.m_NetworkFilter.m_IPv6.m_DestAddress.m_IpSubnet.m_IpMask)
+                                net::ip_address_v6(static_filter.m_NetworkFilter.m_IPv6.m_DestAddress.m_IpSubnet.m_IpMask)
                             ));
                         }
                     }
                 }
 
-                if (static_filter.m_NetworkFilter.m_dwUnionSelector == IPV4 || static_filter.m_NetworkFilter.
-                    m_dwUnionSelector == IPV6)
+                if (static_filter.m_NetworkFilter.m_dwUnionSelector == IPV4 || static_filter.m_NetworkFilter.m_dwUnionSelector == IPV6)
                 {
                     if (static_filter.m_NetworkFilter.m_IPv4.m_ValidFields & IP_V4_FILTER_PROTOCOL ||
                         static_filter.m_NetworkFilter.m_IPv6.m_ValidFields & IP_V6_FILTER_PROTOCOL)
                     {
-                        filter.set_protocol(static_filter.m_NetworkFilter.m_IPv4.m_Protocol);
-                        // Assuming protocol field is the same for IPv4 and IPv6
+                        filter.set_protocol(static_filter.m_NetworkFilter.m_IPv4.m_Protocol); // Assuming protocol field is the same for IPv4 and IPv6
                     }
                 }
             }

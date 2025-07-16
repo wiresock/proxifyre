@@ -2,6 +2,17 @@
 
 namespace ndisapi
 {
+    /**
+    * @class socks5_udp_local_redirect
+    * @brief Implements local UDP redirection for SOCKS5 proxying.
+    *
+    * This class manages UDP endpoint tracking and packet translation for redirecting
+    * client UDP traffic to a local SOCKS5 proxy. It supports both IPv4 and IPv6 and
+    * provides NAT functionality for UDP source ports. Timed-out endpoints are cleaned
+    * up automatically in a background thread.
+    *
+    * @tparam T IP address type (net::ip_address_v4 or net::ip_address_v6).
+    */
     template <typename T>
     class socks5_udp_local_redirect : public netlib::log::logger<socks5_udp_local_redirect<T>>
     {
@@ -12,17 +23,34 @@ namespace ndisapi
         using log_level = netlib::log::log_level;
         using logger = netlib::log::logger<socks5_udp_local_redirect>;
 
-        /// <summary>maps client UDP endpoint to the timestamp</summary>
+        /// <summary>
+        /// Maps client UDP endpoint (port or endpoint) to the timestamp of last activity.
+        /// Used for tracking active UDP sessions.
+        /// </summary>
         std::unordered_map<uint16_t, std::chrono::steady_clock::time_point> endpoints_;
-        /// <summary>proxy port in network byte order</summary>
+        /// <summary>
+        /// Proxy port in network byte order.
+        /// </summary>
         u_short proxy_port_{};
-        /// <summary>lock for redirected_connections_ </summary>
+        /// <summary>
+        /// Mutex for synchronizing access to endpoints_.
+        /// </summary>
         std::mutex lock_;
-        /// <summary>thread to drop timed out connections </summary>
+        /// <summary>
+        /// Thread for cleaning up timed-out UDP endpoints.
+        /// </summary>
         std::thread cleanup_thread_;
-        /// <summary>termination flag for the cleanup_thread </summary>
-        std::atomic_bool terminate_{false};
+        /// <summary>
+        /// Termination flag for the cleanup_thread_.
+        /// </summary>
+        std::atomic_bool terminate_{ false };
 
+        /**
+         * @brief Starts the background cleanup thread.
+         *
+         * The thread periodically scans the endpoints_ map and removes entries
+         * that have been inactive for more than 15 minutes.
+         */
         void start_cleanup_thread()
         {
             cleanup_thread_ = std::thread([this]()
@@ -39,7 +67,7 @@ namespace ndisapi
                                                      using namespace std::chrono_literals;
                                                      if (current_time - a.second > 15min)
                                                      {
-                                                         this->print_log(log_level::info,
+                                                         this->logger::print_log(log_level::info,
                                                                          std::string(
                                                                              "DELETE UDP client endpoint (timeout): ")
                                                                          + " : " +
@@ -58,6 +86,11 @@ namespace ndisapi
         }
 
     public:
+        /**
+         * @brief Constructs the redirector with optional log level and stream.
+         * @param log_level Logging level.
+         * @param log_stream Optional output stream for logging.
+         */
         explicit socks5_udp_local_redirect(const log_level log_level = log_level::error,
                                            const std::optional<std::reference_wrapper<std::ostream>> log_stream =
                                                std::nullopt)
@@ -66,6 +99,12 @@ namespace ndisapi
             start_cleanup_thread();
         }
 
+        /**
+         * @brief Constructs the redirector with a specific proxy port, log level, and stream.
+         * @param proxy_port UDP port for the local proxy (host byte order).
+         * @param log_level Logging level.
+         * @param log_stream Optional output stream for logging.
+         */
         explicit socks5_udp_local_redirect(const u_short proxy_port, const log_level log_level = log_level::error,
                                            const std::optional<std::reference_wrapper<std::ostream>> log_stream =
                                                std::nullopt)
@@ -75,14 +114,29 @@ namespace ndisapi
             start_cleanup_thread();
         }
 
+        /**
+          * @brief Deleted copy constructor.
+          */
         socks5_udp_local_redirect(const socks5_udp_local_redirect& other) = delete;
 
+        /**
+         * @brief Deleted move constructor.
+         */
         socks5_udp_local_redirect(socks5_udp_local_redirect&& other) noexcept = delete;
 
+        /**
+         * @brief Deleted copy assignment operator.
+         */
         socks5_udp_local_redirect& operator=(const socks5_udp_local_redirect& other) = delete;
 
+        /**
+         * @brief Deleted move assignment operator.
+         */
         socks5_udp_local_redirect& operator=(socks5_udp_local_redirect&& other) noexcept = delete;
 
+        /**
+         * @brief Destructor. Stops the cleanup thread and releases resources.
+         */
         ~socks5_udp_local_redirect()
         {
             terminate_ = true;
@@ -91,21 +145,33 @@ namespace ndisapi
                 cleanup_thread_.join();
         }
 
+        /**
+         * @brief Gets the proxy port in host byte order.
+         * @return Proxy port.
+         */
         [[nodiscard]] u_short get_proxy_port() const
         {
             return ntohs(proxy_port_);
         }
 
+        /**
+         * @brief Sets the proxy port (host byte order).
+         * @param proxy_port Proxy port.
+         */
         void set_proxy_port(const u_short proxy_port)
         {
             proxy_port_ = htons(proxy_port);
         }
 
-        /// <summary>
-        /// Check if the associated UDP session already recorded for the C2S packet
-        /// </summary>
-        /// <param name="packet">C2S network packet</param>
-        /// <returns>if the session is new then true is returned</returns>
+        /**
+         * @brief Checks if the UDP session for the given packet is new.
+         *
+         * If the session is new, it is recorded and true is returned.
+         * Otherwise, returns false.
+         *
+         * @param packet C2S network packet.
+         * @return True if the session is new, false otherwise.
+         */
         bool is_new_endpoint(INTERMEDIATE_BUFFER& packet)
         {
             if constexpr (auto* const eth_header = reinterpret_cast<ether_header_ptr>(packet.m_IBuffer); std::is_same_v<
@@ -132,7 +198,7 @@ namespace ndisapi
                     endpoints_[udp_header->th_sport] =
                         std::chrono::steady_clock::now();
 
-                    print_log(log_level::info, std::string("NEW client UDP endpoint: ") +
+                    logger::print_log(log_level::info, std::string("NEW client UDP endpoint: ") +
                               " : " + std::to_string(ntohs(udp_header->th_sport)));
 
                     return true;
@@ -162,7 +228,7 @@ namespace ndisapi
                     endpoints_[udp_header->th_sport] =
                         std::chrono::steady_clock::now();
 
-                    print_log(log_level::info, std::string("NEW client UDP endpoint: ") +
+                    logger::print_log(log_level::info, std::string("NEW client UDP endpoint: ") +
                               " : " + std::to_string(ntohs(udp_header->th_sport)));
 
                     return true;
@@ -174,13 +240,16 @@ namespace ndisapi
             return false;
         }
 
-        /// <summary>
-        /// Process C2S packet redirecting it to local UDP proxy and applying NAT to source UDP port
-        /// </summary>
-        /// <param name="packet">C2S network packet</param>
-        /// <param name="port">destination port to forward packet to</param>
-        /// <returns>true if corresponding entry was found in local_redirected_connections_ and packet
-        /// was translated</returns>
+        /**
+         * @brief Redirects a C2S UDP packet to the local proxy and applies NAT to the source port.
+         *
+         * Modifies the packet in-place, attaches a SOCKS5 UDP header, and updates the source/destination
+         * addresses and ports as needed.
+         *
+         * @param packet C2S network packet.
+         * @param port Destination port to forward the packet to (network byte order). If 0, uses proxy_port_.
+         * @return True if the packet was translated, false otherwise.
+         */
         bool process_client_to_server_packet(INTERMEDIATE_BUFFER& packet, uint16_t port = 0)
         {
             if (port == 0)
@@ -215,7 +284,7 @@ namespace ndisapi
                     return false;
                 }
 
-                print_log(log_level::debug,
+                logger::print_log(log_level::debug,
                           std::string("C2S: ") + std::string{T{ip_header->ip_src}} + " : " +
                           std::to_string(ntohs(udp_header->th_sport)) + " -> " +
                           std::string{T{ip_header->ip_dst}} + " : " + std::to_string(ntohs(udp_header->th_dport)));
@@ -252,7 +321,7 @@ namespace ndisapi
 
                 it->second = std::chrono::steady_clock::now();
 
-                print_log(log_level::debug,
+                logger::print_log(log_level::debug,
                           std::string("C2S: ") + std::string{T{ip_header->ip_src}} + " : " +
                           std::to_string(ntohs(udp_header->th_sport)) + " -> " + std::string{T{ip_header->ip_dst}} +
                           " : "
@@ -284,7 +353,7 @@ namespace ndisapi
                     return false;
                 }
 
-                print_log(log_level::debug,
+                logger::print_log(log_level::debug,
                           std::string("C2S: ") + std::string{T{ip_header->ip6_src}} + " : " +
                           std::to_string(ntohs(udp_header->th_sport)) + " -> " +
                           std::string{T{ip_header->ip6_dst}} + " : " + std::to_string(ntohs(udp_header->th_dport)));
@@ -322,7 +391,7 @@ namespace ndisapi
 
                 it->second = std::chrono::steady_clock::now();
 
-                print_log(log_level::debug,
+                logger::print_log(log_level::debug,
                           std::string("C2S: ") + std::string{T{ip_header->ip6_src}} + " : " +
                           std::to_string(ntohs(udp_header->th_sport)) + " -> " + std::string{T{ip_header->ip6_dst}} +
                           " : " +
@@ -334,12 +403,15 @@ namespace ndisapi
             return false;
         }
 
-        /// <summary>
-        /// Processes S2C packet restoring the original client source port and remote peer
-        /// </summary>
-        /// <param name="packet">S2C network packet</param>
-        /// <returns>true if corresponding entry was found in remote_redirected_connections_
-        /// and packet was translated</returns>
+        /**
+         * @brief Processes an S2C packet, restoring the original client source port and remote peer.
+         *
+         * Modifies the packet in-place, removes the SOCKS5 UDP header, and updates the source/destination
+         * addresses and ports as needed.
+         *
+         * @param packet S2C network packet.
+         * @return True if the packet was translated, false otherwise.
+         */
         bool process_server_to_client_packet(INTERMEDIATE_BUFFER& packet)
         {
             if constexpr (auto* const eth_header = reinterpret_cast<ether_header_ptr>(packet.m_IBuffer); std::is_same_v<
@@ -368,7 +440,7 @@ namespace ndisapi
                 if (it == endpoints_.cend())
                     return false;
 
-                print_log(log_level::debug,
+                logger::print_log(log_level::debug,
                           std::string("S2C: ") + std::string{T{ip_header->ip_src}} + " : " +
                           std::to_string(ntohs(udp_header->th_sport)) + " -> " + std::string{T{ip_header->ip_dst}} +
                           " : "
@@ -400,7 +472,7 @@ namespace ndisapi
 
                 it->second = std::chrono::steady_clock::now();
 
-                print_log(log_level::debug,
+                logger::print_log(log_level::debug,
                           std::string("S2C: ") + std::string{T{ip_header->ip_src}} + " : " +
                           std::to_string(ntohs(udp_header->th_sport)) + " -> " + std::string{T{ip_header->ip_dst}} +
                           " : "

@@ -54,9 +54,6 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\netlib\src\src\iphelper\network_adapter_info.h">
-      <Filter>Header Files\netlib\iphelper</Filter>
-    </ClInclude>
     <ClInclude Include="..\netlib\src\log\log.h">
       <Filter>Header Files\netlib\log</Filter>
     </ClInclude>
@@ -105,9 +102,6 @@
     <ClInclude Include="..\netlib\src\pcap\pcap.h">
       <Filter>Header Files\netlib\pcap</Filter>
     </ClInclude>
-    <ClInclude Include="..\netlib\src\pcap\pcap_file_storage.h">
-      <Filter>Header Files\netlib\pcap</Filter>
-    </ClInclude>
     <ClInclude Include="unmanaged.h">
       <Filter>Header Files\native</Filter>
     </ClInclude>
@@ -144,9 +138,6 @@
     <ClInclude Include="..\netlib\src\proxy\socks5_common.h">
       <Filter>Header Files\netlib\proxy</Filter>
     </ClInclude>
-    <ClInclude Include="..\netlib\src\ndisapi\queued_packet_filter.h">
-      <Filter>Header Files\netlib\ndisapi</Filter>
-    </ClInclude>
     <ClInclude Include="..\netlib\src\ndisapi\tcp_local_redirect.h">
       <Filter>Header Files\netlib\ndisapi</Filter>
     </ClInclude>
@@ -158,6 +149,21 @@
     </ClInclude>
     <ClInclude Include="..\netlib\src\ndisapi\static_filters.h">
       <Filter>Header Files\netlib\ndisapi</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\src\iphelper\network_adapter_info.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\src\ndisapi\intermediate_buffer_pool.h">
+      <Filter>Header Files\netlib\ndisapi</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\src\ndisapi\queued_multi_interface_packet_filter.h">
+      <Filter>Header Files\netlib\ndisapi</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\src\pcap\pcap_stream_logger.h">
+      <Filter>Header Files\netlib\pcap</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\src\tools\strings.h">
+      <Filter>Header Files\netlib\tools</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

@@ -8,7 +8,7 @@ namespace pcap
     /// Link layer types
     /// </summary>
     // --------------------------------------------------------------------------------
-    enum link_layer_type: uint32_t
+    enum link_layer_type : uint32_t
     {
         /// <summary>BSD loopback encapsulation</summary>
         LINKTYPE_NULL = 0,
@@ -272,9 +272,9 @@ namespace pcap
         /// <param name="snap_len">max length of captured packets, in octets</param>
         /// <param name="network">data link type</param>
         pcap_file_header(const uint16_t version_major, const uint16_t version_minor, const int32_t this_zone,
-                         const uint32_t sig_figs,
-                         const uint32_t snap_len, const link_layer_type network) noexcept
-            : header_{0xa1b2c3d4, version_major, version_minor, this_zone, sig_figs, snap_len, network}
+            const uint32_t sig_figs,
+            const uint32_t snap_len, const link_layer_type network) noexcept
+            : header_{ 0xa1b2c3d4, version_major, version_minor, this_zone, sig_figs, snap_len, network }
         {
         }
 
@@ -311,8 +311,8 @@ namespace pcap
         /// <param name="orig_len">actual length of packet</param>
         /// <param name="data">packet content pointer</param>
         pcap_record_header(const uint32_t timestamp_sec, const uint32_t timestamp_usec, const uint32_t incl_len,
-                           const uint32_t orig_len, const char* data) noexcept
-            : header_{timestamp_sec, timestamp_usec, incl_len, orig_len}, data_{data}
+            const uint32_t orig_len, const char* data) noexcept
+            : header_{ timestamp_sec, timestamp_usec, incl_len, orig_len }, data_{ data }
         {
         }
 
