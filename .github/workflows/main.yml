@@ -34,9 +34,10 @@ jobs:
           ./bootstrap-vcpkg.sh
           ./vcpkg integrate install
 
-      - name: Install Microsoft GSL
+      - name: Install dependencies via vcpkg
         run: |
           ./vcpkg/vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows
+          ./vcpkg/vcpkg install boost-pool:x86-windows boost-pool:x64-windows boost-pool:arm64-windows
 
       - name: Install NuGet CLI
         run: choco install nuget.commandline
