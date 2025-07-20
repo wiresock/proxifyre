@@ -28,7 +28,7 @@ Here is an example configuration:
 
 ```json
 {
- "logLevel": "None",
+ "logLevel": "Error",
  "proxies": [
          {
          "appNames": ["chrome", "C:\\Program Files\\WindowsApps\\ROBLOXCORPORATION.ROBLOX"],
