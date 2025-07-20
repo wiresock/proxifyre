@@ -14,7 +14,7 @@ The application uses a configuration file named app-config.json. This JSON file 
 
 ### LogLevel
 
-LogLevel can have one of the following values which define the detail of the log: `None`, `Info`, `Deb`, `All`
+LogLevel can have one of the following values which define the detail of the log: `Error`, `Warning`, `Info`, `Debug`, `All`
 
 ### appNames
 
