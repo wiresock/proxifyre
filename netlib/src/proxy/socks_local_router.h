@@ -85,16 +85,6 @@ namespace proxy
         std::shared_mutex lock_;
 
         /**
-         * @brief Information of the default network adapter.
-         */
-        std::optional<iphelper::network_adapter_info> default_adapter_;
-
-        /**
-         * @brief Index of the network interface used.
-         */
-        std::size_t if_index_{};
-
-        /**
          * @brief Unique pointer to the TCP redirect object.
          */
         std::unique_ptr<ndisapi::tcp_local_redirect<net::ip_address_v4>> tcp_redirect_{ nullptr };
