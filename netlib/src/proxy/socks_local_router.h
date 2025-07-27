@@ -929,6 +929,13 @@ namespace proxy
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
             }
 
+            // If the packet is from a known proxy port, process for server-to-client redirection
+            if (is_udp_proxy_port(ntohs(udp_header->th_sport)))
+            {
+                if (udp_redirect_->process_server_to_client_packet(buffer))
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+            }
+
             auto process = process_lookup_v4_.
                 lookup_process_for_udp<false>(net::ip_endpoint<net::ip_address_v4>{
                 ip_header->ip_src, ntohs(udp_header->th_sport)
@@ -967,11 +974,6 @@ namespace proxy
                 if (udp_redirect_->process_client_to_server_packet(buffer, htons(port.value())))
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
             }
-            else if (is_udp_proxy_port(ntohs(udp_header->th_sport)))
-            {
-                if (udp_redirect_->process_server_to_client_packet(buffer))
-                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
-            }
 
             return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
         }
@@ -1005,6 +1007,13 @@ namespace proxy
             const auto* const tcp_header = reinterpret_cast<tcphdr_ptr>(reinterpret_cast<PUCHAR>(
                 ip_header) +
                 sizeof(DWORD) * ip_header->ip_hl);
+
+            // If the packet is from a known proxy port, process for server-to-client redirection
+            if (is_tcp_proxy_port(ntohs(tcp_header->th_sport)))
+            {
+                if (tcp_redirect_->process_server_to_client_packet(buffer))
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+            }
 
             auto process = process_lookup_v4_.
                 lookup_process_for_tcp<false>(net::ip_session<net::ip_address_v4>{
@@ -1048,12 +1057,6 @@ namespace proxy
 
                 // Attempt to process the packet for client-to-server redirection
                 if (tcp_redirect_->process_client_to_server_packet(buffer, htons(port.value())))
-                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
-            }
-            // If the packet is from a known proxy port, process for server-to-client redirection
-            else if (is_tcp_proxy_port(ntohs(tcp_header->th_sport)))
-            {
-                if (tcp_redirect_->process_server_to_client_packet(buffer))
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
             }
 
