@@ -132,9 +132,9 @@ namespace proxy
 
     private:
         /// <summary>
- /// Timestamp of the last processed packet for this session.
- /// Used to determine session activity and for idle timeout checks.
- /// </summary>
+        /// Timestamp of the last processed packet for this session.
+        /// Used to determine session activity and for idle timeout checks.
+        /// </summary>
         std::chrono::steady_clock::time_point timestamp_;
 
         /// <summary>
@@ -320,6 +320,23 @@ namespace proxy
             }
             return *this;
         }
+
+
+        /**
+         * @brief Deleted copy constructor.
+         *
+         * Copying is not allowed for socks5_udp_proxy_socket instances as they manage
+         * unique resources like sockets and negotiation contexts that cannot be safely copied.
+         */
+        socks5_udp_proxy_socket(const socks5_udp_proxy_socket&) = delete;
+
+        /**
+         * @brief Deleted copy assignment operator.
+         *
+         * Copy assignment is not allowed for socks5_udp_proxy_socket instances as they manage
+         * unique resources like sockets and negotiation contexts that cannot be safely copied.
+         */
+        socks5_udp_proxy_socket& operator=(const socks5_udp_proxy_socket&) = delete;
 
         /**
          * @brief Allocates a network packet buffer of the specified size from the packet pool.

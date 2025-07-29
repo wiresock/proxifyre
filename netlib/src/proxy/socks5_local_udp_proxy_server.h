@@ -166,16 +166,6 @@ namespace proxy
          */
         std::function<query_remote_peer_t> query_remote_peer_;
 
-        /// <summary>
-        /// Message logging function.
-        /// </summary>
-        std::function<void(const char*)> log_printer_;
-
-        /// <summary>
-        /// Logging level for the proxy server.
-        /// </summary>
-        netlib::log::log_level log_level_;
-
     public:
         /**
          * @brief Constructs a SOCKS5 local UDP proxy server.
@@ -884,6 +874,9 @@ namespace proxy
 
             if (remote_socket == INVALID_SOCKET)
             {
+                logger::print_log(log_level::debug,
+                          std::string("connect_to_remote_host: Failed to create UDP socket: ") + std::to_string(
+                              WSAGetLastError()));
                 return false;
             }
 
@@ -899,6 +892,9 @@ namespace proxy
                 {
                     closesocket(remote_socket);
                     closesocket(socks5_tcp_socket);
+                    logger::print_log(log_level::debug,
+                          std::string("connect_to_remote_host: Failed to bind UDP socket: ") + std::to_string(
+                              WSAGetLastError()));
                     return false;
                 }
             }
@@ -914,6 +910,9 @@ namespace proxy
                 {
                     closesocket(remote_socket);
                     closesocket(socks5_tcp_socket);
+                    logger::print_log(log_level::debug,
+                          std::string("connect_to_remote_host: Failed to bind UDP socket: ") + std::to_string(
+                              WSAGetLastError()));
                     return false;
                 }
             }
@@ -931,6 +930,9 @@ namespace proxy
                 {
                     closesocket(remote_socket);
                     closesocket(socks5_tcp_socket);
+                    logger::print_log(log_level::debug,
+                          std::string("connect_to_remote_host: Failed to connect UDP socket: ") + std::to_string(
+                              WSAGetLastError()));
                     return false;
                 }
             }
@@ -946,6 +948,9 @@ namespace proxy
                 {
                     closesocket(remote_socket);
                     closesocket(socks5_tcp_socket);
+                    logger::print_log(log_level::debug,
+                          std::string("connect_to_remote_host: Failed to connect UDP socket: ") + std::to_string(
+                              WSAGetLastError()));
                     return false;
                 }
             }
@@ -955,7 +960,7 @@ namespace proxy
                                                            socks5_tcp_socket, packet_pool_, server_socket_,
                                                            recv_from_sa_, remote_socket, remote_address,
                                                            udp_port.value(), std::move(negotiate_ctx),
-                                                           log_level_, logger::log_stream_));
+                                                           logger::log_level_, logger::log_stream_));
 
             if (result)
             {
@@ -967,6 +972,9 @@ namespace proxy
             {
                 closesocket(remote_socket);
                 closesocket(socks5_tcp_socket);
+                logger::print_log(log_level::debug,
+                          std::string("connect_to_remote_host: Failed to create proxy socket for: ") +
+                    std::string{ remote_address } + " : " + std::to_string(udp_port.value()));
                 return false;
             }
 
@@ -989,7 +997,7 @@ namespace proxy
             while (end_server_ == false)
             {
                 {
-                    std::lock_guard<std::mutex> lock(lock_);
+                    std::lock_guard lock(lock_);
 
                     for (auto it = proxy_sockets_.begin(); it != proxy_sockets_.end();)
                     {

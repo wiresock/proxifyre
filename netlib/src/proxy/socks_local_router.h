@@ -933,7 +933,10 @@ namespace proxy
             if (is_udp_proxy_port(ntohs(udp_header->th_sport)))
             {
                 if (udp_redirect_->process_server_to_client_packet(buffer))
+                {
+                    log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+                }
             }
 
             auto process = process_lookup_v4_.
@@ -972,7 +975,11 @@ namespace proxy
                 }
 
                 if (udp_redirect_->process_client_to_server_packet(buffer, htons(port.value())))
+                {
+                    log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+                }
+
             }
 
             return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
@@ -1012,7 +1019,10 @@ namespace proxy
             if (is_tcp_proxy_port(ntohs(tcp_header->th_sport)))
             {
                 if (tcp_redirect_->process_server_to_client_packet(buffer))
+                {
+                    log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+                }
             }
 
             auto process = process_lookup_v4_.
@@ -1057,7 +1067,10 @@ namespace proxy
 
                 // Attempt to process the packet for client-to-server redirection
                 if (tcp_redirect_->process_client_to_server_packet(buffer, htons(port.value())))
+                {
+                    log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+                }
             }
 
             // Otherwise, pass the packet through
