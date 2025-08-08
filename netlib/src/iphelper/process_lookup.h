@@ -462,6 +462,10 @@ namespace iphelper
             process_tcp_entry_v4(const PMIB_TCPROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
+            if (pid == 0) {
+                this->print_log(log_level::debug, "TCPv4 entry with pid=0, skipping resolution");
+                return nullptr; // Skip entries with pid=0
+            }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
             const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
@@ -520,6 +524,10 @@ namespace iphelper
             process_tcp_entry_v6(const PMIB_TCP6ROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
+            if (pid == 0) {
+                this->print_log(log_level::debug, "TCPv6 entry with pid=0, skipping resolution");
+                return nullptr; // Skip entries with pid=0
+            }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
             const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
@@ -578,6 +586,10 @@ namespace iphelper
             process_udp_entry_v4(const PMIB_UDPROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
+            if (pid == 0) {
+                this->print_log(log_level::debug, "UDPv4 entry with pid=0, skipping resolution");
+                return nullptr; // Skip entries with pid=0
+            }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
             const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
@@ -636,6 +648,10 @@ namespace iphelper
             process_udp_entry_v6(const PMIB_UDP6ROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
+            if (pid == 0) {
+                this->print_log(log_level::debug, "UDPv6 entry with pid=0, skipping resolution");
+                return nullptr; // Skip entries with pid=0
+            }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
             const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
