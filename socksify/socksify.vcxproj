@@ -236,6 +236,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\netlib\src\iphelper\network_adapter_info.h" />
+    <ClInclude Include="..\netlib\src\iphelper\owner_module_resolver.h" />
     <ClInclude Include="..\netlib\src\iphelper\process_lookup.h" />
     <ClInclude Include="..\netlib\src\log\log.h" />
     <ClInclude Include="..\netlib\src\ndisapi\intermediate_buffer_pool.h" />

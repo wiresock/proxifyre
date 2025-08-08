@@ -165,6 +165,9 @@
     <ClInclude Include="..\netlib\src\tools\strings.h">
       <Filter>Header Files\netlib\tools</Filter>
     </ClInclude>
+    <ClInclude Include="..\netlib\src\iphelper\owner_module_resolver.h">
+      <Filter>Header Files\netlib\iphelper</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AssemblyInfo.cpp">
