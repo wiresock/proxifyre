@@ -447,6 +447,16 @@ namespace iphelper
         }
 
         /**
+         * @brief Checks if a PID represents a system process that should be skipped.
+         *
+         * @param pid Process ID to check
+         * @return true if the PID should be skipped (0 = System Idle Process, 4 = System Process)
+         */
+        static constexpr bool is_system_process(const DWORD pid) noexcept {
+            return pid == 0 || pid == 4;
+        }
+
+        /**
          * @brief Processes a TCPv4 table entry and resolves its owner process.
          *
          * Uses the owner_module_resolver to determine the process and service information
@@ -462,9 +472,11 @@ namespace iphelper
             process_tcp_entry_v4(const PMIB_TCPROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
-            if (pid == 0) {
-                this->print_log(log_level::debug, "TCPv4 entry with pid=0, skipping resolution");
-                return nullptr; // Skip entries with pid=0
+            if (is_system_process(pid)) {
+                this->print_log(log_level::debug,
+                    "TCPv4 entry with system process PID=" + std::to_string(pid) +
+                    " (" + (pid == 0 ? "Idle" : "System") + "), skipping resolution");
+                return nullptr;
             }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
@@ -524,9 +536,11 @@ namespace iphelper
             process_tcp_entry_v6(const PMIB_TCP6ROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
-            if (pid == 0) {
-                this->print_log(log_level::debug, "TCPv6 entry with pid=0, skipping resolution");
-                return nullptr; // Skip entries with pid=0
+            if (is_system_process(pid)) {
+                this->print_log(log_level::debug,
+                    "TCPv6 entry with system process PID=" + std::to_string(pid) +
+                    " (" + (pid == 0 ? "Idle" : "System") + "), skipping resolution");
+                return nullptr;
             }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
@@ -586,9 +600,11 @@ namespace iphelper
             process_udp_entry_v4(const PMIB_UDPROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
-            if (pid == 0) {
-                this->print_log(log_level::debug, "UDPv4 entry with pid=0, skipping resolution");
-                return nullptr; // Skip entries with pid=0
+            if (is_system_process(pid)) {
+                this->print_log(log_level::debug,
+                    "UDPv4 entry with system process PID=" + std::to_string(pid) +
+                    " (" + (pid == 0 ? "Idle" : "System") + "), skipping resolution");
+                return nullptr;
             }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
@@ -648,9 +664,11 @@ namespace iphelper
             process_udp_entry_v6(const PMIB_UDP6ROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
-            if (pid == 0) {
-                this->print_log(log_level::debug, "UDPv6 entry with pid=0, skipping resolution");
-                return nullptr; // Skip entries with pid=0
+            if (is_system_process(pid)) {
+                this->print_log(log_level::debug,
+                    "UDPv6 entry with system process PID=" + std::to_string(pid) +
+                    " (" + (pid == 0 ? "Idle" : "System") + "), skipping resolution");
+                return nullptr;
             }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
