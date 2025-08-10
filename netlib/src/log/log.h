@@ -1,3 +1,4 @@
+// ReSharper disable CppClangTidyClangDiagnosticGnuZeroVariadicMacroArguments
 #pragma once
 
 #include <string>
