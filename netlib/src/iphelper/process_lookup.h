@@ -473,20 +473,26 @@ namespace iphelper
         {
             const DWORD pid = row->dwOwningPid;
             if (is_system_process(pid)) {
-                this->print_log(log_level::debug,
-                    "TCPv4 entry with system process PID=" + std::to_string(pid) +
-                    " (" + (pid == 0 ? "Idle" : "System") + "), skipping resolution");
+                if (get_log_level() >= log_level::debug) {
+                    print_log(log_level::debug,
+                        "TCPv4 entry with system process PID = {} ({}) skipping resolution",
+                        pid,
+                        pid == 0 ? "Idle" : "System");
+                }
                 return nullptr;
             }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
             const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
             if (ext.error == owner_module_resolver::error_code::success) {
-                this->print_log(log_level::debug,
-                    "Resolved TCPv4 owner: pid=" + std::to_string(pid) +
-                    " tag=" + std::to_string(tag) +
-                    " name=\"" + tools::strings::to_string(ext.data.base_name) +
-                    "\" path=\"" + tools::strings::to_string(ext.data.full_path) + '\"');
+                if (get_log_level() >= log_level::debug) {
+                    print_log(log_level::debug,
+                        "Resolved TCPv4 owner: pid={} tag={} name=\"{}\" path=\"{}\"",
+                        pid,
+                        tag,
+                        tools::strings::to_string(ext.data.base_name),
+                        tools::strings::to_string(ext.data.full_path));
+                }
 
                 return std::make_shared<network_process>(
                     pid,
@@ -497,11 +503,14 @@ namespace iphelper
 
             if (tag != 0 && ext.error == owner_module_resolver::error_code::service_not_found) {
                 if (owner_module_resolver::result img{}; owner_module_resolver::resolve_from_pid_and_tag(pid, 0, img)) {
-                    this->print_log(log_level::warning,
-                        "Service tag not found; fell back to process image (TCPv4): pid=" + std::to_string(pid) +
-                        " tag=" + std::to_string(tag) +
-                        " name=\"" + tools::strings::to_string(img.base_name) +
-                        "\" path=\"" + tools::strings::to_string(img.full_path) + '\"');
+                    if (get_log_level() >= log_level::debug) {
+                        print_log(log_level::debug,
+                            "Service tag not found; fell back to process image (TCPv4): pid={} tag={} name=\"{}\" path=\"{}\"",
+                            pid,
+                            tag,
+                            tools::strings::to_string(img.base_name),
+                            tools::strings::to_string(img.full_path));
+                    }
 
                     return std::make_shared<network_process>(
                         pid,
@@ -511,12 +520,14 @@ namespace iphelper
                 }
             }
 
-            std::string msg = "Failed to resolve TCPv4 owner: pid=" + std::to_string(pid) +
-                " tag=" + std::to_string(tag) +
-                " error=" + error_code_to_string(ext.error);
-            if (!ext.error_message.empty())
-                msg += " msg=\"" + tools::strings::to_string(ext.error_message) + '\"';
-            this->print_log(log_level::error, msg);
+            if (get_log_level() >= log_level::debug) {
+                print_log(log_level::debug,
+                    "Failed to resolve TCPv4 owner: pid={} tag={} error={}{}",
+                    pid,
+                    tag,
+                    error_code_to_string(ext.error),
+                    ext.error_message.empty() ? "" : std::format(" msg=\"{}\"", tools::strings::to_string(ext.error_message)));
+            }
             return nullptr;
         }
 
@@ -537,20 +548,26 @@ namespace iphelper
         {
             const DWORD pid = row->dwOwningPid;
             if (is_system_process(pid)) {
-                this->print_log(log_level::debug,
-                    "TCPv6 entry with system process PID=" + std::to_string(pid) +
-                    " (" + (pid == 0 ? "Idle" : "System") + "), skipping resolution");
+                if (get_log_level() >= log_level::debug) {
+                    print_log(log_level::debug,
+                        "TCPv6 entry with system process PID = {} ({}) skipping resolution",
+                        pid,
+                        pid == 0 ? "Idle" : "System");
+                }
                 return nullptr;
             }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
             const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
             if (ext.error == owner_module_resolver::error_code::success) {
-                this->print_log(log_level::debug,
-                    "Resolved TCPv6 owner: pid=" + std::to_string(pid) +
-                    " tag=" + std::to_string(tag) +
-                    " name=\"" + tools::strings::to_string(ext.data.base_name) +
-                    "\" path=\"" + tools::strings::to_string(ext.data.full_path) + '\"');
+                if (get_log_level() >= log_level::debug) {
+                    print_log(log_level::debug,
+                        "Resolved TCPv6 owner: pid={} tag={} name=\"{}\" path=\"{}\"",
+                        pid,
+                        tag,
+                        tools::strings::to_string(ext.data.base_name),
+                        tools::strings::to_string(ext.data.full_path));
+                }
 
                 return std::make_shared<network_process>(
                     pid,
@@ -561,11 +578,14 @@ namespace iphelper
 
             if (tag != 0 && ext.error == owner_module_resolver::error_code::service_not_found) {
                 if (owner_module_resolver::result img{}; owner_module_resolver::resolve_from_pid_and_tag(pid, 0, img)) {
-                    this->print_log(log_level::warning,
-                        "Service tag not found; fell back to process image (TCPv6): pid=" + std::to_string(pid) +
-                        " tag=" + std::to_string(tag) +
-                        " name=\"" + tools::strings::to_string(img.base_name) +
-                        "\" path=\"" + tools::strings::to_string(img.full_path) + '\"');
+                    if (get_log_level() >= log_level::debug) {
+                        print_log(log_level::debug,
+                            "Service tag not found; fell back to process image (TCPv6): pid={} tag={} name=\"{}\" path=\"{}\"",
+                            pid,
+                            tag,
+                            tools::strings::to_string(img.base_name),
+                            tools::strings::to_string(img.full_path));
+                    }
 
                     return std::make_shared<network_process>(
                         pid,
@@ -575,12 +595,14 @@ namespace iphelper
                 }
             }
 
-            std::string msg = "Failed to resolve TCPv6 owner: pid=" + std::to_string(pid) +
-                " tag=" + std::to_string(tag) +
-                " error=" + error_code_to_string(ext.error);
-            if (!ext.error_message.empty())
-                msg += " msg=\"" + tools::strings::to_string(ext.error_message) + '\"';
-            this->print_log(log_level::error, msg);
+            if (get_log_level() >= log_level::debug) {
+                print_log(log_level::debug,
+                    "Failed to resolve TCPv6 owner: pid={} tag={} error={}{}",
+                    pid,
+                    tag,
+                    error_code_to_string(ext.error),
+                    ext.error_message.empty() ? "" : std::format(" msg=\"{}\"", tools::strings::to_string(ext.error_message)));
+            }
             return nullptr;
         }
 
@@ -601,20 +623,26 @@ namespace iphelper
         {
             const DWORD pid = row->dwOwningPid;
             if (is_system_process(pid)) {
-                this->print_log(log_level::debug,
-                    "UDPv4 entry with system process PID=" + std::to_string(pid) +
-                    " (" + (pid == 0 ? "Idle" : "System") + "), skipping resolution");
+                if (get_log_level() >= log_level::debug) {
+                    print_log(log_level::debug,
+                        "UDPv4 entry with system process PID = {} ({}) skipping resolution",
+                        pid,
+                        pid == 0 ? "Idle" : "System");
+                }
                 return nullptr;
             }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
             const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
             if (ext.error == owner_module_resolver::error_code::success) {
-                this->print_log(log_level::debug,
-                    "Resolved UDPv4 owner: pid=" + std::to_string(pid) +
-                    " tag=" + std::to_string(tag) +
-                    " name=\"" + tools::strings::to_string(ext.data.base_name) +
-                    "\" path=\"" + tools::strings::to_string(ext.data.full_path) + '\"');
+                if (get_log_level() >= log_level::debug) {
+                    print_log(log_level::debug,
+                        "Resolved UDPv4 owner: pid={} tag={} name=\"{}\" path=\"{}\"",
+                        pid,
+                        tag,
+                        tools::strings::to_string(ext.data.base_name),
+                        tools::strings::to_string(ext.data.full_path));
+                }
 
                 return std::make_shared<network_process>(
                     pid,
@@ -625,11 +653,14 @@ namespace iphelper
 
             if (tag != 0 && ext.error == owner_module_resolver::error_code::service_not_found) {
                 if (owner_module_resolver::result img{}; owner_module_resolver::resolve_from_pid_and_tag(pid, 0, img)) {
-                    this->print_log(log_level::warning,
-                        "Service tag not found; fell back to process image (UDPv4): pid=" + std::to_string(pid) +
-                        " tag=" + std::to_string(tag) +
-                        " name=\"" + tools::strings::to_string(img.base_name) +
-                        "\" path=\"" + tools::strings::to_string(img.full_path) + '\"');
+                    if (get_log_level() >= log_level::debug) {
+                        print_log(log_level::debug,
+                            "Service tag not found; fell back to process image (UDPv4): pid={} tag={} name=\"{}\" path=\"{}\"",
+                            pid,
+                            tag,
+                            tools::strings::to_string(img.base_name),
+                            tools::strings::to_string(img.full_path));
+                    }
 
                     return std::make_shared<network_process>(
                         pid,
@@ -639,12 +670,14 @@ namespace iphelper
                 }
             }
 
-            std::string msg = "Failed to resolve UDPv4 owner: pid=" + std::to_string(pid) +
-                " tag=" + std::to_string(tag) +
-                " error=" + error_code_to_string(ext.error);
-            if (!ext.error_message.empty())
-                msg += " msg=\"" + tools::strings::to_string(ext.error_message) + '\"';
-            this->print_log(log_level::error, msg);
+            if (get_log_level() >= log_level::debug) {
+                print_log(log_level::debug,
+                    "Failed to resolve UDPv4 owner: pid={} tag={} error={}{}",
+                    pid,
+                    tag,
+                    error_code_to_string(ext.error),
+                    ext.error_message.empty() ? "" : std::format(" msg=\"{}\"", tools::strings::to_string(ext.error_message)));
+            }
             return nullptr;
         }
 
@@ -665,20 +698,26 @@ namespace iphelper
         {
             const DWORD pid = row->dwOwningPid;
             if (is_system_process(pid)) {
-                this->print_log(log_level::debug,
-                    "UDPv6 entry with system process PID=" + std::to_string(pid) +
-                    " (" + (pid == 0 ? "Idle" : "System") + "), skipping resolution");
+                if (get_log_level() >= log_level::debug) {
+                    print_log(log_level::debug,
+                        "UDPv6 entry with system process PID = {} ({}) skipping resolution",
+                        pid,
+                        pid == 0 ? "Idle" : "System");
+                }
                 return nullptr;
             }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
             const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
             if (ext.error == owner_module_resolver::error_code::success) {
-                this->print_log(log_level::debug,
-                    "Resolved UDPv6 owner: pid=" + std::to_string(pid) +
-                    " tag=" + std::to_string(tag) +
-                    " name=\"" + tools::strings::to_string(ext.data.base_name) +
-                    "\" path=\"" + tools::strings::to_string(ext.data.full_path) + '\"');
+                if (get_log_level() >= log_level::debug) {
+                    print_log(log_level::debug,
+                        "Resolved UDPv6 owner: pid={} tag={} name=\"{}\" path=\"{}\"",
+                        pid,
+                        tag,
+                        tools::strings::to_string(ext.data.base_name),
+                        tools::strings::to_string(ext.data.full_path));
+                }
 
                 return std::make_shared<network_process>(
                     pid,
@@ -689,11 +728,14 @@ namespace iphelper
 
             if (tag != 0 && ext.error == owner_module_resolver::error_code::service_not_found) {
                 if (owner_module_resolver::result img{}; owner_module_resolver::resolve_from_pid_and_tag(pid, 0, img)) {
-                    this->print_log(log_level::warning,
-                        "Service tag not found; fell back to process image (UDPv6): pid=" + std::to_string(pid) +
-                        " tag=" + std::to_string(tag) +
-                        " name=\"" + tools::strings::to_string(img.base_name) +
-                        "\" path=\"" + tools::strings::to_string(img.full_path) + '\"');
+                    if (get_log_level() >= log_level::debug) {
+                        print_log(log_level::debug,
+                            "Service tag not found; fell back to process image (UDPv6): pid={} tag={} name=\"{}\" path=\"{}\"",
+                            pid,
+                            tag,
+                            tools::strings::to_string(img.base_name),
+                            tools::strings::to_string(img.full_path));
+                    }
 
                     return std::make_shared<network_process>(
                         pid,
@@ -703,12 +745,14 @@ namespace iphelper
                 }
             }
 
-            std::string msg = "Failed to resolve UDPv6 owner: pid=" + std::to_string(pid) +
-                " tag=" + std::to_string(tag) +
-                " error=" + error_code_to_string(ext.error);
-            if (!ext.error_message.empty())
-                msg += " msg=\"" + tools::strings::to_string(ext.error_message) + '\"';
-            this->print_log(log_level::error, msg);
+            if (get_log_level() >= log_level::debug) {
+                print_log(log_level::debug,
+                    "Failed to resolve UDPv6 owner: pid={} tag={} error={}{}",
+                    pid,
+                    tag,
+                    error_code_to_string(ext.error),
+                    ext.error_message.empty() ? "" : std::format(" msg=\"{}\"", tools::strings::to_string(ext.error_message)));
+            }
             return nullptr;
         }
 

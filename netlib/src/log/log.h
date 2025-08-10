@@ -35,7 +35,7 @@
  * std::osyncstream for atomic output operations, and optional std::source_location
  * for enhanced debugging information.
  *
- * Key Features:
+ * ## Key Features:
  * - Thread-safe atomic operations for log level and stream management
  * - CRTP-based design for optimal performance and type safety
  * - Hierarchical log level filtering with special 'all' level handling
@@ -47,9 +47,23 @@
  * - Performance-optimized string formatting with pre-allocation
  * - Multi-level fallback strategies for maximum reliability
  *
+ * ## Source Location Architecture:
+ * The logger implements a sophisticated source location capture system:
+ * - Public API automatically captures call site information via std::source_location::current()
+ * - Private implementation helpers maintain separation of concerns
+ * - Conditional compilation ensures compatibility when source location is unavailable
+ * - No user intervention required - location capture is transparent
+ *
+ * ## Performance Optimizations:
+ * - Dual interface design: formatted logging vs. string_view for simple messages
+ * - Pre-allocated buffers based on format string size estimation
+ * - Early exit optimizations for disabled log levels
+ * - Atomic operations with relaxed memory ordering for optimal throughput
+ * - Static caching of expensive resources like time zone information
+ *
  * @author Vadim Smirnov
- * @version 1.1
- * @date 2024-05-10
+ * @version 1.2
+ * @date 2024-08-10
  * @since C++20
  */
 
@@ -362,7 +376,13 @@ namespace netlib::log {
          * This function provides printf-style formatted logging using modern C++20
          * std::format. It includes comprehensive error handling for format operations
          * and produces thread-safe output with rich contextual information including
-         * timestamps, log levels, thread IDs, and optional source location data.
+         * timestamps, log levels, thread IDs, and automatic source location data.
+         *
+         * ## Architecture and Design:
+         * This public interface automatically captures source location at the call site
+         * and delegates to the private print_log_impl() for actual processing. This
+         * design separates the user-facing API from implementation details while ensuring
+         * source location is captured at the correct call site.
          *
          * ## Performance Optimizations:
          * - Pre-allocates string buffer based on format string size estimation
@@ -375,6 +395,11 @@ namespace netlib::log {
          * - Provides detailed error context in fallback messages
          * - Maintains exception-safe noexcept guarantee through comprehensive catches
          *
+         * ## Source Location Integration:
+         * - Automatically captures source location at call site via std::source_location::current()
+         * - No user intervention required - location is captured transparently
+         * - Gracefully degrades when source location support is unavailable
+         *
          * ## Output Format Examples:
          * ```
          * 2024-05-10 14:30:25.123 [info] [T A1B2C3] [MyLogger] Processing 150 items
@@ -386,13 +411,12 @@ namespace netlib::log {
          * @param level The log level for this message (used for filtering).
          * @param fmt Format string compatible with std::format (compile-time checked).
          * @param args Arguments to substitute into the format string (perfect forwarded).
-         * @param loc Source location information (automatically captured if available).
          *
          * @note Function is noexcept - all exceptions are caught and handled internally.
          * @note Messages are filtered based on is_enabled(current_level, message_level).
          * @note No output occurs if log_stream_ is null.
          * @note Format string is compile-time validated for type safety.
-         * @note Source location is automatically captured at call site when available.
+         * @note Source location is automatically captured without user intervention.
          *
          * ## Thread Safety:
          * - Atomic log level access with memory_order_relaxed
@@ -407,43 +431,17 @@ namespace netlib::log {
          * @endcode
          */
         template <typename... Args>
-        void print_log(const log_level level,
+        void print_log(
+            const log_level level,
             std::format_string<Args...> fmt,
-            Args&&... args
-#if NETLIB_HAS_SOURCE_LOCATION
-            , const std::source_location& loc = std::source_location::current()
-#endif
-        ) const noexcept
+            Args&&... args) const noexcept
         {
-            // Thread-safe stream access and early exit for performance
-            const auto stream = log_stream_;
-            if (!stream || !is_enabled(log_level_.load(std::memory_order_relaxed), level)) return;
-
-            // Build the formatted message with safe error handling and performance optimization
-            std::string message;
-            try {
-                // Estimate buffer size based on format string for better performance
-                const auto estimated_size = std::max(size_t{ 128 }, fmt.get().size() * 2);
-                message.reserve(estimated_size);
-                std::format_to(std::back_inserter(message), fmt, std::forward<Args>(args)...);
-            }
-            catch (const std::exception& e) {
-                // Fallback for format errors - avoid recursive std::format calls
-                message.clear();
-                message += "[formatting failed] ";
-                message += e.what();
-            }
-            catch (...) {
-                // Ultimate fallback for unknown exceptions
-                message = "[formatting failed] unknown error";
-            }
-
-            // Delegate to internal emission function with all context
-            emit_log_entry(level, message, *stream
+            // Capture source location at call site and delegate to implementation
 #if NETLIB_HAS_SOURCE_LOCATION
-                , loc
+            print_log_impl(level, std::source_location::current(), fmt, std::forward<Args>(args)...);
+#else
+            print_log_impl(level, fmt, std::forward<Args>(args)...);
 #endif
-            );
         }
 
         /**
@@ -465,14 +463,19 @@ namespace netlib::log {
          * - Same early-exit optimization for disabled log levels
          * - Identical thread-safe output path as templated version
          *
+         * ## Source Location Handling:
+         * - Conditionally compiled based on NETLIB_HAS_SOURCE_LOCATION
+         * - When available, automatically captures call site information
+         * - Graceful fallback when source location is not supported
+         *
          * @param level The log level for this message (used for filtering).
          * @param message The pre-formatted message string to log (zero-copy via string_view).
-         * @param loc Source location information (automatically captured if available).
+         * @param loc Source location information (automatically captured when available).
          *
          * @note Function is noexcept with same guarantees as templated version.
          * @note Uses same timestamp precision and format as templated version.
          * @note Subject to same log level filtering rules.
-         * @note Source location capture works identically to templated version.
+         * @note Source location parameter is conditionally compiled.
          *
          * ## Usage Examples:
          * @code
@@ -488,7 +491,7 @@ namespace netlib::log {
 #endif
         ) const noexcept
         {
-            // Same thread-safe access pattern as templated version
+            // Thread-safe stream access and early exit optimization
             const auto stream = log_stream_;
             if (!stream || !is_enabled(log_level_.load(std::memory_order_relaxed), level)) return;
 
@@ -555,6 +558,123 @@ namespace netlib::log {
         }
 
     private:
+
+#if NETLIB_HAS_SOURCE_LOCATION
+        /**
+         * @brief Internal implementation for formatted message logging (with source location).
+         *
+         * This private helper function performs the actual formatting and logging work
+         * for the public print_log() template when source location is available. It exists
+         * to enable proper source location capture while maintaining clean separation between
+         * the public API and implementation details.
+         *
+         * ## Design Rationale:
+         * This implementation pattern solves the source location parameter forwarding
+         * problem by having the public interface capture source location at the call
+         * site and pass it to this implementation function. This ensures that:
+         * - Source location reflects the actual caller, not the logger implementation
+         * - The public API remains clean and user-friendly
+         * - Implementation complexity is properly encapsulated
+         *
+         * ## Performance Characteristics:
+         * - Pre-allocates message buffer based on format string length estimation
+         * - Uses std::format_to for efficient string construction
+         * - Comprehensive exception handling with multiple fallback levels
+         * - Early exit optimization for disabled log levels
+         *
+         * @tparam Args Variadic template parameter pack for format arguments.
+         * @param level The log level for filtering and output formatting.
+         * @param loc Source location captured at the original call site.
+         * @param fmt Format string for std::format (compile-time validated).
+         * @param args Perfect-forwarded arguments for format substitution.
+         *
+         * @note This function is private and not part of the public API.
+         * @note All exceptions are caught and converted to error messages.
+         * @note Uses the same error handling strategy as other logging methods.
+         */
+        template <typename... Args>
+        void print_log_impl(
+            const log_level level,
+            const std::source_location& loc,
+            std::format_string<Args...> fmt,
+            Args&&... args) const noexcept
+        {
+            const auto stream = log_stream_;
+            if (!stream || !is_enabled(log_level_.load(std::memory_order_relaxed), level))
+                return;
+
+            std::string message;
+            try {
+                // Estimate buffer size for optimal performance
+                const auto estimated_size = std::max<size_t>(128, fmt.get().size() * 2);
+                message.reserve(estimated_size);
+                std::format_to(std::back_inserter(message), fmt, std::forward<Args>(args)...);
+            }
+            catch (const std::exception& e) {
+                // Fallback for format errors - avoid recursive format calls
+                message.clear();
+                message += "[formatting failed] ";
+                message += e.what();
+            }
+            catch (...) {
+                // Ultimate fallback for unknown exceptions
+                message = "[formatting failed] unknown error";
+            }
+
+            // Delegate to the core output function with captured location
+            emit_log_entry(level, message, *stream, loc);
+        }
+#else
+        /**
+         * @brief Internal implementation for formatted message logging (without source location).
+         *
+         * This private helper function performs the actual formatting and logging work
+         * for the public print_log() template when source location is not available. It
+         * provides the same functionality as the source location version but omits location
+         * information from the output.
+         *
+         * @tparam Args Variadic template parameter pack for format arguments.
+         * @param level The log level for filtering and output formatting.
+         * @param fmt Format string for std::format (compile-time validated).
+         * @param args Perfect-forwarded arguments for format substitution.
+         *
+         * @note This function is private and not part of the public API.
+         * @note All exceptions are caught and converted to error messages.
+         * @note Provides identical functionality to the source location version.
+         */
+        template <typename... Args>
+        void print_log_impl(
+            const log_level level,
+            std::format_string<Args...> fmt,
+            Args&&... args) const noexcept
+        {
+            const auto stream = log_stream_;
+            if (!stream || !is_enabled(log_level_.load(std::memory_order_relaxed), level))
+                return;
+
+            std::string message;
+            try {
+                // Estimate buffer size for optimal performance
+                const auto estimated_size = std::max<size_t>(128, fmt.get().size() * 2);
+                message.reserve(estimated_size);
+                std::format_to(std::back_inserter(message), fmt, std::forward<Args>(args)...);
+            }
+            catch (const std::exception& e) {
+                // Fallback for format errors - avoid recursive format calls
+                message.clear();
+                message += "[formatting failed] ";
+                message += e.what();
+            }
+            catch (...) {
+                // Ultimate fallback for unknown exceptions
+                message = "[formatting failed] unknown error";
+            }
+
+            // Delegate to the core output function without location
+            emit_log_entry(level, message, *stream);
+        }
+#endif
+
         /**
          * @brief Internal helper to emit formatted log entries with timestamp and context.
          *
@@ -563,23 +683,24 @@ namespace netlib::log {
          * and optional source location data. It implements a multi-level fallback
          * strategy to ensure reliable output even in error conditions.
          *
+         * ## Source Location Processing:
+         * When NETLIB_HAS_SOURCE_LOCATION is enabled, this function:
+         * - Safely extracts basename from full file paths using find_last_of()
+         * - Handles edge cases where no path separators exist
+         * - Includes function name and line number for enhanced debugging
+         * - Gracefully compiles without source location when not available
+         *
          * ## Timestamp Handling:
          * - Attempts local time via std::chrono::zoned_time and current_zone()
          * - Falls back to UTC with 'Z' suffix if time zone database unavailable
          * - Uses millisecond precision for high-resolution timing
          * - Caches time zone pointer for performance (stable across calls)
          *
-         * ## Error Recovery:
+         * ## Error Recovery Strategy:
          * - Primary: Modern chrono formatting with local time
          * - Secondary: UTC formatting with clear indication
          * - Tertiary: Manual formatting without std::format dependency
          * - Each level provides progressively more basic but reliable output
-         *
-         * ## Source Location Processing:
-         * - Safely extracts basename from full file paths
-         * - Handles edge cases where no path separators exist
-         * - Includes function name and line number for debugging
-         * - Only included when NETLIB_HAS_SOURCE_LOCATION is defined
          *
          * @param level The log level of the message being emitted.
          * @param message The formatted message content to output.

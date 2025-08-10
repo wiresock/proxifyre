@@ -55,36 +55,35 @@ namespace ndisapi
         void start_cleanup_thread()
         {
             cleanup_thread_ = std::thread([this]()
-            {
-                while (!terminate_)
                 {
+                    while (!terminate_)
                     {
-                        auto current_time = std::chrono::steady_clock::now();
-                        std::lock_guard lock(lock_);
+                        {
+                            auto current_time = std::chrono::steady_clock::now();
+                            std::lock_guard lock(lock_);
 
-                        tools::generic::erase_if(redirected_connections_, redirected_connections_.begin(),
-                                                 redirected_connections_.end(),
-                                                 [&current_time, this](auto&& a)
-                                                 {
-                                                     using namespace std::chrono_literals;
-                                                     if (current_time - a.second.second > 5min)
-                                                     {
-                                                         this->print_log(log_level::info,
-                                                                         std::string("DELETE TCP (timeout): ") +
-                                                                         std::to_string(ntohs(a.first.port)) + " -> " +
-                                                                         std::string{a.first.ip} + " : "
-                                                                         +
-                                                                         std::to_string(ntohs(a.second.first)));
-                                                         return true;
-                                                     }
-                                                     return false;
-                                                 });
+                            tools::generic::erase_if(redirected_connections_, redirected_connections_.begin(),
+                                redirected_connections_.end(),
+                                [&current_time, this](auto&& a)
+                                {
+                                    using namespace std::chrono_literals;
+                                    if (current_time - a.second.second > 5min)
+                                    {
+                                        print_log(log_level::info,
+                                            "DELETE TCP (timeout): {} -> {} : {}",
+                                            ntohs(a.first.port),
+                                            std::string{ a.first.ip },
+                                            ntohs(a.second.first));
+                                        return true;
+                                    }
+                                    return false;
+                                });
+                        }
+
+                        using namespace std::chrono_literals;
+                        std::this_thread::sleep_for(1s);
                     }
-
-                    using namespace std::chrono_literals;
-                    std::this_thread::sleep_for(1s);
-                }
-            });
+                });
         }
 
     public:
@@ -198,23 +197,25 @@ namespace ndisapi
                 if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
                 {
                     if (const auto [it, result] = redirected_connections_.emplace(
-                        net::ip_endpoint<T>{T{ip_header->ip_dst}, tcp_header->th_sport},
+                        net::ip_endpoint<T>{T{ ip_header->ip_dst }, tcp_header->th_sport},
                         timestamp_endpoint{
                             tcp_header->th_dport,
                             std::chrono::steady_clock::now()
                         }); !result)
                         return false;
 
-                    logger::print_log(log_level::info,
-                              std::string("NEW TCP: ") + std::string{T{ip_header->ip_src}} + " : " +
-                              std::to_string(ntohs(tcp_header->th_sport)) + " -> " + std::string{T{ip_header->ip_dst}} +
-                              " : " + std::to_string(ntohs(tcp_header->th_dport)));
+                    print_log(log_level::info,
+                        "NEW TCP: {}:{} -> {}:{}",
+                        std::string{ T{ip_header->ip_src} },
+                        ntohs(tcp_header->th_sport),
+                        std::string{ T{ip_header->ip_dst} },
+                        ntohs(tcp_header->th_dport));
                 }
                 else
                 {
                     // existing connection
                     const auto it = redirected_connections_.find(net::ip_endpoint<T>{
-                        T{ip_header->ip_dst}, tcp_header->th_sport
+                        T{ ip_header->ip_dst }, tcp_header->th_sport
                     });
                     if (it == redirected_connections_.cend())
                         return false;
@@ -222,11 +223,11 @@ namespace ndisapi
                     if (tcp_header->th_flags & TH_RST || tcp_header->th_flags & TH_FIN)
                     {
                         // pass through but erase the corresponding entry
-                        logger::print_log(log_level::info,
-                                  std::string("DELETE TCP: ") + std::to_string(ntohs(it->first.port)) + " -> " +
-                                  std::string{it->first.ip} + " : "
-                                  +
-                                  std::to_string(ntohs(it->second.first)));
+                        print_log(log_level::info,
+                            "DELETE TCP: {} -> {} : {}",
+                            ntohs(it->first.port),
+                            std::string{ it->first.ip },
+                            ntohs(it->second.first));
 
                         redirected_connections_.erase(it);
                     }
@@ -268,23 +269,25 @@ namespace ndisapi
                 if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
                 {
                     if (const auto [it, result] = redirected_connections_.emplace(
-                        net::ip_endpoint<T>{T{ip_header->ip6_dst}, tcp_header->th_sport},
+                        net::ip_endpoint<T>{T{ ip_header->ip6_dst }, tcp_header->th_sport},
                         timestamp_endpoint{
                             tcp_header->th_dport,
                             std::chrono::steady_clock::now()
                         }); !result)
                         return false;
 
-                    logger::print_log(log_level::info, std::string("NEW TCP: ") + std::string{T{ip_header->ip6_src}} + " : " +
-                              std::to_string(ntohs(tcp_header->th_sport)) + " -> " + std::string{T{ip_header->ip6_dst}}
-                              +
-                              " : " + std::to_string(ntohs(tcp_header->th_dport)));
+                    print_log(log_level::info,
+                        "NEW TCP: {}:{} -> {}:{}",
+                        std::string{ T{ip_header->ip6_src} },
+                        ntohs(tcp_header->th_sport),
+                        std::string{ T{ip_header->ip6_dst} },
+                        ntohs(tcp_header->th_dport));
                 }
                 else
                 {
                     // existing connection
                     const auto it = redirected_connections_.find(net::ip_endpoint<T>{
-                        T{ip_header->ip6_dst}, tcp_header->th_sport
+                        T{ ip_header->ip6_dst }, tcp_header->th_sport
                     });
                     if (it == redirected_connections_.cend())
                         return false;
@@ -292,15 +295,18 @@ namespace ndisapi
                     if (tcp_header->th_flags & TH_RST || tcp_header->th_flags & TH_FIN)
                     {
                         // pass through but erase the corresponding entry
-                        print_log(log_level::info, std::string("DELETE TCP: ") + std::string{it->first.ip} + " : " +
-                                  std::to_string(ntohs(it->first.port)) + " -> " + std::string{T{it->second.ip}} +
-                                  " : " + std::to_string(ntohs(it->second.port)));
+                        print_log(log_level::info,
+                            "DELETE TCP: {}:{} -> {}:{}",
+                            std::string{ it->first.ip },
+                            ntohs(it->first.port),
+                            std::string{ it->first.ip },
+                            ntohs(it->second.first));
 
                         redirected_connections_.erase(it);
                     }
                     else
                     {
-                        it->second.timestamp = std::chrono::steady_clock::now();
+                        it->second.second = std::chrono::steady_clock::now();
                     }
                 }
 
@@ -349,7 +355,7 @@ namespace ndisapi
                 std::lock_guard lock(lock_);
 
                 const auto it = redirected_connections_.find(net::ip_endpoint<T>{
-                    T{ip_header->ip_dst}, tcp_header->th_dport
+                    T{ ip_header->ip_dst }, tcp_header->th_dport
                 });
                 if (it == redirected_connections_.cend())
                     return false;
@@ -359,11 +365,11 @@ namespace ndisapi
                 if (tcp_header->th_flags & TH_RST || tcp_header->th_flags & TH_FIN)
                 {
                     // pass through but erase the corresponding entry
-                    logger::print_log(log_level::info,
-                              std::string("DELETE TCP: ") + std::to_string(ntohs(it->first.port)) + " -> " +
-                              std::string{it->first.ip} + " : "
-                              +
-                              std::to_string(ntohs(it->second.first)));
+                    print_log(log_level::info,
+                        "DELETE TCP: {} -> {} : {}",
+                        ntohs(it->first.port),
+                        std::string{ it->first.ip },
+                        ntohs(it->second.first));
 
                     redirected_connections_.erase(it);
                 }
@@ -400,7 +406,7 @@ namespace ndisapi
                 std::lock_guard lock(lock_);
 
                 const auto it = redirected_connections_.find(net::ip_endpoint<T>{
-                    T{ip_header->ip6_dst}, tcp_header->th_dport
+                    T{ ip_header->ip6_dst }, tcp_header->th_dport
                 });
                 if (it == redirected_connections_.cend())
                     return false;
@@ -411,16 +417,16 @@ namespace ndisapi
                 {
                     // pass through but erase the corresponding entry
                     print_log(log_level::info,
-                              std::string("DELETE TCP: ") + std::to_string(ntohs(it->first.port)) + " -> " +
-                              std::string{it->first.ip} + " : "
-                              +
-                              std::to_string(ntohs(it->second.first)));
+                        "DELETE TCP: {} -> {} : {}",
+                        ntohs(it->first.port),
+                        std::string{ it->first.ip },
+                        ntohs(it->second.first));
 
                     redirected_connections_.erase(it);
                 }
                 else
                 {
-                    it->second.timestamp = std::chrono::steady_clock::now();
+                    it->second.second = std::chrono::steady_clock::now();
                 }
 
                 // Swap Ethernet addresses

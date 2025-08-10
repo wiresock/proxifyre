@@ -54,35 +54,33 @@ namespace ndisapi
         void start_cleanup_thread()
         {
             cleanup_thread_ = std::thread([this]()
-            {
-                while (!terminate_)
                 {
+                    while (!terminate_)
                     {
-                        auto current_time = std::chrono::steady_clock::now();
-                        std::lock_guard lock(lock_);
+                        {
+                            auto current_time = std::chrono::steady_clock::now();
+                            std::lock_guard lock(lock_);
 
-                        tools::generic::erase_if(endpoints_, endpoints_.begin(), endpoints_.end(),
-                                                 [&current_time, this](auto&& a)
-                                                 {
-                                                     using namespace std::chrono_literals;
-                                                     if (current_time - a.second > 15min)
-                                                     {
-                                                         this->logger::print_log(log_level::info,
-                                                                         std::string(
-                                                                             "DELETE UDP client endpoint (timeout): ")
-                                                                         + " : " +
-                                                                         std::to_string(ntohs(a.first)));
+                            tools::generic::erase_if(endpoints_, endpoints_.begin(), endpoints_.end(),
+                                [&current_time, this](auto&& a)
+                                {
+                                    using namespace std::chrono_literals;
+                                    if (current_time - a.second > 15min)
+                                    {
+                                        print_log(log_level::info,
+                                            "DELETE UDP client endpoint (timeout): : {}",
+                                            ntohs(a.first));
 
-                                                         return true;
-                                                     }
-                                                     return false;
-                                                 });
+                                        return true;
+                                    }
+                                    return false;
+                                });
+                        }
+
+                        using namespace std::chrono_literals;
+                        std::this_thread::sleep_for(5s);
                     }
-
-                    using namespace std::chrono_literals;
-                    std::this_thread::sleep_for(5s);
-                }
-            });
+                });
         }
 
     public:
@@ -188,7 +186,7 @@ namespace ndisapi
 
                 // This is UDP packet, get UDP header pointer
                 const auto* udp_header = reinterpret_cast<const udphdr*>(reinterpret_cast<const unsigned char*>(
-                        ip_header) +
+                    ip_header) +
                     sizeof(DWORD) * ip_header->ip_hl);
 
                 std::lock_guard lock(lock_);
@@ -199,8 +197,9 @@ namespace ndisapi
                     endpoints_[udp_header->th_sport] =
                         std::chrono::steady_clock::now();
 
-                    logger::print_log(log_level::info, std::string("NEW client UDP endpoint: ") +
-                              " : " + std::to_string(ntohs(udp_header->th_sport)));
+                    print_log(log_level::info,
+                        "NEW client UDP endpoint: : {}",
+                        ntohs(udp_header->th_sport));
 
                     return true;
                 }
@@ -223,14 +222,15 @@ namespace ndisapi
 
                 std::lock_guard lock(lock_);
 
-                if (const auto it = endpoints_.find(net::ip_endpoint<T>{T{ip_header->ip6_src}, udp_header->th_sport});
+                if (const auto it = endpoints_.find(net::ip_endpoint<T>{T{ ip_header->ip6_src }, udp_header->th_sport});
                     it == endpoints_.cend())
                 {
                     endpoints_[udp_header->th_sport] =
                         std::chrono::steady_clock::now();
 
-                    logger::print_log(log_level::info, std::string("NEW client UDP endpoint: ") +
-                              " : " + std::to_string(ntohs(udp_header->th_sport)));
+                    print_log(log_level::info,
+                        "NEW client UDP endpoint: : {}",
+                        ntohs(udp_header->th_sport));
 
                     return true;
                 }
@@ -285,10 +285,12 @@ namespace ndisapi
                     return false;
                 }
 
-                logger::print_log(log_level::debug,
-                          std::string("C2S: ") + std::string{T{ip_header->ip_src}} + " : " +
-                          std::to_string(ntohs(udp_header->th_sport)) + " -> " +
-                          std::string{T{ip_header->ip_dst}} + " : " + std::to_string(ntohs(udp_header->th_dport)));
+                print_log(log_level::debug,
+                    "C2S: {}:{} -> {}:{}",
+                    std::string{ T{ip_header->ip_src} },
+                    ntohs(udp_header->th_sport),
+                    std::string{ T{ip_header->ip_dst} },
+                    ntohs(udp_header->th_dport));
 
                 auto* udp_payload = reinterpret_cast<uint8_t*>(udp_header + 1);
                 const auto udp_payload_size = static_cast<uint16_t>(packet.m_Length - sizeof(ether_header) - sizeof(
@@ -296,7 +298,7 @@ namespace ndisapi
                 const auto udp_max_payload_size = static_cast<uint16_t>(MAX_ETHER_FRAME - sizeof(ether_header) - sizeof(
                     DWORD) * ip_header->ip_hl - sizeof(udphdr));
                 memmove(udp_payload + sizeof(proxy::socks5_udp_header<T>), udp_payload,
-                        std::min(udp_payload_size, udp_max_payload_size));
+                    std::min(udp_payload_size, udp_max_payload_size));
 
                 packet.m_Length += sizeof(proxy::socks5_udp_header<T>);
                 ip_header->ip_len = htons(ntohs(ip_header->ip_len) + sizeof(proxy::socks5_udp_header<T>));
@@ -322,12 +324,12 @@ namespace ndisapi
 
                 it->second = std::chrono::steady_clock::now();
 
-                logger::print_log(log_level::debug,
-                          std::string("C2S: ") + std::string{T{ip_header->ip_src}} + " : " +
-                          std::to_string(ntohs(udp_header->th_sport)) + " -> " + std::string{T{ip_header->ip_dst}} +
-                          " : "
-                          +
-                          std::to_string(ntohs(udp_header->th_dport)));
+                print_log(log_level::debug,
+                    "C2S: {}:{} -> {}:{}",
+                    std::string{ T{ip_header->ip_src} },
+                    ntohs(udp_header->th_sport),
+                    std::string{ T{ip_header->ip_dst} },
+                    ntohs(udp_header->th_dport));
 
                 return true;
             }
@@ -347,17 +349,19 @@ namespace ndisapi
 
                 std::lock_guard lock(lock_);
 
-                const auto it = endpoints_.find(net::ip_endpoint<T>{T{ip_header->ip6_src}, udp_header->th_sport});
+                const auto it = endpoints_.find(net::ip_endpoint<T>{T{ ip_header->ip6_src }, udp_header->th_sport});
 
                 if (it == endpoints_.cend())
                 {
                     return false;
                 }
 
-                logger::print_log(log_level::debug,
-                          std::string("C2S: ") + std::string{T{ip_header->ip6_src}} + " : " +
-                          std::to_string(ntohs(udp_header->th_sport)) + " -> " +
-                          std::string{T{ip_header->ip6_dst}} + " : " + std::to_string(ntohs(udp_header->th_dport)));
+                print_log(log_level::debug,
+                    "C2S: {}:{} -> {}:{}",
+                    std::string{ T{ip_header->ip6_src} },
+                    ntohs(udp_header->th_sport),
+                    std::string{ T{ip_header->ip6_dst} },
+                    ntohs(udp_header->th_dport));
 
                 // Attach SOCK5 UDP header here
                 auto* udp_payload = reinterpret_cast<uint8_t*>(udp_header + 1);
@@ -366,7 +370,7 @@ namespace ndisapi
                 constexpr auto udp_max_payload_size = static_cast<uint16_t>(MAX_ETHER_FRAME - sizeof(ether_header) -
                     sizeof(ipv6hdr) - sizeof(udphdr));
                 memmove(udp_payload + sizeof(proxy::socks5_udp_header<T>), udp_payload,
-                        std::min(udp_payload_size, udp_max_payload_size));
+                    std::min(udp_payload_size, udp_max_payload_size));
 
                 packet.m_Length += sizeof(proxy::socks5_udp_header<T>);
                 ip_header->ip6_len = htons(ntohs(ip_header->ip6_len) + sizeof(proxy::socks5_udp_header<T>));
@@ -392,11 +396,12 @@ namespace ndisapi
 
                 it->second = std::chrono::steady_clock::now();
 
-                logger::print_log(log_level::debug,
-                          std::string("C2S: ") + std::string{T{ip_header->ip6_src}} + " : " +
-                          std::to_string(ntohs(udp_header->th_sport)) + " -> " + std::string{T{ip_header->ip6_dst}} +
-                          " : " +
-                          std::to_string(ntohs(udp_header->th_dport)));
+                print_log(log_level::debug,
+                    "C2S: {}:{} -> {}:{}",
+                    std::string{ T{ip_header->ip6_src} },
+                    ntohs(udp_header->th_sport),
+                    std::string{ T{ip_header->ip6_dst} },
+                    ntohs(udp_header->th_dport));
 
                 return true;
             }
@@ -441,12 +446,12 @@ namespace ndisapi
                 if (it == endpoints_.cend())
                     return false;
 
-                logger::print_log(log_level::debug,
-                          std::string("S2C: ") + std::string{T{ip_header->ip_src}} + " : " +
-                          std::to_string(ntohs(udp_header->th_sport)) + " -> " + std::string{T{ip_header->ip_dst}} +
-                          " : "
-                          +
-                          std::to_string(ntohs(udp_header->th_dport)));
+                print_log(log_level::debug,
+                    "S2C: {}:{} -> {}:{}",
+                    std::string{ T{ip_header->ip_src} },
+                    ntohs(udp_header->th_sport),
+                    std::string{ T{ip_header->ip_dst} },
+                    ntohs(udp_header->th_dport));
 
                 // Swap Ethernet addresses
                 std::swap(eth_header->h_dest, eth_header->h_source);
@@ -462,7 +467,7 @@ namespace ndisapi
 
                 const auto udp_payload_size = static_cast<uint16_t>(ntohs(udp_header->length) - sizeof(udphdr));
                 memmove(udp_payload, udp_payload + sizeof(proxy::socks5_udp_header<T>),
-                        udp_payload_size - sizeof(proxy::socks5_udp_header<T>));
+                    udp_payload_size - sizeof(proxy::socks5_udp_header<T>));
 
                 packet.m_Length -= sizeof(proxy::socks5_udp_header<T>);
                 ip_header->ip_len = htons(ntohs(ip_header->ip_len) - sizeof(proxy::socks5_udp_header<T>));
@@ -473,12 +478,12 @@ namespace ndisapi
 
                 it->second = std::chrono::steady_clock::now();
 
-                logger::print_log(log_level::debug,
-                          std::string("S2C: ") + std::string{T{ip_header->ip_src}} + " : " +
-                          std::to_string(ntohs(udp_header->th_sport)) + " -> " + std::string{T{ip_header->ip_dst}} +
-                          " : "
-                          +
-                          std::to_string(ntohs(udp_header->th_dport)));
+                print_log(log_level::debug,
+                    "S2C: {}:{} -> {}:{}",
+                    std::string{ T{ip_header->ip_src} },
+                    ntohs(udp_header->th_sport),
+                    std::string{ T{ip_header->ip_dst} },
+                    ntohs(udp_header->th_dport));
 
                 return true;
             }
@@ -499,7 +504,7 @@ namespace ndisapi
                 std::lock_guard lock(lock_);
 
                 const auto it = endpoints_.find(net::ip_endpoint<T>{
-                    T{ip_header->ip6_dst}, udp_header->th_dport
+                    T{ ip_header->ip6_dst }, udp_header->th_dport
                 });
 
                 if (it == endpoints_.cend())
@@ -520,7 +525,7 @@ namespace ndisapi
 
                 const auto udp_payload_size = static_cast<uint16_t>(ntohs(udp_header->length) - sizeof(udphdr));
                 memmove(udp_payload, udp_payload + sizeof(proxy::socks5_udp_header<T>),
-                        udp_payload_size - sizeof(proxy::socks5_udp_header<T>));
+                    udp_payload_size - sizeof(proxy::socks5_udp_header<T>));
 
                 packet.m_Length -= sizeof(proxy::socks5_udp_header<T>);
                 ip_header->ip6_len = htons(ntohs(ip_header->ip6_len) - sizeof(proxy::socks5_udp_header<T>));

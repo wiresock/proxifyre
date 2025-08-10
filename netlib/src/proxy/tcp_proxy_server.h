@@ -609,17 +609,19 @@ namespace proxy
             auto [remote_ip, remote_port, negotiate_ctx] = get_remote_peer(accepted);
 
             if (!remote_port)
+            {
+                print_log(log_level::warning, "connect_to_remote_host: Invalid remote port (0) - rejecting connection");
                 return false;
+            }
 
-            logger::print_log(log_level::debug, std::string("connect_to_remote_host:  ") + std::string{ remote_ip } + " : " +
-                std::to_string(remote_port));
+            print_log(log_level::debug, "connect_to_remote_host: Connecting to {}:{}", remote_ip, remote_port);
 
             auto remote_socket = WSASocket(address_type_t::af_type, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
                 WSA_FLAG_OVERLAPPED);
 
             if (remote_socket == INVALID_SOCKET)
             {
-                logger::print_log(log_level::error, "Failed to create remote socket: " + std::to_string(WSAGetLastError()));
+                print_log(log_level::error, "connect_to_remote_host: Failed to create remote socket: {}", WSAGetLastError());
                 return false;
             }
 
@@ -635,9 +637,10 @@ namespace proxy
 
                 if (status == SOCKET_ERROR)
                 {
+                    const auto error = WSAGetLastError();
+                    print_log(log_level::error, "connect_to_remote_host: Failed to bind IPv4 remote socket: {}", error);
                     shutdown(remote_socket, SD_BOTH);
                     closesocket(remote_socket);
-
                     return false;
                 }
             }
@@ -653,9 +656,10 @@ namespace proxy
 
                 if (status == SOCKET_ERROR)
                 {
+                    const auto error = WSAGetLastError();
+                    print_log(log_level::error, "connect_to_remote_host: Failed to bind IPv6 remote socket: {}", error);
                     shutdown(remote_socket, SD_BOTH);
                     closesocket(remote_socket);
-
                     return false;
                 }
             }
@@ -663,19 +667,53 @@ namespace proxy
             // enable non-blocking mode
             u_long mode = 1;
             auto ret = ioctlsocket(remote_socket, FIONBIO, &mode);
+            if (ret != 0)
+            {
+                const auto error = WSAGetLastError();
+                print_log(log_level::warning, "connect_to_remote_host: Failed to set non-blocking mode: {}", error);
+                // Continue anyway, as this might not be critical
+            }
 
             // The client_service structure specifies the address family,
             // IP address, and port of the server to be connected to.
             {
                 std::lock_guard lock(lock_);
 
+                if (sock_array_events_.size() >= connections_array_size - 1)
+                {
+                    print_log(log_level::warning, "connect_to_remote_host: Socket array full, cannot add new connection");
+                    shutdown(remote_socket, SD_BOTH);
+                    closesocket(remote_socket);
+                    return false;
+                }
+
                 sock_array_events_.push_back(
                     std::make_tuple(WSACreateEvent(), accepted, remote_socket, std::move(negotiate_ctx)));
 
-                WSAEventSelect(remote_socket, std::get<0>(sock_array_events_.back()), FD_CONNECT);
+                if (std::get<0>(sock_array_events_.back()) == WSA_INVALID_EVENT)
+                {
+                    print_log(log_level::error, "connect_to_remote_host: Failed to create WSA event: {}", WSAGetLastError());
+                    sock_array_events_.pop_back();
+                    shutdown(remote_socket, SD_BOTH);
+                    closesocket(remote_socket);
+                    return false;
+                }
+
+                if (WSAEventSelect(remote_socket, std::get<0>(sock_array_events_.back()), FD_CONNECT) == SOCKET_ERROR)
+                {
+                    const auto error = WSAGetLastError();
+                    print_log(log_level::warning, "connect_to_remote_host: WSAEventSelect failed: {}", error);
+                    WSACloseEvent(std::get<0>(sock_array_events_.back()));
+                    sock_array_events_.pop_back();
+                    shutdown(remote_socket, SD_BOTH);
+                    closesocket(remote_socket);
+                    return false;
+                }
 
                 WSASetEvent(std::get<0>(sock_array_events_[0]));
             }
+
+            print_log(log_level::debug, "connect_to_remote_host: Initiating connection to {}:{}", remote_ip, remote_port);
 
             // connect to server
             if constexpr (address_type_t::af_type == AF_INET)
@@ -688,13 +726,22 @@ namespace proxy
                 if (connect(remote_socket, reinterpret_cast<SOCKADDR*>(&sa_service), sizeof(sa_service)) ==
                     SOCKET_ERROR)
                 {
-                    if (WSAGetLastError() != WSAEWOULDBLOCK)
+                    const auto error = WSAGetLastError();
+                    if (error != WSAEWOULDBLOCK)
                     {
+                        print_log(log_level::warning, "connect_to_remote_host: IPv4 connect failed: {}", error);
                         shutdown(remote_socket, SD_BOTH);
                         closesocket(remote_socket);
-
                         return false;
                     }
+                    else
+                    {
+                        print_log(log_level::debug, "connect_to_remote_host: IPv4 connection in progress (WSAEWOULDBLOCK)");
+                    }
+                }
+                else
+                {
+                    print_log(log_level::debug, "connect_to_remote_host: IPv4 connection completed immediately");
                 }
             }
             else
@@ -707,16 +754,26 @@ namespace proxy
                 if (connect(remote_socket, reinterpret_cast<SOCKADDR*>(&sa_service), sizeof(sa_service)) ==
                     SOCKET_ERROR)
                 {
-                    if (WSAGetLastError() != WSAEWOULDBLOCK)
+                    const auto error = WSAGetLastError();
+                    if (error != WSAEWOULDBLOCK)
                     {
+                        print_log(log_level::warning, "connect_to_remote_host: IPv6 connect failed: {}", error);
                         shutdown(remote_socket, SD_BOTH);
                         closesocket(remote_socket);
-
                         return false;
                     }
+                    else
+                    {
+                        print_log(log_level::debug, "connect_to_remote_host: IPv6 connection in progress (WSAEWOULDBLOCK)");
+                    }
+                }
+                else
+                {
+                    print_log(log_level::debug, "connect_to_remote_host: IPv6 connection completed immediately");
                 }
             }
 
+            print_log(log_level::debug, "connect_to_remote_host: Successfully initiated connection to {}:{}", remote_ip, remote_port);
             return true;
         }
 
@@ -746,7 +803,7 @@ namespace proxy
                 }
 
                 if (sock_array_events_.size() >= connections_array_size) {
-                    logger::print_log(log_level::warning, "Too many pending connections, rejecting new client.");
+                    print_log(log_level::warning, "Too many pending connections, rejecting new client.");
                     closesocket(accepted);
                     continue;
                 }

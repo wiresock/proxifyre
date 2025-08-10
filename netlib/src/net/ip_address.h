@@ -10,6 +10,7 @@
 #include <in6addr.h>
 #include <ip2string.h>
 #include <cassert>
+#include <format>
 
 #pragma comment(lib, "ntdll.lib")
 
@@ -456,6 +457,30 @@ namespace net
 
 namespace std
 {
+    /// <summary>
+    /// Formatter specialization for std::format support of net::ip_address_v4
+    /// </summary>
+    template<>
+    struct formatter<net::ip_address_v4> : formatter<std::string> {
+        template<typename FormatContext>
+        auto format(const net::ip_address_v4& addr, FormatContext& ctx) const {
+            // Use the existing string conversion operator
+            return formatter<std::string>::format(std::string(addr), ctx);
+        }
+    };
+
+    /// <summary>
+    /// Formatter specialization for std::format support of net::ip_address_v6
+    /// </summary>
+    template<>
+    struct formatter<net::ip_address_v6> : formatter<std::string> {
+        template<typename FormatContext>
+        auto format(const net::ip_address_v6& addr, FormatContext& ctx) const {
+            // Use the existing string conversion operator
+            return formatter<std::string>::format(std::string(addr), ctx);
+        }
+    };
+
     /// <summary>
     /// Hash for net::ip_address_v6
     /// </summary>

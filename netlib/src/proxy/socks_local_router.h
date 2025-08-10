@@ -337,8 +337,8 @@ namespace proxy
             {
                 print_log(
                     log_level::error,
-                    "set_notify_ip_interface_change has failed, lasterror: " + std::to_string(
-                        GetLastError()));
+                    "set_notify_ip_interface_change has failed, lasterror: {}",
+                    GetLastError());
             }
 
             {
@@ -354,7 +354,7 @@ namespace proxy
                     {
                         if (!tcp->start())
                         {
-                            print_log(log_level::error, "Failed to start TCP proxy on port: " + std::to_string(tcp->proxy_port()));
+                            print_log(log_level::error, "Failed to start TCP proxy on port: {}", tcp->proxy_port());
                         }
                     }
 
@@ -362,7 +362,7 @@ namespace proxy
                     {
                         if (!udp->start())
                         {
-                            print_log(log_level::error, "Failed to start UDP proxy on port: " + std::to_string(udp->proxy_port()));
+                            print_log(log_level::error, "Failed to start UDP proxy on port: {}", udp->proxy_port());
                         }
                     }
                 }
@@ -381,8 +381,8 @@ namespace proxy
                 {
                     // Log an error if cancelling notification of IP interface changes failed
                     print_log(
-                        log_level::error, "cancel_notify_ip_interface_change has failed, lasterror: " +
-                        std::to_string(GetLastError()));
+                        log_level::error, "cancel_notify_ip_interface_change has failed, lasterror: {}",
+                        GetLastError());
 
                     std::shared_lock lock(lock_);
 
@@ -464,8 +464,8 @@ namespace proxy
             {
                 // Log an error if cancelling notification of IP interface changes failed
                 print_log(
-                    log_level::error, "cancel_notify_ip_interface_change has failed, lasterror: " +
-                    std::to_string(GetLastError()));
+                    log_level::error, "cancel_notify_ip_interface_change has failed, lasterror: {}",
+                    GetLastError());
             }
 
             // Return the current active status (which should now be false)
@@ -504,7 +504,7 @@ namespace proxy
             // If parsing failed, log the error and return nullopt
             if (!proxy_endpoint)
             {
-                print_log(log_level::error, "Failed to parse the proxy endpoint "s + endpoint);
+                print_log(log_level::error, "Failed to parse the proxy endpoint {}", endpoint);
                 return {};
             }
 
@@ -564,12 +564,8 @@ namespace proxy
                                                               end())
                                                           {
                                                               print_log(log_level::info,
-                                                                        "TCP Redirect entry was found for the "s +
-                                                                        std::string{address} + " : " +
-                                                                        std::to_string(port) + " is " + std::string{
-                                                                            net::ip_address_v4{it->second.ip}
-                                                                        } +
-                                                                        " : " + std::to_string(it->second.port));
+                                                                        "TCP Redirect entry was found for the {} : {} is {} : {}",
+                                                                        address, port, net::ip_address_v4{it->second.ip}, it->second.port);
 
                                                               auto remote_address = it->second.ip;
                                                               auto remote_port = it->second.port;
@@ -605,9 +601,8 @@ namespace proxy
                                                               end())
                                                           {
                                                               print_log(log_level::info,
-                                                                        "UDP Redirect entry was found for the "s +
-                                                                        std::string{address} + " : " + std::to_string(
-                                                                            port));
+                                                                        "UDP Redirect entry was found for the {} : {}",
+                                                                        address, port);
 
                                                               udp_mapper_.erase(it);
 
@@ -634,26 +629,24 @@ namespace proxy
                     {
                         if (!socks_tcp_proxy_server->start())
                         {
-                            print_log(log_level::error, "Failed to start TCP SOCKS5 proxy "s + endpoint);
+                            print_log(log_level::error, "Failed to start TCP SOCKS5 proxy {}", endpoint);
                             return {};
                         }
 
                         print_log(log_level::info,
-                                  "Local TCP proxy for "s + endpoint + " is listening port: " + std::to_string(
-                                      socks_tcp_proxy_server->proxy_port()));
+                                  "Local TCP proxy for {} is listening port: {}", endpoint, socks_tcp_proxy_server->proxy_port());
                     }
 
                     if (socks_udp_proxy_server)
                     {
                         if (!socks_udp_proxy_server->start())
                         {
-                            print_log(log_level::error, "Failed to start UDP SOCKS5 proxy "s + endpoint);
+                            print_log(log_level::error, "Failed to start UDP SOCKS5 proxy {}", endpoint);
                             return {};
                         }
 
                         print_log(log_level::info,
-                                  "Local UDP proxy for "s + endpoint + " is listening port: " + std::to_string(
-                                      socks_udp_proxy_server->proxy_port()));
+                                  "Local UDP proxy for {} is listening port: {}", endpoint, socks_udp_proxy_server->proxy_port());
                     }
                 }
 
@@ -667,8 +660,8 @@ namespace proxy
             }
             catch (const std::exception& e)
             {
-                print_log(log_level::error, "An exception was thrown while adding SOCKS5 proxy "s +
-                          endpoint + " : " + e.what());
+                print_log(log_level::error, "An exception was thrown while adding SOCKS5 proxy {} : {}",
+                          endpoint, e.what());
             }
 
             return {}; // Return nullopt in case of error or exception
@@ -967,11 +960,9 @@ namespace proxy
                     udp_mapper_.insert(ntohs(udp_header->th_sport));
 
                     print_log(log_level::info,
-                        std::string("Redirecting UDP ") + std::string(
-                            net::ip_address_v4(ip_header->ip_src)) +
-                        " : " + std::to_string(ntohs(udp_header->th_sport)) + " -> " +
-                        std::string(net::ip_address_v4(ip_header->ip_dst)) + " : " + std::to_string(
-                            ntohs(udp_header->th_dport)));
+                        "Redirecting UDP {} : {} -> {} : {}",
+                        net::ip_address_v4(ip_header->ip_src), ntohs(udp_header->th_sport),
+                        net::ip_address_v4(ip_header->ip_dst), ntohs(udp_header->th_dport));
                 }
 
                 if (udp_redirect_->process_client_to_server_packet(buffer, htons(port.value())))
@@ -1058,11 +1049,9 @@ namespace proxy
                             ntohs(tcp_header->th_dport));
 
                     print_log(log_level::info,
-                        std::string("Redirecting TCP: ") + std::string(
-                            net::ip_address_v4(ip_header->ip_src)) +
-                        " : " + std::to_string(ntohs(tcp_header->th_sport)) + " -> " + std::string(
-                            net::ip_address_v4(ip_header->ip_dst)) +
-                        " : " + std::to_string(ntohs(tcp_header->th_dport)));
+                        "Redirecting TCP: {} : {} -> {} : {}",
+                        net::ip_address_v4(ip_header->ip_src), ntohs(tcp_header->th_sport),
+                        net::ip_address_v4(ip_header->ip_dst), ntohs(tcp_header->th_dport));
                 }
 
                 // Attempt to process the packet for client-to-server redirection
@@ -1312,12 +1301,12 @@ namespace proxy
                 if (const auto& internal_name = adapter.get_internal_name(); adapters_to_filter.contains(internal_name))
                 {
                     packet_filter_->filter_network_adapter(internal_name);
-                    print_log(log_level::debug, "Filtering network interface: " + adapter.get_friendly_name());
+                    print_log(log_level::debug, "Filtering network interface: {}", adapter.get_friendly_name());
                 }
                 else
                 {
                     packet_filter_->unfilter_network_adapter(internal_name);
-                    print_log(log_level::debug, "Unfiltering network interface: " + adapter.get_friendly_name());
+                    print_log(log_level::debug, "Unfiltering network interface: {}", adapter.get_friendly_name());
                 }
             }
 

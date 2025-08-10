@@ -297,33 +297,71 @@ namespace proxy
         {
             std::lock_guard lock(lock_);
 
+            print_log(log_level::debug, "~tcp_proxy_socket: Starting destructor cleanup");
+
             if (local_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
             {
+                print_log(log_level::debug, "~tcp_proxy_socket: Cleaning up local socket {}", static_cast<int>(local_socket_));
+
                 if (shutdown(local_socket_, SD_BOTH) == SOCKET_ERROR) {
-                    logger::print_log(log_level::warning, "shutdown(local_socket_) failed: " + std::to_string(WSAGetLastError()));
+                    const auto error = WSAGetLastError();
+                    print_log(log_level::warning, "~tcp_proxy_socket: shutdown(local_socket_) failed: {}", error);
+                }
+                else {
+                    print_log(log_level::debug, "~tcp_proxy_socket: Local socket shutdown successful");
                 }
 
                 // Cancel all pending I/O before closing
-                CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr);
+                if (CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr) == FALSE) {
+                    const auto error = GetLastError();
+                    if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
+                        print_log(log_level::debug, "~tcp_proxy_socket: CancelIoEx(local_socket_) returned error: {}", error);
+                    }
+                }
 
-                closesocket(local_socket_);
+                if (closesocket(local_socket_) == SOCKET_ERROR) {
+                    const auto error = WSAGetLastError();
+                    print_log(log_level::warning, "~tcp_proxy_socket: closesocket(local_socket_) failed: {}", error);
+                }
+                else {
+                    print_log(log_level::debug, "~tcp_proxy_socket: Local socket closed successfully");
+                }
 
                 local_socket_ = INVALID_SOCKET;
             }
 
             if (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
             {
+                print_log(log_level::debug, "~tcp_proxy_socket: Cleaning up remote socket {}", static_cast<int>(remote_socket_));
+
                 if (shutdown(remote_socket_, SD_BOTH) == SOCKET_ERROR) {
-                    logger::print_log(log_level::warning, "shutdown(remote_socket_) failed: " + std::to_string(WSAGetLastError()));
+                    const auto error = WSAGetLastError();
+                    print_log(log_level::warning, "~tcp_proxy_socket: shutdown(remote_socket_) failed: {}", error);
+                }
+                else {
+                    print_log(log_level::debug, "~tcp_proxy_socket: Remote socket shutdown successful");
                 }
 
                 // Cancel all pending I/O before closing
-                CancelIoEx(reinterpret_cast<HANDLE>(remote_socket_), nullptr);
+                if (CancelIoEx(reinterpret_cast<HANDLE>(remote_socket_), nullptr) == FALSE) {
+                    const auto error = GetLastError();
+                    if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
+                        print_log(log_level::debug, "~tcp_proxy_socket: CancelIoEx(remote_socket_) returned error: {}", error);
+                    }
+                }
 
-                closesocket(remote_socket_);
+                if (closesocket(remote_socket_) == SOCKET_ERROR) {
+                    const auto error = WSAGetLastError();
+                    print_log(log_level::warning, "~tcp_proxy_socket: closesocket(remote_socket_) failed: {}", error);
+                }
+                else {
+                    print_log(log_level::debug, "~tcp_proxy_socket: Remote socket closed successfully");
+                }
 
                 remote_socket_ = INVALID_SOCKET;
             }
+
+            print_log(log_level::debug, "~tcp_proxy_socket: Destructor cleanup completed");
         }
 
         /**
@@ -439,12 +477,57 @@ namespace proxy
          */
         bool associate_to_completion_port(const ULONG_PTR completion_key, winsys::io_completion_port& completion_port)
         {
-            connection_status_ = connection_status::client_established;
+            print_log(log_level::debug, "associate_to_completion_port: Starting association with completion key {}", completion_key);
 
-            if ((local_socket_ != static_cast<SOCKET>(INVALID_SOCKET)) && (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET)))
-                return completion_port.associate_socket(local_socket_, completion_key) &&
-                completion_port.associate_socket(remote_socket_, completion_key);
-            return false;
+            connection_status_ = connection_status::client_established;
+            print_log(log_level::debug, "associate_to_completion_port: Connection status set to client_established");
+
+            if (local_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                print_log(log_level::error, "associate_to_completion_port: Local socket is invalid (INVALID_SOCKET)");
+                return false;
+            }
+
+            if (remote_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                print_log(log_level::error, "associate_to_completion_port: Remote socket is invalid (INVALID_SOCKET)");
+                return false;
+            }
+
+            print_log(log_level::debug, "associate_to_completion_port: Associating local socket {} with completion port",
+                static_cast<int>(local_socket_));
+
+            const bool local_result = completion_port.associate_socket(local_socket_, completion_key);
+            if (!local_result)
+            {
+                print_log(log_level::error, "associate_to_completion_port: Failed to associate local socket {} with completion port",
+                    static_cast<int>(local_socket_));
+                return false;
+            }
+
+            print_log(log_level::debug, "associate_to_completion_port: Local socket {} associated successfully",
+                static_cast<int>(local_socket_));
+
+            print_log(log_level::debug, "associate_to_completion_port: Associating remote socket {} with completion port",
+                static_cast<int>(remote_socket_));
+
+            const bool remote_result = completion_port.associate_socket(remote_socket_, completion_key);
+            if (!remote_result)
+            {
+                print_log(log_level::error, "associate_to_completion_port: Failed to associate remote socket {} with completion port",
+                    static_cast<int>(remote_socket_));
+                return false;
+            }
+
+            print_log(log_level::debug, "associate_to_completion_port: Remote socket {} associated successfully",
+                static_cast<int>(remote_socket_));
+
+            print_log(log_level::debug, "associate_to_completion_port: Successfully associated both sockets (local: {}, remote: {}) with completion key {}",
+                static_cast<int>(local_socket_),
+                static_cast<int>(remote_socket_),
+                completion_key);
+
+            return true;
         }
 
         /**
@@ -472,80 +555,198 @@ namespace proxy
                 lock.lock();
             }
 
+            print_log(log_level::debug, "close_client: Starting cleanup (is_receive: {}, is_local: {})",
+                is_receive, is_local);
+
             if (is_local)
             {
+                print_log(log_level::debug, "close_client: Processing local socket closure");
+
                 if (local_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                 {
+                    print_log(log_level::debug, "close_client: Closing local socket {}",
+                        static_cast<int>(local_socket_));
+
                     if (shutdown(local_socket_, SD_BOTH) == SOCKET_ERROR) {
-                        logger::print_log(log_level::warning, "shutdown(local_socket_) failed: " + std::to_string(WSAGetLastError()));
+                        const auto error = WSAGetLastError();
+                        print_log(log_level::warning, "close_client: shutdown(local_socket_) failed: {}", error);
+                    }
+                    else {
+                        print_log(log_level::debug, "close_client: Local socket shutdown successful");
                     }
 
                     // Cancel all pending I/O before closing
-                    CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr);
+                    if (CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr) == FALSE) {
+                        const auto error = GetLastError();
+                        if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
+                            print_log(log_level::debug, "close_client: CancelIoEx(local_socket_) returned error: {}", error);
+                        }
+                    }
+                    else {
+                        print_log(log_level::debug, "close_client: Local socket I/O cancellation successful");
+                    }
 
-                    closesocket(local_socket_);
+                    if (closesocket(local_socket_) == SOCKET_ERROR) {
+                        const auto error = WSAGetLastError();
+                        print_log(log_level::warning, "close_client: closesocket(local_socket_) failed: {}", error);
+                    }
+                    else {
+                        print_log(log_level::debug, "close_client: Local socket closed successfully");
+                    }
+
                     local_socket_ = INVALID_SOCKET;
                     connection_status_ = connection_status::client_completed;
+                    print_log(log_level::debug, "close_client: Connection status set to client_completed");
+                }
+                else {
+                    print_log(log_level::debug, "close_client: Local socket already invalid, skipping closure");
                 }
 
                 if (is_receive)
                 {
                     local_recv_buf_.len = 0;
+                    print_log(log_level::debug, "close_client: Reset local receive buffer length");
                 }
                 else
                 {
                     local_send_buf_.len = 0;
+                    print_log(log_level::debug, "close_client: Reset local send buffer length");
                 }
 
                 if (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                 {
+                    print_log(log_level::debug, "close_client: Also closing remote socket {} due to local closure",
+                        static_cast<int>(remote_socket_));
+
                     if (shutdown(remote_socket_, SD_BOTH) == SOCKET_ERROR) {
-                        logger::print_log(log_level::warning, "shutdown(remote_socket_) failed: " + std::to_string(WSAGetLastError()));
+                        const auto error = WSAGetLastError();
+                        print_log(log_level::warning, "close_client: shutdown(remote_socket_) failed: {}", error);
+                    }
+                    else {
+                        print_log(log_level::debug, "close_client: Remote socket shutdown successful");
                     }
 
                     // Cancel all pending I/O before closing
-                    CancelIoEx(reinterpret_cast<HANDLE>(remote_socket_), nullptr);
-                    closesocket(remote_socket_);
+                    if (CancelIoEx(reinterpret_cast<HANDLE>(remote_socket_), nullptr) == FALSE) {
+                        const auto error = GetLastError();
+                        if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
+                            print_log(log_level::debug, "close_client: CancelIoEx(remote_socket_) returned error: {}", error);
+                        }
+                    }
+                    else {
+                        print_log(log_level::debug, "close_client: Remote socket I/O cancellation successful");
+                    }
+
+                    if (closesocket(remote_socket_) == SOCKET_ERROR) {
+                        const auto error = WSAGetLastError();
+                        print_log(log_level::warning, "close_client: closesocket(remote_socket_) failed: {}", error);
+                    }
+                    else {
+                        print_log(log_level::debug, "close_client: Remote socket closed successfully");
+                    }
+
                     remote_socket_ = INVALID_SOCKET;
+                }
+                else {
+                    print_log(log_level::debug, "close_client: Remote socket already invalid, skipping closure");
                 }
             }
             else
             {
+                print_log(log_level::debug, "close_client: Processing remote socket closure");
+
                 if (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                 {
+                    print_log(log_level::debug, "close_client: Closing remote socket {}",
+                        static_cast<int>(remote_socket_));
+
                     if (shutdown(remote_socket_, SD_BOTH) == SOCKET_ERROR) {
-                        logger::print_log(log_level::warning, "shutdown(remote_socket_) failed: " + std::to_string(WSAGetLastError()));
+                        const auto error = WSAGetLastError();
+                        print_log(log_level::warning, "close_client: shutdown(remote_socket_) failed: {}", error);
+                    }
+                    else {
+                        print_log(log_level::debug, "close_client: Remote socket shutdown successful");
                     }
 
                     // Cancel all pending I/O before closing
-                    CancelIoEx(reinterpret_cast<HANDLE>(remote_socket_), nullptr);
-                    closesocket(remote_socket_);
+                    if (CancelIoEx(reinterpret_cast<HANDLE>(remote_socket_), nullptr) == FALSE) {
+                        const auto error = GetLastError();
+                        if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
+                            print_log(log_level::debug, "close_client: CancelIoEx(remote_socket_) returned error: {}", error);
+                        }
+                    }
+                    else {
+                        print_log(log_level::debug, "close_client: Remote socket I/O cancellation successful");
+                    }
+
+                    if (closesocket(remote_socket_) == SOCKET_ERROR) {
+                        const auto error = WSAGetLastError();
+                        print_log(log_level::warning, "close_client: closesocket(remote_socket_) failed: {}", error);
+                    }
+                    else {
+                        print_log(log_level::debug, "close_client: Remote socket closed successfully");
+                    }
+
                     remote_socket_ = INVALID_SOCKET;
                     connection_status_ = connection_status::client_completed;
+                    print_log(log_level::debug, "close_client: Connection status set to client_completed");
+                }
+                else {
+                    print_log(log_level::debug, "close_client: Remote socket already invalid, skipping closure");
                 }
 
                 if (is_receive)
                 {
                     remote_recv_buf_.len = 0;
+                    print_log(log_level::debug, "close_client: Reset remote receive buffer length");
                 }
                 else
                 {
                     remote_send_buf_.len = 0;
+                    print_log(log_level::debug, "close_client: Reset remote send buffer length");
                 }
 
                 if (local_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                 {
+                    print_log(log_level::debug, "close_client: Also closing local socket {} due to remote closure",
+                        static_cast<int>(local_socket_));
+
                     if (shutdown(local_socket_, SD_BOTH) == SOCKET_ERROR) {
-                        logger::print_log(log_level::warning, "shutdown(local_socket_) failed: " + std::to_string(WSAGetLastError()));
+                        const auto error = WSAGetLastError();
+                        print_log(log_level::warning, "close_client: shutdown(local_socket_) failed: {}", error);
+                    }
+                    else {
+                        print_log(log_level::debug, "close_client: Local socket shutdown successful");
                     }
 
                     // Cancel all pending I/O before closing
-                    CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr);
+                    if (CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr) == FALSE) {
+                        const auto error = GetLastError();
+                        if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
+                            print_log(log_level::debug, "close_client: CancelIoEx(local_socket_) returned error: {}", error);
+                        }
+                    }
+                    else {
+                        print_log(log_level::debug, "close_client: Local socket I/O cancellation successful");
+                    }
 
-                    closesocket(local_socket_);
+                    if (closesocket(local_socket_) == SOCKET_ERROR) {
+                        const auto error = WSAGetLastError();
+                        print_log(log_level::warning, "close_client: closesocket(local_socket_) failed: {}", error);
+                    }
+                    else {
+                        print_log(log_level::debug, "close_client: Local socket closed successfully");
+                    }
+
                     local_socket_ = INVALID_SOCKET;
                 }
+                else {
+                    print_log(log_level::debug, "close_client: Local socket already invalid, skipping closure");
+                }
             }
+
+            print_log(log_level::debug, "close_client: Cleanup completed (is_receive: {}, is_local: {})",
+                is_receive, is_local);
         }
 
         /**
@@ -571,34 +772,91 @@ namespace proxy
 
             std::lock_guard lock(lock_);
 
-            if ((remote_socket_ == static_cast<SOCKET>(INVALID_SOCKET)) &&
-                (local_socket_ == static_cast<SOCKET>(INVALID_SOCKET)))
+            print_log(log_level::debug, "is_ready_for_removal: Checking session readiness for removal");
+
+            // Check if both sockets are closed
+            const bool sockets_closed = (remote_socket_ == static_cast<SOCKET>(INVALID_SOCKET)) &&
+                (local_socket_ == static_cast<SOCKET>(INVALID_SOCKET));
+
+            if (sockets_closed)
             {
+                print_log(log_level::debug, "is_ready_for_removal: Both sockets are closed, checking buffer states");
+                print_log(log_level::debug, "is_ready_for_removal: Buffer lengths - remote_send: {}, local_send: {}, remote_recv: {}, local_recv: {}",
+                    remote_send_buf_.len, local_send_buf_.len, remote_recv_buf_.len, local_recv_buf_.len);
+
                 if ((remote_send_buf_.len == 0 &&
                     local_send_buf_.len == 0 &&
                     remote_recv_buf_.len == 0 &&
                     local_recv_buf_.len == 0))
                 {
+                    print_log(log_level::info, "is_ready_for_removal: Session is ready for removal - all sockets closed and buffers empty");
                     return true;
-                }
-            }
-
-            if (std::chrono::steady_clock::now() - timestamp_ > 120s)
-            {
-                if ((remote_socket_ == static_cast<SOCKET>(INVALID_SOCKET)) &&
-                    (local_socket_ == static_cast<SOCKET>(INVALID_SOCKET)))
-                {
-                    close_client<true>(true, true);
-                    close_client<true>(true, false);
                 }
                 else
                 {
-                    close_client<true>(false, true);
-                    close_client<true>(false, false);
-                    timestamp_ += 10s;
+                    print_log(log_level::debug, "is_ready_for_removal: Sockets closed but buffers not empty, session not ready for removal");
                 }
             }
+            else
+            {
+                print_log(log_level::debug, "is_ready_for_removal: Sockets still open - local: {}, remote: {}",
+                    local_socket_ == static_cast<SOCKET>(INVALID_SOCKET) ? "closed" : "open",
+                    remote_socket_ == static_cast<SOCKET>(INVALID_SOCKET) ? "closed" : "open");
+            }
 
+            // Check for idle timeout (120 seconds)
+            const auto current_time = std::chrono::steady_clock::now();
+            const auto idle_duration = current_time - timestamp_;
+            const auto idle_seconds = std::chrono::duration_cast<std::chrono::seconds>(idle_duration).count();
+
+            print_log(log_level::debug, "is_ready_for_removal: Session idle time: {} seconds (timeout: 120 seconds)",
+                idle_seconds);
+
+            if (idle_duration > 120s)
+            {
+                print_log(log_level::info, "is_ready_for_removal: Session has been idle for {} seconds, triggering cleanup", idle_seconds);
+
+                if (sockets_closed)
+                {
+                    print_log(log_level::debug, "is_ready_for_removal: Sockets already closed, performing buffer cleanup");
+
+                    close_client<true>(true, true);
+                    close_client<true>(true, false);
+
+                    print_log(log_level::debug, "is_ready_for_removal: Buffer cleanup completed for idle session");
+                }
+                else
+                {
+                    print_log(log_level::debug, "is_ready_for_removal: Sockets still open, performing forced closure due to idle timeout");
+
+                    if (local_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
+                    {
+                        print_log(log_level::debug, "is_ready_for_removal: Closing idle local socket {}",
+                            static_cast<int>(local_socket_));
+                    }
+
+                    if (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
+                    {
+                        print_log(log_level::debug, "is_ready_for_removal: Closing idle remote socket {}",
+                            static_cast<int>(remote_socket_));
+                    }
+
+                    close_client<true>(false, true);
+                    close_client<true>(false, false);
+
+                    // Extend timestamp by 10 seconds to avoid immediate re-cleanup attempts
+                    timestamp_ += 10s;
+
+                    print_log(log_level::debug, "is_ready_for_removal: Forced closure completed, timestamp extended by 10 seconds");
+                }
+            }
+            else
+            {
+                print_log(log_level::debug, "is_ready_for_removal: Session within idle timeout, {} seconds remaining",
+                    120 - idle_seconds);
+            }
+
+            print_log(log_level::debug, "is_ready_for_removal: Session not ready for removal");
             return false;
         }
 
@@ -623,18 +881,81 @@ namespace proxy
          */
         virtual bool start()
         {
+            print_log(log_level::debug, "start: Starting proxy session initialization");
+            print_log(log_level::debug, "start: Local socket: {}, Remote socket: {}",
+                static_cast<int>(local_socket_), static_cast<int>(remote_socket_));
+
             if (is_disable_nagle_)
             {
+                print_log(log_level::debug, "start: Nagle's algorithm disabled, setting TCP_NODELAY on remote socket");
+
                 auto i = 1;
-                setsockopt(remote_socket_, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&i), sizeof(i));
+                const int result = setsockopt(remote_socket_, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&i), sizeof(i));
+
+                if (result == SOCKET_ERROR)
+                {
+                    const auto error = WSAGetLastError();
+                    print_log(log_level::warning, "start: Failed to set TCP_NODELAY on remote socket: {}", error);
+                }
+                else
+                {
+                    print_log(log_level::debug, "start: TCP_NODELAY successfully set on remote socket");
+                }
+            }
+            else
+            {
+                print_log(log_level::debug, "start: Nagle's algorithm enabled, TCP_NODELAY not set");
             }
 
-            if (local_negotiate() && (remote_negotiate()))
+            print_log(log_level::debug, "start: Beginning negotiation phase");
+
+            print_log(log_level::debug, "start: Initiating local negotiation");
+            const bool local_negotiate_result = local_negotiate();
+
+            if (local_negotiate_result)
             {
+                print_log(log_level::debug, "start: Local negotiation completed successfully");
+            }
+            else
+            {
+                print_log(log_level::debug, "start: Local negotiation is pending or failed");
+            }
+
+            print_log(log_level::debug, "start: Initiating remote negotiation");
+            const bool remote_negotiate_result = remote_negotiate();
+
+            if (remote_negotiate_result)
+            {
+                print_log(log_level::debug, "start: Remote negotiation completed successfully");
+            }
+            else
+            {
+                print_log(log_level::debug, "start: Remote negotiation is pending or failed");
+            }
+
+            if (local_negotiate_result && remote_negotiate_result)
+            {
+                print_log(log_level::debug, "start: Both negotiations completed successfully, starting data relay immediately");
+
                 // if negotiate phase can be complete immediately (or not needed at all)
                 // start data relay here
-                return start_data_relay();
+                const bool data_relay_result = start_data_relay();
+
+                if (data_relay_result)
+                {
+                    print_log(log_level::info, "start: Proxy session started successfully with immediate data relay");
+                }
+                else
+                {
+                    print_log(log_level::warning, "start: Failed to start data relay after successful negotiations");
+                }
+
+                return data_relay_result;
             }
+
+            print_log(log_level::debug, "start: Negotiation is pending or incomplete, data relay will be started later");
+            print_log(log_level::debug, "start: Data relay will be initiated from process_receive_negotiate_complete or process_send_negotiate_complete");
+
             // otherwise start_data_relay should be called from 
             // process_receive_negotiate_complete/process_send_negotiate_complete
             return false;
@@ -704,42 +1025,47 @@ namespace proxy
 
             timestamp_ = std::chrono::steady_clock::now();
 
+            print_log(log_level::debug, "process_receive_buffer_complete: Processing {} bytes from {} socket",
+                io_size, io_context->is_local ? "local" : "remote");
+
             switch (connection_status_)
             {
             case connection_status::client_completed:
             {
+                print_log(log_level::debug, "process_receive_buffer_complete: Connection already completed, resetting buffer");
+
                 if (io_context->is_local)
                 {
                     local_recv_buf_.len = 0;
+                    print_log(log_level::debug, "process_receive_buffer_complete: Reset local receive buffer length");
                 }
                 else
                 {
                     remote_recv_buf_.len = 0;
+                    print_log(log_level::debug, "process_receive_buffer_complete: Reset remote receive buffer length");
                 }
 
                 break;
             }
             case connection_status::client_established:
             {
+                print_log(log_level::debug, "process_receive_buffer_complete: Connection established, processing data relay");
+
                 if (io_context->is_local)
                 {
-                    logger::print_log(log_level::debug,
-                        std::string(
-                            "process_receive_buffer_complete: data received from locally connected socket: ")
-                        + std::to_string(io_size));
+                    print_log(log_level::debug, "process_receive_buffer_complete: Data received from local socket: {} bytes", io_size);
 
                     // data received from locally connected socket
                     if (remote_send_buf_.len == 0)
                     {
+                        print_log(log_level::debug, "process_receive_buffer_complete: No remote send in progress, forwarding to remote");
+
                         // if there is no "send to remotely connected socket" in progress
                         // then forward the received data to remote host
                         remote_send_buf_.buf = local_recv_buf_.buf;
                         remote_send_buf_.len = io_size;
 
-                        logger::print_log(log_level::debug,
-                            std::string(
-                                "process_receive_buffer_complete: sending data to remotely connected socket: ")
-                            + std::to_string(io_size));
+                        print_log(log_level::debug, "process_receive_buffer_complete: Sending {} bytes to remote socket", io_size);
 
                         if ((::WSASend(
                             remote_socket_,
@@ -750,39 +1076,54 @@ namespace proxy
                             &io_context_send_to_remote_,
                             nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                         {
+                            const auto error = WSAGetLastError();
+                            print_log(log_level::warning, "process_receive_buffer_complete: WSASend to remote failed: {}", error);
                             // Close connection to remote peer in case of error
                             close_client<true>(false, false);
                         }
+                        else
+                        {
+                            print_log(log_level::debug, "process_receive_buffer_complete: WSASend to remote initiated successfully");
+                        }
+                    }
+                    else
+                    {
+                        print_log(log_level::debug, "process_receive_buffer_complete: Remote send already in progress (len={}), buffering data", remote_send_buf_.len);
                     }
 
                     // shift the receive buffer for the amount of received data
                     // buffer is cyclic, adjust the available buffer size
                     // if end of the buffer is reached then go from the start
                     local_recv_buf_.buf += io_size;
+                    print_log(log_level::debug, "process_receive_buffer_complete: Advanced local receive buffer by {} bytes", io_size);
 
                     if (local_recv_buf_.buf > remote_send_buf_.buf)
                     {
-                        if (local_recv_buf_.buf < from_local_to_remote_buffer_.data() + from_local_to_remote_buffer_
-                            .size())
+                        if (local_recv_buf_.buf < from_local_to_remote_buffer_.data() + from_local_to_remote_buffer_.size())
                         {
                             local_recv_buf_.len = static_cast<ULONG>(from_local_to_remote_buffer_.data() +
                                 from_local_to_remote_buffer_.size() - local_recv_buf_.buf);
+                            print_log(log_level::debug, "process_receive_buffer_complete: Set local recv buffer len to {} (within buffer)", local_recv_buf_.len);
                         }
                         else
                         {
                             local_recv_buf_.buf = from_local_to_remote_buffer_.data();
                             local_recv_buf_.len = static_cast<ULONG>(remote_send_buf_.buf -
                                 from_local_to_remote_buffer_.data());
+                            print_log(log_level::debug, "process_receive_buffer_complete: Wrapped local recv buffer, len set to {}", local_recv_buf_.len);
                         }
                     }
                     else
                     {
                         local_recv_buf_.len = static_cast<ULONG>(remote_send_buf_.buf - local_recv_buf_.buf);
+                        print_log(log_level::debug, "process_receive_buffer_complete: Set local recv buffer len to {} (normal case)", local_recv_buf_.len);
                     }
 
                     // Initiate the new receive if we have space in the receive buffer
                     if (local_recv_buf_.len)
                     {
+                        print_log(log_level::debug, "process_receive_buffer_complete: Initiating new local receive with buffer size {}", local_recv_buf_.len);
+
                         DWORD flags = 0;
 
                         if ((::WSARecv(
@@ -794,30 +1135,36 @@ namespace proxy
                             &io_context_recv_from_local_,
                             nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                         {
+                            const auto error = WSAGetLastError();
+                            print_log(log_level::warning, "process_receive_buffer_complete: WSARecv from local failed: {}", error);
                             // Close connection to local peer in case of error
                             close_client<true>(true, true);
                         }
+                        else
+                        {
+                            print_log(log_level::debug, "process_receive_buffer_complete: New local WSARecv initiated successfully");
+                        }
+                    }
+                    else
+                    {
+                        print_log(log_level::debug, "process_receive_buffer_complete: No space in local receive buffer, skipping new receive");
                     }
                 }
                 else
                 {
-                    logger::print_log(log_level::debug,
-                        std::string(
-                            "process_receive_buffer_complete: data received from remotely connected socket: ")
-                        + std::to_string(io_size));
+                    print_log(log_level::debug, "process_receive_buffer_complete: Data received from remote socket: {} bytes", io_size);
 
                     // data received from remotely connected socket
                     if (local_send_buf_.len == 0)
                     {
+                        print_log(log_level::debug, "process_receive_buffer_complete: No local send in progress, forwarding to local");
+
                         // if there is no "send to locally connected socket" in progress
                         // then forward the received data to local host
                         local_send_buf_.buf = remote_recv_buf_.buf;
                         local_send_buf_.len = io_size;
 
-                        logger::print_log(log_level::debug,
-                            std::string(
-                                "process_receive_buffer_complete: sending data to locally connected socket: ")
-                            + std::to_string(io_size));
+                        print_log(log_level::debug, "process_receive_buffer_complete: Sending {} bytes to local socket", io_size);
 
                         if ((::WSASend(
                             local_socket_,
@@ -828,15 +1175,26 @@ namespace proxy
                             &io_context_send_to_local_,
                             nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                         {
+                            const auto error = WSAGetLastError();
+                            print_log(log_level::warning, "process_receive_buffer_complete: WSASend to local failed: {}", error);
                             // Close connection to local peer in case of error
                             close_client<true>(false, true);
                         }
+                        else
+                        {
+                            print_log(log_level::debug, "process_receive_buffer_complete: WSASend to local initiated successfully");
+                        }
+                    }
+                    else
+                    {
+                        print_log(log_level::debug, "process_receive_buffer_complete: Local send already in progress (len={}), buffering data", local_send_buf_.len);
                     }
 
                     // shift the receive buffer for the amount of received data
                     // buffer is cyclic, adjust the available buffer size
                     // if end of the buffer is reached then go from the start
                     remote_recv_buf_.buf += io_size;
+                    print_log(log_level::debug, "process_receive_buffer_complete: Advanced remote receive buffer by {} bytes", io_size);
 
                     if (remote_recv_buf_.buf > local_send_buf_.buf)
                     {
@@ -844,24 +1202,28 @@ namespace proxy
                             from_remote_to_local_buffer_.size())
                         {
                             remote_recv_buf_.len = static_cast<DWORD>(from_remote_to_local_buffer_.data() +
-                                from_remote_to_local_buffer_.size() - remote_recv_buf_.buf
-                                );
+                                from_remote_to_local_buffer_.size() - remote_recv_buf_.buf);
+                            print_log(log_level::debug, "process_receive_buffer_complete: Set remote recv buffer len to {} (within buffer)", remote_recv_buf_.len);
                         }
                         else
                         {
                             remote_recv_buf_.buf = from_remote_to_local_buffer_.data();
                             remote_recv_buf_.len = static_cast<DWORD>(local_send_buf_.buf -
                                 from_remote_to_local_buffer_.data());
+                            print_log(log_level::debug, "process_receive_buffer_complete: Wrapped remote recv buffer, len set to {}", remote_recv_buf_.len);
                         }
                     }
                     else
                     {
                         remote_recv_buf_.len = static_cast<DWORD>(local_send_buf_.buf - remote_recv_buf_.buf);
+                        print_log(log_level::debug, "process_receive_buffer_complete: Set remote recv buffer len to {} (normal case)", remote_recv_buf_.len);
                     }
 
                     // initiate the new receive if we have space in receive buffer
                     if (remote_recv_buf_.len)
                     {
+                        print_log(log_level::debug, "process_receive_buffer_complete: Initiating new remote receive with buffer size {}", remote_recv_buf_.len);
+
                         DWORD flags = 0;
 
                         if ((::WSARecv(
@@ -873,9 +1235,19 @@ namespace proxy
                             &io_context_recv_from_remote_,
                             nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                         {
+                            const auto error = WSAGetLastError();
+                            print_log(log_level::warning, "process_receive_buffer_complete: WSARecv from remote failed: {}", error);
                             // Close connection to remote peer in case of error
                             close_client<true>(true, false);
                         }
+                        else
+                        {
+                            print_log(log_level::debug, "process_receive_buffer_complete: New remote WSARecv initiated successfully");
+                        }
+                    }
+                    else
+                    {
+                        print_log(log_level::debug, "process_receive_buffer_complete: No space in remote receive buffer, skipping new receive");
                     }
                 }
 
@@ -883,8 +1255,12 @@ namespace proxy
             }
             case connection_status::client_no_change:
             case connection_status::client_connected:
+                print_log(log_level::debug, "process_receive_buffer_complete: Connection not established yet, ignoring received data");
                 break;
             }
+
+            print_log(log_level::debug, "process_receive_buffer_complete: Completed processing {} bytes from {} socket",
+                io_size, io_context->is_local ? "local" : "remote");
         }
 
         /**
@@ -920,16 +1296,21 @@ namespace proxy
 
             timestamp_ = std::chrono::steady_clock::now();
 
+            print_log(log_level::debug, "process_send_buffer_complete: Processing {} bytes sent to {} socket",
+                io_size, io_context->is_local ? "local" : "remote");
+
             if (io_context->is_local)
             {
-                logger::print_log(log_level::debug,
-                    std::string("process_send_buffer_complete: send complete to locally connected socket: ")
-                    + std::to_string(io_size));
+                print_log(log_level::debug, "process_send_buffer_complete: Send completed to local socket: {} bytes", io_size);
 
                 if (connection_status_ != connection_status::client_completed)
                 {
+                    print_log(log_level::debug, "process_send_buffer_complete: Connection still active, checking for receive buffer restart");
+
                     if (remote_recv_buf_.len == 0)
                     {
+                        print_log(log_level::debug, "process_send_buffer_complete: Remote receive buffer empty, setting up new receive");
+
                         DWORD flags = 0;
 
                         remote_recv_buf_.buf = local_send_buf_.buf;
@@ -937,6 +1318,8 @@ namespace proxy
 
                         if (remote_recv_buf_.len > 0)
                         {
+                            print_log(log_level::debug, "process_send_buffer_complete: Initiating remote receive with buffer size {}", remote_recv_buf_.len);
+
                             if ((::WSARecv(
                                 remote_socket_,
                                 &remote_recv_buf_,
@@ -946,46 +1329,74 @@ namespace proxy
                                 &io_context_recv_from_remote_,
                                 nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                             {
+                                const auto error = WSAGetLastError();
+                                print_log(log_level::warning, "process_send_buffer_complete: WSARecv on remote failed: {}", error);
                                 close_client<true>(true, false);
                             }
+                            else
+                            {
+                                print_log(log_level::debug, "process_send_buffer_complete: Remote WSARecv initiated successfully");
+                            }
+                        }
+                        else
+                        {
+                            print_log(log_level::debug, "process_send_buffer_complete: Remote receive buffer length is 0, skipping receive");
                         }
                     }
+                    else
+                    {
+                        print_log(log_level::debug, "process_send_buffer_complete: Remote receive buffer already active (len={})", remote_recv_buf_.len);
+                    }
+                }
+                else
+                {
+                    print_log(log_level::debug, "process_send_buffer_complete: Connection completed, skipping receive restart");
                 }
 
+                // Advance the send buffer pointer
                 local_send_buf_.buf += io_size;
+                print_log(log_level::debug, "process_send_buffer_complete: Advanced local send buffer by {} bytes", io_size);
 
+                // Handle buffer wrap-around
                 if (local_send_buf_.buf == from_remote_to_local_buffer_.data() + from_remote_to_local_buffer_.size())
                 {
                     local_send_buf_.buf = from_remote_to_local_buffer_.data();
+                    print_log(log_level::debug, "process_send_buffer_complete: Local send buffer wrapped to beginning");
                 }
 
+                // Check if we've caught up with the receive buffer
                 if (local_send_buf_.buf == remote_recv_buf_.buf)
                 {
+                    print_log(log_level::debug, "process_send_buffer_complete: Local send buffer caught up with remote receive buffer");
+
                     if (connection_status_ == connection_status::client_completed)
                     {
+                        print_log(log_level::debug, "process_send_buffer_complete: Connection completed, closing remote client");
                         close_client<true>(false, false);
                     }
 
                     local_send_buf_.len = 0;
+                    print_log(log_level::debug, "process_send_buffer_complete: Reset local send buffer length to 0");
                 }
                 else
                 {
+                    // Calculate remaining data to send
                     if (local_send_buf_.buf < remote_recv_buf_.buf)
                     {
                         local_send_buf_.len = static_cast<ULONG>(remote_recv_buf_.buf - local_send_buf_.buf);
+                        print_log(log_level::debug, "process_send_buffer_complete: Set local send buffer len to {} (normal case)", local_send_buf_.len);
                     }
                     else
                     {
                         local_send_buf_.len = static_cast<ULONG>(from_remote_to_local_buffer_.data() +
                             from_remote_to_local_buffer_.size() - local_send_buf_.buf);
+                        print_log(log_level::debug, "process_send_buffer_complete: Set local send buffer len to {} (wrapped case)", local_send_buf_.len);
                     }
 
+                    // Continue sending if there's more data
                     if (local_send_buf_.len)
                     {
-                        logger::print_log(log_level::debug,
-                            std::string(
-                                "process_send_buffer_complete: sending data to locally connected socket: ")
-                            + std::to_string(io_size));
+                        print_log(log_level::debug, "process_send_buffer_complete: Continuing send to local socket with {} bytes", local_send_buf_.len);
 
                         if ((::WSASend(
                             local_socket_,
@@ -996,21 +1407,33 @@ namespace proxy
                             &io_context_send_to_local_,
                             nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                         {
+                            const auto error = WSAGetLastError();
+                            print_log(log_level::warning, "process_send_buffer_complete: WSASend to local failed: {}", error);
                             close_client<true>(false, true);
                         }
+                        else
+                        {
+                            print_log(log_level::debug, "process_send_buffer_complete: Continued local send initiated successfully");
+                        }
+                    }
+                    else
+                    {
+                        print_log(log_level::debug, "process_send_buffer_complete: No more data to send to local socket");
                     }
                 }
             }
             else
             {
-                logger::print_log(log_level::debug,
-                    std::string("process_send_buffer_complete: send complete to remotely connected socket: ")
-                    + std::to_string(io_size));
+                print_log(log_level::debug, "process_send_buffer_complete: Send completed to remote socket: {} bytes", io_size);
 
                 if (connection_status_ != connection_status::client_completed)
                 {
+                    print_log(log_level::debug, "process_send_buffer_complete: Connection still active, checking for receive buffer restart");
+
                     if (local_recv_buf_.len == 0)
                     {
+                        print_log(log_level::debug, "process_send_buffer_complete: Local receive buffer empty, setting up new receive");
+
                         DWORD flags = 0;
 
                         local_recv_buf_.buf = remote_send_buf_.buf;
@@ -1018,6 +1441,8 @@ namespace proxy
 
                         if (local_recv_buf_.len)
                         {
+                            print_log(log_level::debug, "process_send_buffer_complete: Initiating local receive with buffer size {}", local_recv_buf_.len);
+
                             if ((::WSARecv(
                                 local_socket_,
                                 &local_recv_buf_,
@@ -1027,46 +1452,74 @@ namespace proxy
                                 &io_context_recv_from_local_,
                                 nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                             {
+                                const auto error = WSAGetLastError();
+                                print_log(log_level::warning, "process_send_buffer_complete: WSARecv on local failed: {}", error);
                                 close_client<true>(true, true);
                             }
+                            else
+                            {
+                                print_log(log_level::debug, "process_send_buffer_complete: Local WSARecv initiated successfully");
+                            }
+                        }
+                        else
+                        {
+                            print_log(log_level::debug, "process_send_buffer_complete: Local receive buffer length is 0, skipping receive");
                         }
                     }
+                    else
+                    {
+                        print_log(log_level::debug, "process_send_buffer_complete: Local receive buffer already active (len={})", local_recv_buf_.len);
+                    }
+                }
+                else
+                {
+                    print_log(log_level::debug, "process_send_buffer_complete: Connection completed, skipping receive restart");
                 }
 
+                // Advance the send buffer pointer
                 remote_send_buf_.buf += io_size;
+                print_log(log_level::debug, "process_send_buffer_complete: Advanced remote send buffer by {} bytes", io_size);
 
+                // Handle buffer wrap-around
                 if (remote_send_buf_.buf == from_local_to_remote_buffer_.data() + from_local_to_remote_buffer_.size())
                 {
                     remote_send_buf_.buf = from_local_to_remote_buffer_.data();
+                    print_log(log_level::debug, "process_send_buffer_complete: Remote send buffer wrapped to beginning");
                 }
 
+                // Check if we've caught up with the receive buffer
                 if (remote_send_buf_.buf == local_recv_buf_.buf)
                 {
+                    print_log(log_level::debug, "process_send_buffer_complete: Remote send buffer caught up with local receive buffer");
+
                     if (connection_status_ == connection_status::client_completed)
                     {
+                        print_log(log_level::debug, "process_send_buffer_complete: Connection completed, closing local client");
                         close_client<true>(false, false);
                     }
 
                     remote_send_buf_.len = 0;
+                    print_log(log_level::debug, "process_send_buffer_complete: Reset remote send buffer length to 0");
                 }
                 else
                 {
+                    // Calculate remaining data to send
                     if (remote_send_buf_.buf < local_recv_buf_.buf)
                     {
                         remote_send_buf_.len = static_cast<ULONG>(local_recv_buf_.buf - remote_send_buf_.buf);
+                        print_log(log_level::debug, "process_send_buffer_complete: Set remote send buffer len to {} (normal case)", remote_send_buf_.len);
                     }
                     else
                     {
                         remote_send_buf_.len = static_cast<ULONG>(from_local_to_remote_buffer_.data() +
                             from_local_to_remote_buffer_.size() - remote_send_buf_.buf);
+                        print_log(log_level::debug, "process_send_buffer_complete: Set remote send buffer len to {} (wrapped case)", remote_send_buf_.len);
                     }
 
+                    // Continue sending if there's more data
                     if (remote_send_buf_.len)
                     {
-                        logger::print_log(log_level::debug,
-                            std::string(
-                                "process_send_buffer_complete: sending data to remotely connected socket: ")
-                            + std::to_string(io_size));
+                        print_log(log_level::debug, "process_send_buffer_complete: Continuing send to remote socket with {} bytes", remote_send_buf_.len);
 
                         if ((::WSASend(
                             remote_socket_,
@@ -1077,11 +1530,24 @@ namespace proxy
                             &io_context_send_to_remote_,
                             nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                         {
+                            const auto error = WSAGetLastError();
+                            print_log(log_level::warning, "process_send_buffer_complete: WSASend to remote failed: {}", error);
                             close_client<true>(false, false);
                         }
+                        else
+                        {
+                            print_log(log_level::debug, "process_send_buffer_complete: Continued remote send initiated successfully");
+                        }
+                    }
+                    else
+                    {
+                        print_log(log_level::debug, "process_send_buffer_complete: No more data to send to remote socket");
                     }
                 }
             }
+
+            print_log(log_level::debug, "process_send_buffer_complete: Completed processing {} bytes sent to {} socket",
+                io_size, io_context->is_local ? "local" : "remote");
         }
 
         /**
@@ -1129,22 +1595,57 @@ namespace proxy
         bool inject_to_local(const char* data, const uint32_t length,
             proxy_io_operation type = proxy_io_operation::inject_io_write)
         {
+            print_log(log_level::debug, "inject_to_local: Starting injection of {} bytes (operation type: {})",
+                length, static_cast<int>(type));
+
+            // Validate input parameters
+            if (data == nullptr)
+            {
+                print_log(log_level::error, "inject_to_local: Data pointer is null, cannot inject");
+                return false;
+            }
+
+            if (length == 0)
+            {
+                print_log(log_level::warning, "inject_to_local: Injection length is 0, skipping operation");
+                return true; // Consider this a successful no-op
+            }
+
+            if (local_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                print_log(log_level::error, "inject_to_local: Local socket is invalid (INVALID_SOCKET)");
+                return false;
+            }
+
+            print_log(log_level::debug, "inject_to_local: Allocating per-I/O context for local socket {}",
+                static_cast<int>(local_socket_));
+
             auto context = new(std::nothrow) per_io_context_t{ type, this, true };
 
             if (context == nullptr)
+            {
+                print_log(log_level::error, "inject_to_local: Failed to allocate per-I/O context");
                 return false;
+            }
+
+            print_log(log_level::debug, "inject_to_local: Allocating buffer for {} bytes", length);
 
             context->wsa_buf.buf = new(std::nothrow) char[length];
 
             if (context->wsa_buf.buf == nullptr)
             {
+                print_log(log_level::error, "inject_to_local: Failed to allocate buffer of {} bytes", length);
                 delete context;
                 return false;
             }
 
-            memmove(context->wsa_buf.buf, data, length);
+            print_log(log_level::debug, "inject_to_local: Copying {} bytes of data to buffer", length);
 
+            memmove(context->wsa_buf.buf, data, length);
             context->wsa_buf.len = length;
+
+            print_log(log_level::debug, "inject_to_local: Initiating WSASend to local socket {} with {} bytes",
+                static_cast<int>(local_socket_), length);
 
             if ((::WSASend(
                 local_socket_,
@@ -1155,9 +1656,20 @@ namespace proxy
                 context,
                 nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
             {
+                const auto error = WSAGetLastError();
+                print_log(log_level::warning, "inject_to_local: WSASend failed with error: {}", error);
+
+                // Clean up allocated resources
+                delete[] context->wsa_buf.buf;
+                delete context;
+
+                print_log(log_level::debug, "inject_to_local: Closing local client due to WSASend failure");
                 close_client(false, true);
                 return false;
             }
+
+            print_log(log_level::debug, "inject_to_local: WSASend initiated successfully for {} bytes", length);
+            print_log(log_level::debug, "inject_to_local: Injection completed, context and buffer will be cleaned up on completion");
 
             return true;
         }
@@ -1186,22 +1698,57 @@ namespace proxy
         bool inject_to_remote(const char* data, const uint32_t length,
             proxy_io_operation type = proxy_io_operation::inject_io_write)
         {
+            print_log(log_level::debug, "inject_to_remote: Starting injection of {} bytes (operation type: {})",
+                length, static_cast<int>(type));
+
+            // Validate input parameters
+            if (data == nullptr)
+            {
+                print_log(log_level::error, "inject_to_remote: Data pointer is null, cannot inject");
+                return false;
+            }
+
+            if (length == 0)
+            {
+                print_log(log_level::warning, "inject_to_remote: Injection length is 0, skipping operation");
+                return true; // Consider this a successful no-op
+            }
+
+            if (remote_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                print_log(log_level::error, "inject_to_remote: Remote socket is invalid (INVALID_SOCKET)");
+                return false;
+            }
+
+            print_log(log_level::debug, "inject_to_remote: Allocating per-I/O context for remote socket {}",
+                static_cast<int>(remote_socket_));
+
             auto context = new(std::nothrow) per_io_context_t{ type, this, false };
 
             if (context == nullptr)
+            {
+                print_log(log_level::error, "inject_to_remote: Failed to allocate per-I/O context");
                 return false;
+            }
+
+            print_log(log_level::debug, "inject_to_remote: Allocating buffer for {} bytes", length);
 
             context->wsa_buf.buf = new(std::nothrow) char[length];
 
             if (context->wsa_buf.buf == nullptr)
             {
+                print_log(log_level::error, "inject_to_remote: Failed to allocate buffer of {} bytes", length);
                 delete context;
                 return false;
             }
 
-            memmove(context->wsa_buf.buf, data, length);
+            print_log(log_level::debug, "inject_to_remote: Copying {} bytes of data to buffer", length);
 
+            memmove(context->wsa_buf.buf, data, length);
             context->wsa_buf.len = length;
+
+            print_log(log_level::debug, "inject_to_remote: Initiating WSASend to remote socket {} with {} bytes",
+                static_cast<int>(remote_socket_), length);
 
             if ((::WSASend(
                 remote_socket_,
@@ -1212,9 +1759,20 @@ namespace proxy
                 context,
                 nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
             {
+                const auto error = WSAGetLastError();
+                print_log(log_level::warning, "inject_to_remote: WSASend failed with error: {}", error);
+
+                // Clean up allocated resources
+                delete[] context->wsa_buf.buf;
+                delete context;
+
+                print_log(log_level::debug, "inject_to_remote: Closing remote client due to WSASend failure");
                 close_client(false, false);
                 return false;
             }
+
+            print_log(log_level::debug, "inject_to_remote: WSASend initiated successfully for {} bytes", length);
+            print_log(log_level::debug, "inject_to_remote: Injection completed, context and buffer will be cleaned up on completion");
 
             return true;
         }
@@ -1298,38 +1856,91 @@ namespace proxy
          */
         bool start_data_relay()
         {
+            print_log(log_level::debug, "start_data_relay: Starting data relay initialization");
+
             DWORD flags = 0;
+
+            print_log(log_level::debug, "start_data_relay: Initiating WSARecv on local socket {}",
+                static_cast<int>(local_socket_));
 
             auto ret = WSARecv(local_socket_, &local_recv_buf_, 1,
                 nullptr, &flags, &io_context_recv_from_local_, nullptr);
 
             if (const auto wsa_error = WSAGetLastError(); ret == SOCKET_ERROR && (ERROR_IO_PENDING != wsa_error))
             {
-                close_client(true, true);
+                print_log(log_level::warning, "start_data_relay: WSARecv on local socket failed with error: {}", wsa_error);
+                print_log(log_level::debug, "start_data_relay: Closing local client due to WSARecv failure");
 
+                close_client(true, true);
                 remote_recv_buf_.len = 0;
 
+                print_log(log_level::debug, "start_data_relay: Data relay initialization failed on local socket");
                 return false;
             }
+            else if (ret == SOCKET_ERROR && wsa_error == ERROR_IO_PENDING)
+            {
+                print_log(log_level::debug, "start_data_relay: Local WSARecv initiated successfully (pending)");
+            }
+            else
+            {
+                print_log(log_level::debug, "start_data_relay: Local WSARecv completed immediately");
+            }
+
+            print_log(log_level::debug, "start_data_relay: Initiating WSARecv on remote socket {}",
+                static_cast<int>(remote_socket_));
 
             ret = WSARecv(remote_socket_, &remote_recv_buf_, 1,
                 nullptr, &flags, &io_context_recv_from_remote_, nullptr);
 
             if (const auto wsa_error = WSAGetLastError(); ret == SOCKET_ERROR && (ERROR_IO_PENDING != wsa_error))
             {
+                print_log(log_level::warning, "start_data_relay: WSARecv on remote socket failed with error: {}", wsa_error);
+                print_log(log_level::debug, "start_data_relay: Cleaning up local socket due to remote WSARecv failure");
+
                 if (shutdown(local_socket_, SD_BOTH) == SOCKET_ERROR) {
-                    logger::print_log(log_level::warning, "shutdown(local_socket_) failed: " + std::to_string(WSAGetLastError()));
+                    const auto shutdown_error = WSAGetLastError();
+                    print_log(log_level::warning, "start_data_relay: shutdown(local_socket_) failed: {}", shutdown_error);
+                }
+                else {
+                    print_log(log_level::debug, "start_data_relay: Local socket shutdown successful");
                 }
 
                 // Cancel all pending I/O before closing
-                CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr);
+                if (CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr) == FALSE) {
+                    const auto cancel_error = GetLastError();
+                    if (cancel_error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
+                        print_log(log_level::debug, "start_data_relay: CancelIoEx(local_socket_) returned error: {}", cancel_error);
+                    }
+                }
+                else {
+                    print_log(log_level::debug, "start_data_relay: Local socket I/O cancellation successful");
+                }
 
-                closesocket(local_socket_);
+                if (closesocket(local_socket_) == SOCKET_ERROR) {
+                    const auto close_error = WSAGetLastError();
+                    print_log(log_level::warning, "start_data_relay: closesocket(local_socket_) failed: {}", close_error);
+                }
+                else {
+                    print_log(log_level::debug, "start_data_relay: Local socket closed successfully");
+                }
 
+                print_log(log_level::debug, "start_data_relay: Closing remote client due to WSARecv failure");
                 close_client(true, false);
 
+                print_log(log_level::debug, "start_data_relay: Data relay initialization failed on remote socket");
                 return false;
             }
+            else if (ret == SOCKET_ERROR && wsa_error == ERROR_IO_PENDING)
+            {
+                print_log(log_level::debug, "start_data_relay: Remote WSARecv initiated successfully (pending)");
+            }
+            else
+            {
+                print_log(log_level::debug, "start_data_relay: Remote WSARecv completed immediately");
+            }
+
+            print_log(log_level::debug, "start_data_relay: Data relay successfully initialized for both sockets (local: {}, remote: {})",
+                static_cast<int>(local_socket_), static_cast<int>(remote_socket_));
 
             return true;
         }
