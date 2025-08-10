@@ -14,15 +14,19 @@
 #include <iomanip>
 #include <iterator>
 
-// Robust feature detection for std::source_location
-#if __has_include(<version>)
-// ReSharper disable once CppUnusedIncludeDirective
-#endif
 #if __has_include(<source_location>) && defined(__cpp_lib_source_location) && __cpp_lib_source_location >= 201907L
 #include <source_location>
 #define NETLIB_HAS_SOURCE_LOCATION 1
 #else
 #define NETLIB_HAS_SOURCE_LOCATION 0
+#endif
+
+#if NETLIB_HAS_SOURCE_LOCATION
+#define NETLIB_LOG(level_, fmt_, ...) \
+      print_log_with_loc((level_), std::source_location::current(), (fmt_), ##__VA_ARGS__)
+#else
+#define NETLIB_LOG(level_, fmt_, ...) \
+      print_log((level_), (fmt_), ##__VA_ARGS__)
 #endif
 
 /**
@@ -370,6 +374,100 @@ namespace netlib::log {
         }
 
     public:
+
+#if NETLIB_HAS_SOURCE_LOCATION
+        /**
+         * @brief Logs a formatted message with explicit source location information.
+         *
+         * This function provides direct control over source location information for formatted
+         * logging, allowing callers to explicitly specify the location context rather than
+         * relying on automatic capture. It's particularly useful for logging wrappers, macros,
+         * or utility functions that need to preserve the original call site information.
+         *
+         * ## Design Purpose:
+         * While the standard print_log() method automatically captures source location at the
+         * call site, this variant accepts an explicit source location parameter. This enables:
+         * - Logging wrappers that preserve original caller context
+         * - Custom logging macros that can manipulate source location
+         * - Forwarding source location from higher-level abstractions
+         * - Testing scenarios with controlled location information
+         *
+         * ## Conditional Compilation:
+         * This function is only available when NETLIB_HAS_SOURCE_LOCATION is defined (C++20
+         * std::source_location support). When source location is unavailable, this overload
+         * is not compiled, and callers must use the standard print_log() variants.
+         *
+         * ## Performance Characteristics:
+         * - Identical performance profile to standard print_log() template
+         * - Pre-allocates format buffer based on format string size estimation
+         * - Uses std::format_to with back_inserter for efficient string construction
+         * - Comprehensive exception handling with multiple fallback strategies
+         * - Early exit optimization for disabled log levels
+         *
+         * ## Output Format:
+         * Produces the same rich output format as other logging methods:
+         * ```
+         * 2024-08-10 14:30:25.123 [info] [T A1B2C3] [MyLogger] [file.cpp:42:function] Message
+         * ```
+         *
+         * ## Error Handling:
+         * - All std::format exceptions are caught and converted to error messages
+         * - Maintains noexcept guarantee through comprehensive exception handling
+         * - Uses same multi-level fallback strategy as other logging methods
+         * - Never throws exceptions regardless of format string or argument issues
+         *
+         * @tparam Args Variadic template parameter pack for format arguments.
+         * @param level The log level for message filtering and output formatting.
+         * @param loc Source location information to include in the log output.
+         * @param fmt Format string compatible with std::format (compile-time validated).
+         * @param args Arguments for format string substitution (perfect forwarded).
+         *
+         * @note Only available when NETLIB_HAS_SOURCE_LOCATION is defined (C++20 required).
+         * @note Function is noexcept with comprehensive internal error handling.
+         * @note Messages are filtered based on is_enabled(current_level, message_level).
+         * @note No output occurs if log_stream_ is null or level is filtered out.
+         * @note Format string type safety is enforced at compile time.
+         *
+         * ## Thread Safety:
+         * - Thread-safe atomic access to log level and stream
+         * - Uses std::osyncstream for atomic output operations
+         * - Safe for concurrent use across multiple threads
+         *
+         * ## Usage Examples:
+         * @code
+         * // Preserve source location in wrapper function
+         * template<typename... Args>
+         * void my_log_wrapper(log_level level, std::format_string<Args...> fmt, Args&&... args,
+         *                     std::source_location loc = std::source_location::current()) {
+         *     logger.print_log_with_loc(level, loc, fmt, std::forward<Args>(args)...);
+         * }
+         *
+         * // Custom source location for testing
+         * auto test_loc = std::source_location::current();
+         * logger.print_log_with_loc(log_level::debug, test_loc, "Test message: {}", value);
+         *
+         * // Forwarding location from higher-level function
+         * void high_level_function(std::source_location loc = std::source_location::current()) {
+         *     logger.print_log_with_loc(log_level::info, loc, "Called from: {}", loc.function_name());
+         * }
+         * @endcode
+         *
+         * @see print_log() for automatic source location capture
+         * @see print_log_impl() for the underlying implementation
+         * @since C++20 (requires std::source_location support)
+         */
+        template <typename... Args>
+        void print_log_with_loc(
+            log_level level,
+            const std::source_location& loc,
+            std::format_string<Args...> fmt,
+            Args&&... args) const noexcept
+        {
+            print_log_impl(level, loc, fmt, std::forward<Args>(args)...);
+        }
+
+#else
+
         /**
          * @brief Logs a formatted message with type-safe parameter substitution.
          *
@@ -436,13 +534,10 @@ namespace netlib::log {
             std::format_string<Args...> fmt,
             Args&&... args) const noexcept
         {
-            // Capture source location at call site and delegate to implementation
-#if NETLIB_HAS_SOURCE_LOCATION
-            print_log_impl(level, std::source_location::current(), fmt, std::forward<Args>(args)...);
-#else
             print_log_impl(level, fmt, std::forward<Args>(args)...);
-#endif
         }
+
+#endif
 
         /**
          * @brief Logs a pre-formatted message string with minimal processing overhead.

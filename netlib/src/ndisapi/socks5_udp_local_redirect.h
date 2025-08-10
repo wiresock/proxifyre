@@ -67,7 +67,7 @@ namespace ndisapi
                                     using namespace std::chrono_literals;
                                     if (current_time - a.second > 15min)
                                     {
-                                        print_log(log_level::info,
+                                        NETLIB_LOG(log_level::info,
                                             "DELETE UDP client endpoint (timeout): : {}",
                                             ntohs(a.first));
 
@@ -197,7 +197,7 @@ namespace ndisapi
                     endpoints_[udp_header->th_sport] =
                         std::chrono::steady_clock::now();
 
-                    print_log(log_level::info,
+                    NETLIB_LOG(log_level::info,
                         "NEW client UDP endpoint: : {}",
                         ntohs(udp_header->th_sport));
 
@@ -228,7 +228,7 @@ namespace ndisapi
                     endpoints_[udp_header->th_sport] =
                         std::chrono::steady_clock::now();
 
-                    print_log(log_level::info,
+                    NETLIB_LOG(log_level::info,
                         "NEW client UDP endpoint: : {}",
                         ntohs(udp_header->th_sport));
 
@@ -285,7 +285,7 @@ namespace ndisapi
                     return false;
                 }
 
-                print_log(log_level::debug,
+                NETLIB_LOG(log_level::debug,
                     "C2S: {}:{} -> {}:{}",
                     std::string{ T{ip_header->ip_src} },
                     ntohs(udp_header->th_sport),
@@ -324,7 +324,7 @@ namespace ndisapi
 
                 it->second = std::chrono::steady_clock::now();
 
-                print_log(log_level::debug,
+                NETLIB_LOG(log_level::debug,
                     "C2S: {}:{} -> {}:{}",
                     std::string{ T{ip_header->ip_src} },
                     ntohs(udp_header->th_sport),
@@ -356,7 +356,7 @@ namespace ndisapi
                     return false;
                 }
 
-                print_log(log_level::debug,
+                NETLIB_LOG(log_level::debug,
                     "C2S: {}:{} -> {}:{}",
                     std::string{ T{ip_header->ip6_src} },
                     ntohs(udp_header->th_sport),
@@ -396,7 +396,7 @@ namespace ndisapi
 
                 it->second = std::chrono::steady_clock::now();
 
-                print_log(log_level::debug,
+                NETLIB_LOG(log_level::debug,
                     "C2S: {}:{} -> {}:{}",
                     std::string{ T{ip_header->ip6_src} },
                     ntohs(udp_header->th_sport),
@@ -446,7 +446,7 @@ namespace ndisapi
                 if (it == endpoints_.cend())
                     return false;
 
-                print_log(log_level::debug,
+                NETLIB_LOG(log_level::debug,
                     "S2C: {}:{} -> {}:{}",
                     std::string{ T{ip_header->ip_src} },
                     ntohs(udp_header->th_sport),
@@ -478,7 +478,7 @@ namespace ndisapi
 
                 it->second = std::chrono::steady_clock::now();
 
-                print_log(log_level::debug,
+                NETLIB_LOG(log_level::debug,
                     "S2C: {}:{} -> {}:{}",
                     std::string{ T{ip_header->ip_src} },
                     ntohs(udp_header->th_sport),
