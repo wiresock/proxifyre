@@ -184,19 +184,25 @@ public:
      *
      * The event is signaled when the log storage exceeds the configured limit.
      */
-    void set_log_event(HANDLE log_event)
+    void set_log_event(const HANDLE log_event)
     {
         log_event_ = log_event;
     }
 
     /**
      * @brief Gets the log stream.
-     * @return Reference to the log stream.
+     * @return Shared pointer to the log stream.
      *
-     * The returned stream can be used with standard C++ stream operations to log messages.
+     * The returned shared pointer can be used with standard C++ stream operations to log messages.
+     * Note: The shared pointer uses a no-op deleter to avoid destroying the stream when the
+     * shared pointer is released, since the stream is owned by the logger instance.
      */
-    std::ostream& get_log_stream()
+    std::shared_ptr<std::ostream> get_log_stream()
     {
-        return log_stream_;
+        return {
+            &log_stream_, [](std::ostream*) {
+            // No-op deleter - the stream is owned by the logger instance
+            }
+        };
     }
 };

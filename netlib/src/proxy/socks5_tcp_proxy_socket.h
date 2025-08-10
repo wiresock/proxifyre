@@ -67,7 +67,7 @@ namespace proxy
         socks5_tcp_proxy_socket(const SOCKET local_socket, const SOCKET remote_socket,
             std::unique_ptr<negotiate_context_t> negotiate_ctx,
             const log_level log_level = log_level::error,
-            const std::optional<std::reference_wrapper<std::ostream>> log_stream = std::nullopt)
+            const std::shared_ptr<std::ostream>& log_stream = nullptr)
             : tcp_proxy_socket<T>(local_socket, remote_socket, std::move(negotiate_ctx), log_level,
                 log_stream)
         {

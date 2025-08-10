@@ -177,8 +177,8 @@ namespace proxy
          * @param pcap_log_stream Optional reference to an output stream for pcap logging.
          */
         explicit socks_local_router(const log_level log_level = log_level::error,
-                                    const std::optional<std::reference_wrapper<std::ostream>> log_stream = std::nullopt,
-                                    const std::optional<std::reference_wrapper<std::ostream>> pcap_log_stream = std::nullopt) :
+                                    const std::shared_ptr<std::ostream>& log_stream = nullptr,
+                                    const std::shared_ptr<std::ostream>& pcap_log_stream = nullptr) :
                                     logger(log_level, log_stream),
                                     static_filters_{ true, true, log_level_, log_stream_ },
                                     process_lookup_v4_{ log_level_, log_stream_ },

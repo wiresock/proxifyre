@@ -274,7 +274,7 @@ namespace proxy
         tcp_proxy_socket(const SOCKET local_socket, const SOCKET remote_socket,
             std::unique_ptr<negotiate_context_t> negotiate_ctx,
             const log_level log_level = log_level::error,
-            const std::optional<std::reference_wrapper<std::ostream>> log_stream = std::nullopt,
+            const std::shared_ptr<std::ostream>& log_stream = nullptr,
             const bool disable_nagle = false)
             : logger(log_level, log_stream),
             local_socket_(local_socket),

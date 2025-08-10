@@ -184,8 +184,7 @@ namespace proxy
         socks5_local_udp_proxy_server(const uint16_t proxy_port, winsys::io_completion_port& completion_port,
             const std::function<query_remote_peer_t>& query_remote_peer_fn,
             const log_level log_level = log_level::error,
-            const std::optional<std::reference_wrapper<std::ostream>> log_stream =
-            std::nullopt)
+            const std::shared_ptr<std::ostream>& log_stream = nullptr)
             : logger(log_level, log_stream),
             proxy_port_(proxy_port),
             completion_port_(completion_port),

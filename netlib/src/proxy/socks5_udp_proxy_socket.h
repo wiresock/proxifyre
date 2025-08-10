@@ -223,7 +223,7 @@ namespace proxy
             address_type_t remote_address, const uint16_t remote_port,
             std::unique_ptr<negotiate_context_t> negotiate_ctx,
             const log_level log_level = log_level::error,
-            const std::optional<std::reference_wrapper<std::ostream>> log_stream = std::nullopt)
+            const std::shared_ptr<std::ostream>& log_stream = nullptr)
             : logger(log_level, log_stream),
             timestamp_{ std::chrono::steady_clock::now() },
             socks_socket_(socks_socket),

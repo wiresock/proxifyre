@@ -163,7 +163,7 @@ namespace iphelper
          * @param log_stream Optional output stream for log messages
          */
         explicit process_lookup(const log_level log_level = log_level::error,
-            const std::optional<std::reference_wrapper<std::ostream>> log_stream = std::nullopt)
+            const std::shared_ptr<std::ostream>& log_stream = nullptr)
             : netlib::log::logger<process_lookup>(log_level, log_stream)
         {
             default_process_ = std::make_shared<network_process>(0, L"SYSTEM", L"SYSTEM");

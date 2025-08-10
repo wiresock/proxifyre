@@ -63,7 +63,10 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
     proxy_ = std::make_unique<proxy::socks_local_router>(
         um_log_level,
         logger::get_instance()->get_log_stream(),
-        pcap_log_file_ ? std::optional<std::reference_wrapper<std::ostream>>(pcap_log_file_.value()) : std::nullopt
+        pcap_log_file_ ?
+        std::shared_ptr<std::ostream>(&pcap_log_file_.value(), [](std::ostream*) {
+            // No-op deleter - the stream is owned by the optional member variable
+            }) : nullptr
     );
 
     if (!proxy_)

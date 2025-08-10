@@ -91,9 +91,9 @@ namespace ndisapi
          * @param log_level Logging level.
          * @param log_stream Optional output stream for logging.
          */
-        explicit socks5_udp_local_redirect(const log_level log_level = log_level::error,
-                                           const std::optional<std::reference_wrapper<std::ostream>> log_stream =
-                                               std::nullopt)
+        explicit socks5_udp_local_redirect(
+            const log_level log_level = log_level::error,
+            const std::shared_ptr<std::ostream>& log_stream = nullptr)
             : logger(log_level, log_stream)
         {
             start_cleanup_thread();
@@ -105,9 +105,10 @@ namespace ndisapi
          * @param log_level Logging level.
          * @param log_stream Optional output stream for logging.
          */
-        explicit socks5_udp_local_redirect(const u_short proxy_port, const log_level log_level = log_level::error,
-                                           const std::optional<std::reference_wrapper<std::ostream>> log_stream =
-                                               std::nullopt)
+        explicit socks5_udp_local_redirect(
+            const u_short proxy_port,
+            const log_level log_level = log_level::error,
+            const std::shared_ptr<std::ostream>& log_stream = nullptr)
             : logger(log_level, log_stream),
               proxy_port_(htons(proxy_port))
         {

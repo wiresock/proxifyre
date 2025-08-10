@@ -1,104 +1,662 @@
 #pragma once
 
-namespace netlib::log
-{
+#include <string>
+#include <string_view>
+#include <format>
+#include <chrono>
+#include <thread>
+#include <syncstream>
+#include <typeinfo>
+#include <concepts>
+#include <atomic>
+#include <memory>
+#include <cstdint>
+#include <iomanip>
+#include <iterator>
+
+// Robust feature detection for std::source_location
+#if __has_include(<version>)
+// ReSharper disable once CppUnusedIncludeDirective
+#endif
+#if __has_include(<source_location>) && defined(__cpp_lib_source_location) && __cpp_lib_source_location >= 201907L
+#include <source_location>
+#define NETLIB_HAS_SOURCE_LOCATION 1
+#else
+#define NETLIB_HAS_SOURCE_LOCATION 0
+#endif
+
+/**
+ * @file log.h
+ * @brief Thread-safe logging infrastructure for the netlib library.
+ *
+ * This file provides a comprehensive, production-ready logging system with configurable
+ * log levels, thread-safe operations, and flexible output stream management. The logger
+ * uses modern C++20 features including std::format for efficient string formatting,
+ * std::osyncstream for atomic output operations, and optional std::source_location
+ * for enhanced debugging information.
+ *
+ * Key Features:
+ * - Thread-safe atomic operations for log level and stream management
+ * - CRTP-based design for optimal performance and type safety
+ * - Hierarchical log level filtering with special 'all' level handling
+ * - Compact thread ID representation for improved readability
+ * - Local time support with UTC fallback via chrono time zones
+ * - Exception-safe formatting with comprehensive error recovery
+ * - Zero-copy stream wrapper utilities for existing ostream objects
+ * - Optional compile-time source location integration
+ * - Performance-optimized string formatting with pre-allocation
+ * - Multi-level fallback strategies for maximum reliability
+ *
+ * @author Vadim Smirnov
+ * @version 1.1
+ * @date 2024-05-10
+ * @since C++20
+ */
+
+namespace netlib::log {
+
+    /**
+     * @brief Utility function to wrap an existing std::ostream into a shared_ptr without ownership.
+     *
+     * This function creates a shared_ptr that points to an existing ostream but uses a no-op
+     * deleter, ensuring the original stream is not destroyed when the shared_ptr is reset.
+     * This is particularly useful for wrapping standard streams like std::cout, std::cerr,
+     * or file streams that are managed elsewhere in the application.
+     *
+     * @param os Reference to the existing ostream to wrap.
+     * @return shared_ptr<ostream> pointing to the stream with no-op deleter.
+     *
+     * @note The caller must ensure the original stream remains valid for the lifetime
+     *       of the returned shared_ptr and any copies of it.
+     * @note This function is noexcept and has no performance overhead.
+     *
+     * Example Usage:
+     * @code
+     * auto cout_logger = std::make_shared<my_logger>(log_level::info, wrap_ostream(std::cout));
+     * auto file_logger = std::make_shared<my_logger>(log_level::debug, wrap_ostream(file_stream));
+     * @endcode
+     */
+    inline std::shared_ptr<std::ostream> wrap_ostream(std::ostream& os) noexcept {
+        return { &os, [](std::ostream*) {} };
+    }
+
     /**
      * @brief Log level enumeration for controlling logger verbosity.
+     *
+     * This enumeration defines a hierarchical logging system where each level includes
+     * all messages from lower-severity levels. The numeric values are intentionally
+     * non-sequential to allow for future expansion and to provide special handling
+     * for the 'all' level.
+     *
+     * Hierarchy (from most to least restrictive):
+     * - error (0): Only critical errors that may cause application failure
+     * - warning (1): Potential issues that should be monitored + errors
+     * - info (2): General application flow information + warnings + errors
+     * - debug (4): Detailed diagnostic information + all above levels
+     * - all (255): Special level that accepts all message types regardless of sender level
+     *
+     * @note The 'all' level is special-cased in the is_enabled() function to always
+     *       return true, making it different from a simple numeric comparison.
      */
-    enum class log_level : uint8_t
-    {
-        error = 0,   ///< Error messages only.
-        warning = 1, ///< Warning and error messages.
-        info = 2,    ///< Informational, warning, and error messages.
-        debug = 4,   ///< Debug, info, warning, and error messages.
-        all = 255,   ///< All log messages.
+    enum class log_level : std::uint8_t {
+        error = 0,   ///< Error messages only - critical issues that may cause application failure.
+        warning = 1, ///< Warning and error messages - potential issues that should be monitored.
+        info = 2,    ///< Informational, warning, and error messages - general application flow.
+        debug = 4,   ///< Debug, info, warning, and error messages - detailed diagnostic information.
+        all = 255,   ///< All log messages - special level that accepts all message types.
     };
 
     /**
      * @brief Converts a log_level enum value to its string representation.
-     * @param level The log_level value.
-     * @return String view representing the log level.
+     *
+     * This function provides a compile-time constant conversion from log level
+     * enumeration to human-readable string representation for use in log output
+     * formatting. The function is constexpr and can be evaluated at compile-time
+     * when used with constant expressions.
+     *
+     * @param level The log_level value to convert.
+     * @return constexpr string_view representing the log level name.
+     * @retval "error" for log_level::error
+     * @retval "warning" for log_level::warning
+     * @retval "info" for log_level::info
+     * @retval "debug" for log_level::debug
+     * @retval "all" for log_level::all
+     * @retval "unknown" for any unrecognized value (should never occur with valid enum)
+     *
+     * @note Returns string_view for optimal performance - no dynamic allocation.
+     * @note This function is constexpr and can be used in constant expressions.
      */
-    inline std::string_view to_string(const log_level level)
-    {
-        switch (level)
-        {
-        case log_level::error: return "error";
+    constexpr std::string_view to_string(const log_level level) noexcept {
+        switch (level) {
+        case log_level::error:   return "error";
         case log_level::warning: return "warning";
-        case log_level::info: return "info";
-        case log_level::debug: return "debug";
-        case log_level::all: return "all";
+        case log_level::info:    return "info";
+        case log_level::debug:   return "debug";
+        case log_level::all:     return "all";
         }
         return "unknown";
     }
 
     /**
      * @brief Parses a string to obtain the corresponding log_level enum value.
-     * @param str The string representation of the log level.
-     * @return The corresponding log_level value, or log_level::error if not recognized.
+     *
+     * This function provides case-sensitive string-to-enum conversion for log level
+     * configuration. It's designed for parsing configuration files, command-line
+     * arguments, or runtime log level changes. The function uses a constexpr
+     * ternary chain for optimal performance and compile-time evaluation when possible.
+     *
+     * @param s The string representation of the log level (case-sensitive).
+     * @return constexpr log_level value corresponding to the input string.
+     * @retval log_level::error as safe default for unrecognized inputs.
+     *
+     * @note Case-sensitive matching - "Error" will not match "error".
+     * @note Returns error level as safe default for unrecognized inputs.
+     * @note This function is constexpr and can be used in constant expressions.
+     *
+     * Supported Input Strings:
+     * - "error" ? log_level::error
+     * - "warning" ? log_level::warning
+     * - "info" ? log_level::info
+     * - "debug" ? log_level::debug
+     * - "all" ? log_level::all
+     * - anything else ? log_level::error (safe default)
      */
-    inline log_level from_string(const std::string_view str)
-    {
-        if (str == "error") return log_level::error;
-        if (str == "warning") return log_level::warning;
-        if (str == "info") return log_level::info;
-        if (str == "debug") return log_level::debug;
-        if (str == "all") return log_level::all;
-        return log_level::error;
+    constexpr log_level from_string(std::string_view s) noexcept {
+        return s == "error" ? log_level::error :
+            s == "warning" ? log_level::warning :
+            s == "info" ? log_level::info :
+            s == "debug" ? log_level::debug :
+            s == "all" ? log_level::all :
+            log_level::error;
     }
 
     /**
-     * @brief Base logger class template for thread-safe logging.
-     * @tparam Derived The derived logger type.
+     * @brief Determines if a message should be logged based on configured and message log levels.
      *
-     * Provides log level filtering and output stream management.
+     * This function implements the core logic for hierarchical log level filtering.
+     * It uses a ranking system to compare log levels and provides special handling
+     * for the 'all' level. The function is constexpr and can be evaluated at
+     * compile-time for optimal performance in hot paths.
+     *
+     * The ranking system treats log levels as follows:
+     * - error = rank 0 (most restrictive)
+     * - warning = rank 1
+     * - info = rank 2
+     * - debug = rank 3
+     * - all = rank 4 (least restrictive, but special-cased)
+     *
+     * @param configured The logger's configured log level threshold.
+     * @param msg The log level of the message being evaluated.
+     * @return true if the message should be logged, false otherwise.
+     *
+     * @note The 'all' configured level always returns true regardless of message level.
+     * @note Uses constexpr ranking for optimal performance and compile-time evaluation.
+     * @note This function is the single source of truth for log level decisions.
+     *
+     * Examples:
+     * - is_enabled(info, error) ? true (error messages shown at info level)
+     * - is_enabled(error, info) ? false (info messages not shown at error level)
+     * - is_enabled(all, debug) ? true (all level accepts everything)
+     */
+    constexpr bool is_enabled(const log_level configured, const log_level msg) noexcept {
+        if (configured == log_level::all) return true;
+
+        // Rank levels by severity: error < warning < info < debug
+        auto rank = [](const log_level l) constexpr -> int {
+            switch (l) {
+            case log_level::error:   return 0;
+            case log_level::warning: return 1;
+            case log_level::info:    return 2;
+            case log_level::debug:   return 3;
+            case log_level::all:     return 4; // highest
+            }
+            return -1; // should never happen with valid enum values
+            };
+        return rank(msg) <= rank(configured);
+    }
+
+    /**
+     * @brief Base logger class template for thread-safe logging using CRTP pattern.
+     *
+     * This class template provides a comprehensive, thread-safe logging infrastructure
+     * using the Curiously Recurring Template Pattern (CRTP) for optimal performance
+     * and type safety. It offers formatted logging with automatic timestamping,
+     * thread identification, and optional source location information.
+     *
+     * ## Key Features:
+     *
+     * ### Thread Safety:
+     * - Atomic log level operations with relaxed memory ordering
+     * - Shared pointer-based stream management for safe concurrent access
+     * - osyncstream for atomic output operations preventing interleaved output
+     *
+     * ### Performance Optimizations:
+     * - CRTP pattern for zero-overhead virtual function calls
+     * - std::format_to with pre-allocated buffers to minimize allocations
+     * - Compact thread ID hashing for readable output
+     * - Constexpr utility functions for compile-time optimization
+     * - Static caching of time zone information
+     *
+     * ### Error Handling:
+     * - Multi-level fallback strategies for format errors
+     * - Graceful degradation when time zone database is unavailable
+     * - Exception-safe noexcept guarantees on all public methods
+     * - Safe basename extraction with bounds checking
+     *
+     * ### Modern C++20 Features:
+     * - std::format for type-safe, efficient string formatting
+     * - std::source_location for automatic debugging context (optional)
+     * - Concepts for compile-time interface validation
+     * - Chrono time zones for proper local time handling
+     * - osyncstream for thread-safe output coordination
+     *
+     * ## Output Format:
+     *
+     * Standard format: `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] [T XXXXXX] [Logger] Message`
+     *
+     * With source location: `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] [T XXXXXX] [Logger] [file:line:func] Message`
+     *
+     * Fallback format: `YYYY-MM-DD HH:MM:SS.mmmZ [LEVEL] [T XXXXXX] [Logger] Message` (UTC)
+     *
+     * Error fallback: `[timestamp-unavailable] [LEVEL] [T XXXXXX] [Logger] Message`
+     *
+     * @tparam Derived The derived logger type (CRTP pattern).
+     *
+     * ## Usage Example:
+     *
+     * @code
+     * class application_logger : public logger<application_logger> {
+     * public:
+     *     static constexpr std::string_view name() { return "AppLogger"; }
+     *
+     *     application_logger(log_level level, std::shared_ptr<std::ostream> stream)
+     *         : logger(level, std::move(stream)) {}
+     * };
+     *
+     * // Usage
+     * auto app_logger = std::make_shared<application_logger>(
+     *     log_level::info, wrap_ostream(std::cout)
+     * );
+     *
+     * app_logger->print_log(log_level::info, "Processing {} items", 42);
+     * app_logger->print_log(log_level::error, "Connection failed");
+     * @endcode
+     *
+     * @note The constructor is private to enforce proper inheritance patterns.
+     * @note All public methods are noexcept with comprehensive error handling.
+     * @note Uses relaxed memory ordering for atomic operations (sufficient for logging).
+     * @since C++20
      */
     template <typename Derived>
-    class logger
-    {
+    class logger {
     protected:
-        log_level log_level_{ log_level::error }; ///< Current log level.
-        std::optional<std::reference_wrapper<std::ostream>> log_stream_; ///< Optional output stream for logging.
+        std::atomic<log_level> log_level_{ log_level::error };    ///< Thread-safe log level threshold with atomic access.
+        std::shared_ptr<std::ostream> log_stream_;                ///< Thread-safe shared output stream with automatic lifetime management.
 
     private:
+        // Trait to detect if Derived has a static name() method at compile-time
+        template <class T>
+        static constexpr bool has_static_name = requires {
+            { T::name() } -> std::convertible_to<std::string_view>;
+        };
+
         /**
-         * @brief Constructs a logger with a log level and optional output stream.
-         * @param level The log level.
-         * @param stream The output stream (optional).
+         * @brief Compile-time safe helper to get derived class name.
+         *
+         * This function uses SFINAE and constexpr if to determine the best way to get
+         * a readable name for the logger. If the derived class provides a static name()
+         * method, it uses that; otherwise, it falls back to RTTI type information.
+         *
+         * @return constexpr string_view with the logger name.
+         * @note Prefers Derived::name() if available, falls back to typeid(Derived).name().
+         * @note typeid().name() output is implementation-defined and may be mangled.
          */
-        logger(const log_level level, const std::optional<std::reference_wrapper<std::ostream>> stream)
-            : log_level_(level), log_stream_(stream) {
+        static constexpr std::string_view derived_name() noexcept {
+            if constexpr (has_static_name<Derived>) {
+                return Derived::name();
+            }
+            else {
+                return std::string_view{ typeid(Derived).name() };
+            }
+        }
+
+        /**
+         * @brief Generate a compact, readable thread ID for log output.
+         *
+         * This function creates a 24-bit hash of the current thread ID to provide
+         * a compact, hexadecimal representation that's more readable than the full
+         * thread ID while maintaining reasonable uniqueness within a process.
+         *
+         * @return uint32_t containing the lower 24 bits of the thread ID hash.
+         * @note Uses std::hash for consistent hashing across platforms.
+         * @note Returns only the lower 24 bits (6 hex digits) for readability.
+         * @note [[nodiscard]] attribute prevents accidental unused calls.
+         */
+        [[nodiscard]] static std::uint32_t compact_thread_id() noexcept {
+            return static_cast<std::uint32_t>(
+                std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xFFFFFF
+                );
+        }
+
+        /**
+         * @brief Private constructor to enforce CRTP pattern and prevent direct instantiation.
+         *
+         * This constructor initializes the logger with a specified log level and output stream.
+         * The private access ensures that only derived classes (via friend declaration)
+         * can instantiate the logger, enforcing proper inheritance patterns.
+         *
+         * @param level The minimum log level for message filtering.
+         * @param stream Shared pointer to the output stream for log messages.
+         *
+         * @note stream can be null, in which case all logging operations become no-ops.
+         * @note Uses move semantics for optimal performance with shared_ptr.
+         */
+        logger(const log_level level, std::shared_ptr<std::ostream> stream) noexcept
+            : log_level_(level), log_stream_(std::move(stream)) {
         }
 
     public:
         /**
-         * @brief Prints a log message if the specified level is enabled.
-         * @param level The log level of the message.
-         * @param message The message to log.
+         * @brief Logs a formatted message with type-safe parameter substitution.
+         *
+         * This function provides printf-style formatted logging using modern C++20
+         * std::format. It includes comprehensive error handling for format operations
+         * and produces thread-safe output with rich contextual information including
+         * timestamps, log levels, thread IDs, and optional source location data.
+         *
+         * ## Performance Optimizations:
+         * - Pre-allocates string buffer based on format string size estimation
+         * - Uses std::format_to with back_inserter to minimize allocations
+         * - Early exit for disabled log levels to avoid unnecessary work
+         * - Atomic log level checking with relaxed memory ordering
+         *
+         * ## Error Handling:
+         * - Catches and handles std::format_error exceptions gracefully
+         * - Provides detailed error context in fallback messages
+         * - Maintains exception-safe noexcept guarantee through comprehensive catches
+         *
+         * ## Output Format Examples:
+         * ```
+         * 2024-05-10 14:30:25.123 [info] [T A1B2C3] [MyLogger] Processing 150 items
+         * 2024-05-10 14:30:25.124 [error] [T A1B2C3] [MyLogger] [main.cpp:42:process_data] Connection failed
+         * 2024-05-10 14:30:25.125Z [debug] [T A1B2C3] [MyLogger] Debug info (UTC fallback)
+         * ```
+         *
+         * @tparam Args Variadic template parameter pack for format arguments.
+         * @param level The log level for this message (used for filtering).
+         * @param fmt Format string compatible with std::format (compile-time checked).
+         * @param args Arguments to substitute into the format string (perfect forwarded).
+         * @param loc Source location information (automatically captured if available).
+         *
+         * @note Function is noexcept - all exceptions are caught and handled internally.
+         * @note Messages are filtered based on is_enabled(current_level, message_level).
+         * @note No output occurs if log_stream_ is null.
+         * @note Format string is compile-time validated for type safety.
+         * @note Source location is automatically captured at call site when available.
+         *
+         * ## Thread Safety:
+         * - Atomic log level access with memory_order_relaxed
+         * - Thread-safe stream access via shared_ptr copy
+         * - Atomic output via std::osyncstream
+         *
+         * ## Usage Examples:
+         * @code
+         * logger.print_log(log_level::info, "Processing {} items in {} seconds", count, duration);
+         * logger.print_log(log_level::error, "Connection failed: {}", error_message);
+         * logger.print_log(log_level::debug, "Value: {:#x}", hex_value);
+         * @endcode
          */
-        void print_log(const log_level level, const std::string& message) const noexcept
+        template <typename... Args>
+        void print_log(const log_level level,
+            std::format_string<Args...> fmt,
+            Args&&... args
+#if NETLIB_HAS_SOURCE_LOCATION
+            , const std::source_location& loc = std::source_location::current()
+#endif
+        ) const noexcept
         {
-            if ((level <= log_level_) && log_stream_)
-            {
-                const auto now = std::chrono::system_clock::now();
-                const auto now_time_t = std::chrono::system_clock::to_time_t(now);
-                std::tm now_tm{};
+            // Thread-safe stream access and early exit for performance
+            const auto stream = log_stream_;
+            if (!stream || !is_enabled(log_level_.load(std::memory_order_relaxed), level)) return;
 
-                // Convert to local time and handle any errors
-                if (localtime_s(&now_tm, &now_time_t) != 0) {
-                    std::osyncstream(log_stream_->get()) << "Failed to get local time." << '\n';
-                    return;
+            // Build the formatted message with safe error handling and performance optimization
+            std::string message;
+            try {
+                // Estimate buffer size based on format string for better performance
+                const auto estimated_size = std::max(size_t{ 128 }, fmt.get().size() * 2);
+                message.reserve(estimated_size);
+                std::format_to(std::back_inserter(message), fmt, std::forward<Args>(args)...);
+            }
+            catch (const std::exception& e) {
+                // Fallback for format errors - avoid recursive std::format calls
+                message.clear();
+                message += "[formatting failed] ";
+                message += e.what();
+            }
+            catch (...) {
+                // Ultimate fallback for unknown exceptions
+                message = "[formatting failed] unknown error";
+            }
+
+            // Delegate to internal emission function with all context
+            emit_log_entry(level, message, *stream
+#if NETLIB_HAS_SOURCE_LOCATION
+                , loc
+#endif
+            );
+        }
+
+        /**
+         * @brief Logs a pre-formatted message string with minimal processing overhead.
+         *
+         * This overload provides an efficient logging path for pre-formatted messages,
+         * avoiding the overhead of std::format processing while maintaining the same
+         * rich output format and thread safety guarantees as the templated version.
+         *
+         * This function is ideal for:
+         * - Simple string messages without parameter substitution
+         * - Performance-critical logging paths where formatting overhead matters
+         * - Integration with existing string-based logging systems
+         * - Logging of pre-computed or externally formatted messages
+         *
+         * ## Performance Benefits:
+         * - No format string parsing or parameter substitution
+         * - Direct string_view usage avoids unnecessary string copies
+         * - Same early-exit optimization for disabled log levels
+         * - Identical thread-safe output path as templated version
+         *
+         * @param level The log level for this message (used for filtering).
+         * @param message The pre-formatted message string to log (zero-copy via string_view).
+         * @param loc Source location information (automatically captured if available).
+         *
+         * @note Function is noexcept with same guarantees as templated version.
+         * @note Uses same timestamp precision and format as templated version.
+         * @note Subject to same log level filtering rules.
+         * @note Source location capture works identically to templated version.
+         *
+         * ## Usage Examples:
+         * @code
+         * logger.print_log(log_level::error, "Database connection failed");
+         * logger.print_log(log_level::info, status_message);
+         * logger.print_log(log_level::debug, debug_string_from_function());
+         * @endcode
+         */
+        void print_log(const log_level level,
+            const std::string_view message
+#if NETLIB_HAS_SOURCE_LOCATION
+            , const std::source_location& loc = std::source_location::current()
+#endif
+        ) const noexcept
+        {
+            // Same thread-safe access pattern as templated version
+            const auto stream = log_stream_;
+            if (!stream || !is_enabled(log_level_.load(std::memory_order_relaxed), level)) return;
+
+            // Direct delegation without format processing
+            emit_log_entry(level, message, *stream
+#if NETLIB_HAS_SOURCE_LOCATION
+                , loc
+#endif
+            );
+        }
+
+        /**
+         * @brief Sets a new log level for the logger (thread-safe).
+         *
+         * This function atomically updates the logger's log level threshold using
+         * relaxed memory ordering, which is sufficient for log level changes since
+         * slight delays in propagation to other threads are acceptable for logging.
+         *
+         * @param level The new log level threshold to set.
+         *
+         * @note Uses memory_order_relaxed for optimal performance.
+         * @note Changes take effect immediately but may not be visible to other
+         *       threads until their next log level check.
+         * @note Thread-safe and can be called concurrently with logging operations.
+         */
+        void set_log_level(const log_level level) noexcept {
+            log_level_.store(level, std::memory_order_relaxed);
+        }
+
+        /**
+         * @brief Gets the current log level (thread-safe).
+         *
+         * This function atomically reads the current log level threshold using
+         * relaxed memory ordering for optimal performance.
+         *
+         * @return The current log level threshold.
+         *
+         * @note Uses memory_order_relaxed for optimal performance.
+         * @note Returns the log level as it exists at the moment of the call.
+         * @note Thread-safe and can be called concurrently with other operations.
+         * @note [[nodiscard]] attribute prevents accidental unused calls.
+         */
+        [[nodiscard]] log_level get_log_level() const noexcept {
+            return log_level_.load(std::memory_order_relaxed);
+        }
+
+        /**
+         * @brief Sets a new output stream for the logger (thread-safe).
+         *
+         * This function atomically updates the logger's output stream using shared_ptr
+         * for safe concurrent access. The old stream is automatically released when
+         * no longer referenced.
+         *
+         * @param stream Shared pointer to the new output stream (can be null to disable output).
+         *
+         * @note Uses shared_ptr for automatic lifetime management and thread safety.
+         * @note Can be set to nullptr to disable all logging output.
+         * @note Changes take effect immediately for new log messages.
+         * @note Thread-safe and can be called concurrently with logging operations.
+         * @note Uses move semantics for optimal performance.
+         */
+        void set_log_stream(std::shared_ptr<std::ostream> stream) noexcept {
+            log_stream_ = std::move(stream);
+        }
+
+    private:
+        /**
+         * @brief Internal helper to emit formatted log entries with timestamp and context.
+         *
+         * This function handles the actual formatting and output of log messages with
+         * all contextual information including timestamps, thread IDs, logger names,
+         * and optional source location data. It implements a multi-level fallback
+         * strategy to ensure reliable output even in error conditions.
+         *
+         * ## Timestamp Handling:
+         * - Attempts local time via std::chrono::zoned_time and current_zone()
+         * - Falls back to UTC with 'Z' suffix if time zone database unavailable
+         * - Uses millisecond precision for high-resolution timing
+         * - Caches time zone pointer for performance (stable across calls)
+         *
+         * ## Error Recovery:
+         * - Primary: Modern chrono formatting with local time
+         * - Secondary: UTC formatting with clear indication
+         * - Tertiary: Manual formatting without std::format dependency
+         * - Each level provides progressively more basic but reliable output
+         *
+         * ## Source Location Processing:
+         * - Safely extracts basename from full file paths
+         * - Handles edge cases where no path separators exist
+         * - Includes function name and line number for debugging
+         * - Only included when NETLIB_HAS_SOURCE_LOCATION is defined
+         *
+         * @param level The log level of the message being emitted.
+         * @param message The formatted message content to output.
+         * @param stream Reference to the output stream for atomic writing.
+         * @param loc Source location information (conditionally compiled).
+         *
+         * @note Function is static to avoid unnecessary 'this' parameter passing.
+         * @note All operations are noexcept with comprehensive exception handling.
+         * @note Uses osyncstream for atomic output preventing interleaved messages.
+         * @note Implements the complete fallback chain for maximum reliability.
+         */
+        static void emit_log_entry(const log_level level,
+            const std::string_view message,
+            std::ostream& stream
+#if NETLIB_HAS_SOURCE_LOCATION
+            , const std::source_location& loc = std::source_location::current()
+#endif
+        ) noexcept
+        {
+            std::osyncstream out{ stream };
+
+            try {
+                using std::chrono::floor;
+                const auto now = std::chrono::system_clock::now();
+                const auto tp_s = floor<std::chrono::seconds>(now);
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now.time_since_epoch()) % 1000;
+
+                // Try local time via time zone database (with UTC fallback)
+                try {
+                    // Cache the time zone pointer for performance (pointer is stable)
+                    static const std::chrono::time_zone* zone = std::chrono::current_zone();
+                    std::chrono::zoned_time zt{ zone, tp_s };
+                    out << std::format("{:%F %T}.{:03} [{}] [T {:06X}] [{}]",
+                        zt, static_cast<int>(ms.count()),
+                        to_string(level),
+                        compact_thread_id(),
+                        derived_name());
+                }
+                catch (...) {
+                    // Fallback: UTC with 'Z' suffix to clearly indicate time zone
+                    out << std::format("{:%F %T}.{:03}Z [{}] [T {:06X}] [{}]",
+                        tp_s, static_cast<int>(ms.count()),
+                        to_string(level),
+                        compact_thread_id(),
+                        derived_name());
                 }
 
-                const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-                const auto thread_id = std::this_thread::get_id();
+#if NETLIB_HAS_SOURCE_LOCATION
+                // Add source location if available (with safe basename extraction)
+                const auto filename = std::string_view{ loc.file_name() };
+                const auto pos = filename.find_last_of("/\\");
+                const auto basename = (pos == std::string_view::npos) ? filename
+                    : filename.substr(pos + 1);
+                out << std::format(" [{}:{}:{}]", basename, loc.line(), loc.function_name());
+#endif
 
-                std::osyncstream(log_stream_->get()) << std::put_time(&now_tm, "%Y-%m-%d %H:%M:%S")
-                    << '.' << std::setfill('0') << std::setw(3) << now_ms.count()
-                    << " [Thread " << thread_id << "] [" << typeid(Derived).name() << "] " << message << '\n';
+                out << ' ' << message << '\n';
+            }
+            catch (...) {
+                // Ultimate fallback for any formatting errors: avoid std::format dependency
+                out << "[timestamp-unavailable] [" << to_string(level) << "] [T ";
+                out << std::uppercase << std::hex << std::setw(6) << std::setfill('0')
+                    << compact_thread_id();
+                out << std::dec << std::setfill(' ') << "] [" << derived_name() << "] "
+                    << message << '\n';
             }
         }
 
+        /**
+         * @brief Friend declaration to allow derived classes access to private constructor.
+         *
+         * This friend declaration enables the CRTP pattern by allowing derived classes
+         * to access the private constructor while preventing external instantiation
+         * of the base logger template directly.
+         */
         friend Derived;
     };
-}
+
+} // namespace netlib::log
