@@ -24,10 +24,18 @@
 
 #if NETLIB_HAS_SOURCE_LOCATION
 #define NETLIB_LOG(level_, fmt_, ...) \
-      print_log_with_loc((level_), std::source_location::current(), (fmt_), ##__VA_ARGS__)
+    do { \
+        if (get_log_level() >= (level_)) { \
+            print_log_with_loc((level_), std::source_location::current(), (fmt_), ##__VA_ARGS__); \
+        } \
+    } while(0)
 #else
 #define NETLIB_LOG(level_, fmt_, ...) \
-      print_log((level_), (fmt_), ##__VA_ARGS__)
+    do { \
+        if (get_log_level() >= (level_)) { \
+            print_log((level_), (fmt_), ##__VA_ARGS__); \
+        } \
+    } while(0)
 #endif
 
 /**
