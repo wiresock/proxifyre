@@ -36,18 +36,23 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
     {
     case log_level_mx::error:
         um_log_level = netlib::log::log_level::error;
+        set_global_log_verbosity(netlib::log::log_verbosity::level);
         break;
     case log_level_mx::warning:
         um_log_level = netlib::log::log_level::warning;
+        set_global_log_verbosity(netlib::log::log_verbosity::level);
         break;
     case log_level_mx::info:
         um_log_level = netlib::log::log_level::info;
+        set_global_log_verbosity(netlib::log::log_verbosity::logger | netlib::log::log_verbosity::level);
         break;
     case log_level_mx::deb:
         um_log_level = netlib::log::log_level::debug;
+        set_global_log_verbosity(netlib::log::log_verbosity::thread | netlib::log::log_verbosity::path | netlib::log::log_verbosity::level);
         break;
     case log_level_mx::all:
         um_log_level = netlib::log::log_level::all;
+        set_global_log_verbosity(netlib::log::log_verbosity::all);
         break;
     }
 

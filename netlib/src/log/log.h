@@ -22,22 +22,6 @@
 #define NETLIB_HAS_SOURCE_LOCATION 0
 #endif
 
-#if NETLIB_HAS_SOURCE_LOCATION
-#define NETLIB_LOG(level_, fmt_, ...) \
-    do { \
-        if (get_log_level() >= (level_)) { \
-            print_log_with_loc((level_), std::source_location::current(), (fmt_), ##__VA_ARGS__); \
-        } \
-    } while(0)
-#else
-#define NETLIB_LOG(level_, fmt_, ...) \
-    do { \
-        if (get_log_level() >= (level_)) { \
-            print_log((level_), (fmt_), ##__VA_ARGS__); \
-        } \
-    } while(0)
-#endif
-
 /**
  * @file log.h
  * @brief Thread-safe logging infrastructure for the netlib library.
@@ -59,6 +43,7 @@
  * - Optional compile-time source location integration
  * - Performance-optimized string formatting with pre-allocation
  * - Multi-level fallback strategies for maximum reliability
+ * - Global verbosity control for runtime output customization
  *
  * ## Source Location Architecture:
  * The logger implements a sophisticated source location capture system:
@@ -75,12 +60,104 @@
  * - Static caching of expensive resources like time zone information
  *
  * @author Vadim Smirnov
- * @version 1.2
+ * @version 1.3
  * @date 2024-08-10
  * @since C++20
  */
 
 namespace netlib::log {
+
+    /**
+     * @brief Verbosity flags for controlling log output components.
+     *
+     * These flags can be combined using bitwise OR operations to control
+     * which components are included in log output. Each flag represents
+     * a specific piece of contextual information that can be enabled or
+     * disabled independently.
+     */
+    enum class log_verbosity : std::uint8_t {
+        none = 0x00,  ///< No additional information (message only)
+        timestamp = 0x01,  ///< Include timestamp in log output
+        thread = 0x02,  ///< Include thread ID in log output
+        logger = 0x04,  ///< Include logger name in log output
+        path = 0x08,  ///< Include source file path/location in log output
+        level = 0x10,  ///< Include log level in output
+        all = 0x1F,  ///< Include all available information (default)
+    };
+
+    /**
+     * @brief Bitwise OR operator for log_verbosity flags.
+     * @param lhs Left-hand side verbosity flag
+     * @param rhs Right-hand side verbosity flag
+     * @return Combined verbosity flags
+     */
+    constexpr log_verbosity operator|(log_verbosity lhs, log_verbosity rhs) noexcept {
+        return static_cast<log_verbosity>(
+            static_cast<std::uint8_t>(lhs) | static_cast<std::uint8_t>(rhs)
+            );
+    }
+
+    /**
+     * @brief Bitwise AND operator for log_verbosity flags.
+     * @param lhs Left-hand side verbosity flag
+     * @param rhs Right-hand side verbosity flag
+     * @return Combined verbosity flags
+     */
+    constexpr log_verbosity operator&(log_verbosity lhs, log_verbosity rhs) noexcept {
+        return static_cast<log_verbosity>(
+            static_cast<std::uint8_t>(lhs) & static_cast<std::uint8_t>(rhs)
+            );
+    }
+
+    /**
+     * @brief Bitwise OR assignment operator for log_verbosity flags.
+     * @param lhs Left-hand side verbosity flag (modified in place)
+     * @param rhs Right-hand side verbosity flag
+     * @return Reference to modified lhs
+     */
+    constexpr log_verbosity& operator|=(log_verbosity& lhs, const log_verbosity rhs) noexcept {
+        lhs = lhs | rhs;
+        return lhs;
+    }
+
+    /**
+     * @brief Checks if a specific verbosity flag is set.
+     * @param flags The verbosity flags to check
+     * @param flag The specific flag to test for
+     * @return true if the flag is set, false otherwise
+     */
+    constexpr bool has_verbosity_flag(const log_verbosity flags, const log_verbosity flag) noexcept {
+        return (flags & flag) != log_verbosity::none;
+    }
+
+    /**
+     * @brief Global verbosity control for all loggers.
+     *
+     * This static atomic variable controls which components are included in log output
+     * across all logger instances. It can be modified at runtime to dynamically adjust
+     * logging verbosity without recompiling. Uses relaxed memory ordering for optimal
+     * performance as exact synchronization timing is not critical for logging.
+     *
+     * @note Thread-safe for concurrent read/write operations
+     * @note Default value includes all components (timestamp, thread, logger, level, path)
+     */
+    inline std::atomic<log_verbosity> global_log_verbosity{ log_verbosity::all };
+
+    /**
+     * @brief Sets the global log verbosity flags.
+     * @param verbosity The verbosity flags to set
+     */
+    inline void set_global_log_verbosity(const log_verbosity verbosity) noexcept {
+        global_log_verbosity.store(verbosity, std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Gets the current global log verbosity flags.
+     * @return The current verbosity flags
+     */
+    inline log_verbosity get_global_log_verbosity() noexcept {
+        return global_log_verbosity.load(std::memory_order_relaxed);
+    }
 
     /**
      * @brief Utility function to wrap an existing std::ostream into a shared_ptr without ownership.
@@ -188,7 +265,7 @@ namespace netlib::log {
      * - "all" ? log_level::all
      * - anything else ? log_level::error (safe default)
      */
-    constexpr log_level from_string(std::string_view s) noexcept {
+    constexpr log_level from_string(const std::string_view s) noexcept {
         return s == "error" ? log_level::error :
             s == "warning" ? log_level::warning :
             s == "info" ? log_level::info :
@@ -248,7 +325,8 @@ namespace netlib::log {
      * This class template provides a comprehensive, thread-safe logging infrastructure
      * using the Curiously Recurring Template Pattern (CRTP) for optimal performance
      * and type safety. It offers formatted logging with automatic timestamping,
-     * thread identification, and optional source location information.
+     * thread identification, optional source location information, and configurable
+     * output verbosity.
      *
      * ## Key Features:
      *
@@ -277,15 +355,18 @@ namespace netlib::log {
      * - Chrono time zones for proper local time handling
      * - osyncstream for thread-safe output coordination
      *
-     * ## Output Format:
+     * ### Configurable Output:
+     * - Global verbosity control for runtime output customization
+     * - Individual component enable/disable (timestamp, thread, logger, path, level)
+     * - Dynamic reconfiguration without recompilation
      *
-     * Standard format: `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] [T XXXXXX] [Logger] Message`
+     * ## Output Format Examples:
      *
-     * With source location: `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] [T XXXXXX] [Logger] [file:line:func] Message`
+     * Full verbosity: `[info] 2024-08-10 14:30:25.123 [T A1B2C3] [Logger] [file:line:func] Message`
      *
-     * Fallback format: `YYYY-MM-DD HH:MM:SS.mmmZ [LEVEL] [T XXXXXX] [Logger] Message` (UTC)
+     * Minimal: `[info] Message`
      *
-     * Error fallback: `[timestamp-unavailable] [LEVEL] [T XXXXXX] [Logger] Message`
+     * Production: `[info] 2024-08-10 14:30:25.123 [Logger] Message`
      *
      * @tparam Derived The derived logger type (CRTP pattern).
      *
@@ -299,6 +380,9 @@ namespace netlib::log {
      *     application_logger(log_level level, std::shared_ptr<std::ostream> stream)
      *         : logger(level, std::move(stream)) {}
      * };
+     *
+     * // Configure verbosity
+     * set_global_log_verbosity(log_verbosity::timestamp | log_verbosity::level | log_verbosity::logger);
      *
      * // Usage
      * auto app_logger = std::make_shared<application_logger>(
@@ -414,9 +498,9 @@ namespace netlib::log {
          * - Early exit optimization for disabled log levels
          *
          * ## Output Format:
-         * Produces the same rich output format as other logging methods:
+         * Produces configurable output format based on global verbosity settings:
          * ```
-         * 2024-08-10 14:30:25.123 [info] [T A1B2C3] [MyLogger] [file.cpp:42:function] Message
+         * [info] 2024-08-10 14:30:25.123 [T A1B2C3] [MyLogger] [file.cpp:42:function] Message
          * ```
          *
          * ## Error Handling:
@@ -509,9 +593,9 @@ namespace netlib::log {
          *
          * ## Output Format Examples:
          * ```
-         * 2024-05-10 14:30:25.123 [info] [T A1B2C3] [MyLogger] Processing 150 items
-         * 2024-05-10 14:30:25.124 [error] [T A1B2C3] [MyLogger] [main.cpp:42:process_data] Connection failed
-         * 2024-05-10 14:30:25.125Z [debug] [T A1B2C3] [MyLogger] Debug info (UTC fallback)
+         * [info] 2024-05-10 14:30:25.123 [T A1B2C3] [MyLogger] Processing 150 items
+         * [error] 2024-05-10 14:30:25.124 [T A1B2C3] [MyLogger] [main.cpp:42:process_data] Connection failed
+         * [debug] 2024-05-10 14:30:25.125Z [T A1B2C3] [MyLogger] Debug info (UTC fallback)
          * ```
          *
          * @tparam Args Variadic template parameter pack for format arguments.
@@ -780,12 +864,12 @@ namespace netlib::log {
 #endif
 
         /**
-         * @brief Internal helper to emit formatted log entries with timestamp and context.
+         * @brief Internal helper to emit formatted log entries with configurable verbosity.
          *
          * This function handles the actual formatting and output of log messages with
-         * all contextual information including timestamps, thread IDs, logger names,
-         * and optional source location data. It implements a multi-level fallback
-         * strategy to ensure reliable output even in error conditions.
+         * contextual information controlled by the global verbosity settings. Components
+         * like timestamps, thread IDs, logger names, log levels, and source location
+         * can be selectively enabled or disabled based on the current verbosity configuration.
          *
          * ## Source Location Processing:
          * When NETLIB_HAS_SOURCE_LOCATION is enabled, this function:
@@ -827,45 +911,73 @@ namespace netlib::log {
             std::osyncstream out{ stream };
 
             try {
-                using std::chrono::floor;
-                const auto now = std::chrono::system_clock::now();
-                const auto tp_s = floor<std::chrono::seconds>(now);
-                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now.time_since_epoch()) % 1000;
+                const auto verbosity = get_global_log_verbosity();
+                bool first_component = true;
 
-                // Try local time via time zone database (with UTC fallback)
-                try {
-                    // Cache the time zone pointer for performance (pointer is stable)
-                    static const std::chrono::time_zone* zone = std::chrono::current_zone();
-                    std::chrono::zoned_time zt{ zone, tp_s };
-                    out << std::format("{:%F %T}.{:03} [{}] [T {:06X}] [{}]",
-                        zt, static_cast<int>(ms.count()),
-                        to_string(level),
-                        compact_thread_id(),
-                        derived_name());
+                // Helper to add component separator
+                auto add_separator = [&]() {
+                    if (!first_component) out << ' ';
+                    first_component = false;
+                    };
+
+                // Conditionally include log level
+                if (has_verbosity_flag(verbosity, log_verbosity::level)) {
+                    add_separator();
+                    out << '[' << to_string(level) << ']';
                 }
-                catch (...) {
-                    // Fallback: UTC with 'Z' suffix to clearly indicate time zone
-                    out << std::format("{:%F %T}.{:03}Z [{}] [T {:06X}] [{}]",
-                        tp_s, static_cast<int>(ms.count()),
-                        to_string(level),
-                        compact_thread_id(),
-                        derived_name());
+
+                // Conditionally include timestamp
+                if (has_verbosity_flag(verbosity, log_verbosity::timestamp)) {
+                    add_separator();
+
+                    using std::chrono::floor;
+                    const auto now = std::chrono::system_clock::now();
+                    const auto tp_s = floor<std::chrono::seconds>(now);
+                    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now.time_since_epoch()) % 1000;
+
+                    try {
+                        // Cache the time zone pointer for performance (pointer is stable)
+                        static const std::chrono::time_zone* zone = std::chrono::current_zone();
+                        std::chrono::zoned_time zt{ zone, tp_s };
+                        out << std::format("{:%F %T}.{:03}", zt, static_cast<int>(ms.count()));
+                    }
+                    catch (...) {
+                        // Fallback: UTC with 'Z' suffix to clearly indicate time zone
+                        out << std::format("{:%F %T}.{:03}Z", tp_s, static_cast<int>(ms.count()));
+                    }
+                }
+
+                // Conditionally include thread ID
+                if (has_verbosity_flag(verbosity, log_verbosity::thread)) {
+                    add_separator();
+                    out << "[T " << std::format("{:06X}", compact_thread_id()) << ']';
+                }
+
+                // Conditionally include logger name
+                if (has_verbosity_flag(verbosity, log_verbosity::logger)) {
+                    add_separator();
+                    out << '[' << derived_name() << ']';
                 }
 
 #if NETLIB_HAS_SOURCE_LOCATION
-                // Add source location if available (with safe basename extraction)
-                const auto filename = std::string_view{ loc.file_name() };
-                const auto pos = filename.find_last_of("/\\");
-                const auto basename = (pos == std::string_view::npos) ? filename
-                    : filename.substr(pos + 1);
-                out << std::format(" [{}:{}:{}]", basename, loc.line(), loc.function_name());
+                // Conditionally include source location
+                if (has_verbosity_flag(verbosity, log_verbosity::path)) {
+                    add_separator();
+                    const auto filename = std::string_view{ loc.file_name() };
+                    const auto pos = filename.find_last_of("/\\");
+                    const auto basename = (pos == std::string_view::npos) ? filename
+                        : filename.substr(pos + 1);
+                    out << std::format("[{}:{}:{}]", basename, loc.line(), loc.function_name());
+                }
 #endif
 
-                out << ' ' << message << '\n';
+                // Always add the message
+                if (!first_component) out << ' ';
+                out << message << '\n';
             }
             catch (...) {
-                // Ultimate fallback for any formatting errors: avoid std::format dependency
+                // Ultimate fallback for any formatting errors
                 out << "[timestamp-unavailable] [" << to_string(level) << "] [T ";
                 out << std::uppercase << std::hex << std::setw(6) << std::setfill('0')
                     << compact_thread_id();
@@ -883,5 +995,21 @@ namespace netlib::log {
          */
         friend Derived;
     };
+
+#if NETLIB_HAS_SOURCE_LOCATION
+#define NETLIB_LOG(level_, fmt_, ...) \
+    do { \
+        if (get_log_level() >= (level_)) { \
+            print_log_with_loc((level_), std::source_location::current(), (fmt_), ##__VA_ARGS__); \
+        } \
+    } while(0)
+#else
+#define NETLIB_LOG(level_, fmt_, ...) \
+    do { \
+        if (get_log_level() >= (level_)) { \
+            print_log((level_), (fmt_), ##__VA_ARGS__); \
+        } \
+    } while(0)
+#endif
 
 } // namespace netlib::log

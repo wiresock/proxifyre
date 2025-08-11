@@ -112,9 +112,9 @@ namespace ProxiFyre
             foreach (var entry in e.Log.Where(entry => entry != null))
             {
                 // Format log entry with ISO 8601 timestamp, event, description, and data.
-                var logMessage =
-                    $"{DateTimeOffset.FromUnixTimeMilliseconds(entry.TimeStamp):u} | Event: {entry.Event} | Description: {entry.Description ?? string.Empty} | Data: {entry.Data}";
-                LoggerInstance.Info(logMessage);
+                //var logMessage =
+                //    $"{DateTimeOffset.FromUnixTimeMilliseconds(entry.TimeStamp):u} | Event: {entry.Event} | Description: {entry.Description ?? string.Empty} | Data: {entry.Data}";
+                LoggerInstance.Info(entry.Description?.Replace("\n", "").Replace("\r", ""));
             }
         }
 
