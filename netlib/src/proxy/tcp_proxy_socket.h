@@ -754,9 +754,12 @@ namespace proxy
          *
          * This method checks whether both the local and remote sockets are closed and all I/O buffers
          * are empty, indicating that the session can be safely removed and its resources reclaimed.
-         * If the session is not yet ready for removal, it also checks for idle timeout (120 seconds).
-         * If the session has been idle for too long, it attempts to close any remaining sockets and
-         * resets the timestamp to delay repeated cleanup attempts.
+         * If the session is not yet ready for removal, it also checks for an extreme idle timeout (1 hour)
+         * as a safety measure to handle truly abandoned connections that somehow didn't get closed properly.
+         *
+         * The method prioritizes natural connection lifecycle management over timeout-based forced closure.
+         * Modern web applications (WebSockets, Server-Sent Events, long-polling) can legitimately remain
+         * idle for extended periods, so the timeout serves only as a safety net for abandoned connections.
          *
          * Thread safety is ensured by acquiring a lock on the session state.
          *
@@ -765,6 +768,8 @@ namespace proxy
          *
          * @note This method may be called periodically by a cleanup thread to manage session lifetimes.
          *       It is safe to call concurrently with other session operations.
+         *       The 1-hour safety timeout prevents memory leaks from truly abandoned connections while
+         *       allowing legitimate long-lived connections to function normally.
          */
         bool is_ready_for_removal()
         {
@@ -792,10 +797,7 @@ namespace proxy
                     NETLIB_LOG(log_level::info, "is_ready_for_removal: Session is ready for removal - all sockets closed and buffers empty");
                     return true;
                 }
-                else
-                {
-                    NETLIB_LOG(log_level::debug, "is_ready_for_removal: Sockets closed but buffers not empty, session not ready for removal");
-                }
+                NETLIB_LOG(log_level::debug, "is_ready_for_removal: Sockets closed but buffers not empty, session not ready for removal");
             }
             else
             {
@@ -804,17 +806,18 @@ namespace proxy
                     remote_socket_ == static_cast<SOCKET>(INVALID_SOCKET) ? "closed" : "open");
             }
 
-            // Check for idle timeout (120 seconds)
+            // Only check for extreme timeout as a safety measure (1 hour instead of 2 minutes)
+            // This handles truly abandoned connections that somehow didn't get closed properly
             const auto current_time = std::chrono::steady_clock::now();
             const auto idle_duration = current_time - timestamp_;
             const auto idle_seconds = std::chrono::duration_cast<std::chrono::seconds>(idle_duration).count();
 
-            NETLIB_LOG(log_level::debug, "is_ready_for_removal: Session idle time: {} seconds (timeout: 120 seconds)",
+            NETLIB_LOG(log_level::debug, "is_ready_for_removal: Session idle time: {} seconds (safety timeout: 3600 seconds)",
                 idle_seconds);
 
-            if (idle_duration > 120s)
+            if (idle_duration > 1h)  // Changed from 120s to 1 hour as safety measure
             {
-                NETLIB_LOG(log_level::info, "is_ready_for_removal: Session has been idle for {} seconds, triggering cleanup", idle_seconds);
+                NETLIB_LOG(log_level::warning, "is_ready_for_removal: Session has been idle for {} seconds (1 hour), performing safety cleanup", idle_seconds);
 
                 if (sockets_closed)
                 {
@@ -823,37 +826,37 @@ namespace proxy
                     close_client<true>(true, true);
                     close_client<true>(true, false);
 
-                    NETLIB_LOG(log_level::debug, "is_ready_for_removal: Buffer cleanup completed for idle session");
+                    NETLIB_LOG(log_level::debug, "is_ready_for_removal: Buffer cleanup completed for abandoned session");
                 }
                 else
                 {
-                    NETLIB_LOG(log_level::debug, "is_ready_for_removal: Sockets still open, performing forced closure due to idle timeout");
+                    NETLIB_LOG(log_level::warning, "is_ready_for_removal: Sockets still open after 1 hour idle - likely abandoned connection, performing safety closure");
 
                     if (local_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                     {
-                        NETLIB_LOG(log_level::debug, "is_ready_for_removal: Closing idle local socket {}",
+                        NETLIB_LOG(log_level::warning, "is_ready_for_removal: Closing abandoned local socket {}",
                             static_cast<int>(local_socket_));
                     }
 
                     if (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                     {
-                        NETLIB_LOG(log_level::debug, "is_ready_for_removal: Closing idle remote socket {}",
+                        NETLIB_LOG(log_level::warning, "is_ready_for_removal: Closing abandoned remote socket {}",
                             static_cast<int>(remote_socket_));
                     }
 
                     close_client<true>(false, true);
                     close_client<true>(false, false);
 
-                    // Extend timestamp by 10 seconds to avoid immediate re-cleanup attempts
-                    timestamp_ += 10s;
+                    // Extend timestamp by 1 minute to avoid immediate re-cleanup attempts
+                    timestamp_ += 1min;
 
-                    NETLIB_LOG(log_level::debug, "is_ready_for_removal: Forced closure completed, timestamp extended by 10 seconds");
+                    NETLIB_LOG(log_level::debug, "is_ready_for_removal: Safety closure completed, timestamp extended by 1 minute");
                 }
             }
             else
             {
-                NETLIB_LOG(log_level::debug, "is_ready_for_removal: Session within idle timeout, {} seconds remaining",
-                    120 - idle_seconds);
+                NETLIB_LOG(log_level::debug, "is_ready_for_removal: Session within safety timeout, {} seconds remaining",
+                    3600 - idle_seconds);
             }
 
             NETLIB_LOG(log_level::debug, "is_ready_for_removal: Session not ready for removal");
