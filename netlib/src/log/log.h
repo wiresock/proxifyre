@@ -999,15 +999,15 @@ namespace netlib::log {
 #if NETLIB_HAS_SOURCE_LOCATION
 #define NETLIB_LOG(level_, fmt_, ...) \
     do { \
-        if (get_log_level() >= (level_)) { \
-            print_log_with_loc((level_), std::source_location::current(), (fmt_), ##__VA_ARGS__); \
+        if (this->get_log_level() >= (level_)) { \
+            this->print_log_with_loc((level_), std::source_location::current(), (fmt_), ##__VA_ARGS__); \
         } \
     } while(0)
 #else
 #define NETLIB_LOG(level_, fmt_, ...) \
     do { \
-        if (get_log_level() >= (level_)) { \
-            print_log((level_), (fmt_), ##__VA_ARGS__); \
+        if (this->get_log_level() >= (level_)) { \
+            this->print_log((level_), (fmt_), ##__VA_ARGS__); \
         } \
     } while(0)
 #endif
