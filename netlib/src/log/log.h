@@ -127,7 +127,7 @@ namespace netlib::log {
      * @return true if the flag is set, false otherwise
      */
     constexpr bool has_verbosity_flag(const log_verbosity flags, const log_verbosity flag) noexcept {
-        return (flags & flag) != log_verbosity::none;
+        return static_cast<bool>(flags & flag);
     }
 
     /**
@@ -278,23 +278,22 @@ namespace netlib::log {
      * @brief Determines if a message should be logged based on configured and message log levels.
      *
      * This function implements the core logic for hierarchical log level filtering.
-     * It uses a ranking system to compare log levels and provides special handling
-     * for the 'all' level. The function is constexpr and can be evaluated at
-     * compile-time for optimal performance in hot paths.
+     * It uses a direct comparison system optimized for performance in hot paths.
+     * The function is constexpr and can be evaluated at compile-time.
      *
-     * The ranking system treats log levels as follows:
-     * - error = rank 0 (most restrictive)
-     * - warning = rank 1
-     * - info = rank 2
-     * - debug = rank 3
-     * - all = rank 4 (least restrictive, but special-cased)
+     * The hierarchy treats log levels as follows:
+     * - error = 0 (most restrictive - only shows errors)
+     * - warning = 1 (shows warnings and errors)
+     * - info = 2 (shows info, warnings, and errors)
+     * - debug = 4 (shows debug, info, warnings, and errors)
+     * - all = 255 (shows everything, special-cased)
      *
      * @param configured The logger's configured log level threshold.
      * @param msg The log level of the message being evaluated.
      * @return true if the message should be logged, false otherwise.
      *
      * @note The 'all' configured level always returns true regardless of message level.
-     * @note Uses constexpr ranking for optimal performance and compile-time evaluation.
+     * @note Uses direct enum value comparison for optimal performance.
      * @note This function is the single source of truth for log level decisions.
      *
      * Examples:
@@ -303,20 +302,12 @@ namespace netlib::log {
      * - is_enabled(all, debug) ? true (all level accepts everything)
      */
     constexpr bool is_enabled(const log_level configured, const log_level msg) noexcept {
-        if (configured == log_level::all) return true;
+        // Fast path: 'all' level accepts everything
+        if (configured == log_level::all) [[likely]] return true;
 
-        // Rank levels by severity: error < warning < info < debug
-        auto rank = [](const log_level l) constexpr -> int {
-            switch (l) {
-            case log_level::error:   return 0;
-            case log_level::warning: return 1;
-            case log_level::info:    return 2;
-            case log_level::debug:   return 3;
-            case log_level::all:     return 4; // highest
-            }
-            return -1; // should never happen with valid enum values
-            };
-        return rank(msg) <= rank(configured);
+        // A message should be logged if the configured level is >= the message level
+        // in terms of verbosity (higher numeric values = more verbose)
+        return static_cast<std::uint8_t>(configured) >= static_cast<std::uint8_t>(msg);
     }
 
     /**
@@ -1003,6 +994,14 @@ namespace netlib::log {
             this->print_log_with_loc((level_), std::source_location::current(), (fmt_), ##__VA_ARGS__); \
         } \
     } while(0)
+
+#define NETLIB_LOG_PTR(logger_ptr_, level_, fmt_, ...) \
+    do { \
+        if ((logger_ptr_) && (logger_ptr_)->get_log_level() >= (level_)) { \
+            (logger_ptr_)->print_log_with_loc((level_), std::source_location::current(), (fmt_), ##__VA_ARGS__); \
+        } \
+    } while(0)
+
 #else
 #define NETLIB_LOG(level_, fmt_, ...) \
     do { \
@@ -1010,6 +1009,14 @@ namespace netlib::log {
             this->print_log((level_), (fmt_), ##__VA_ARGS__); \
         } \
     } while(0)
+
+#define NETLIB_LOG_PTR(logger_ptr_, level_, fmt_, ...) \
+    do { \
+        if ((logger_ptr_) && (logger_ptr_)->get_log_level() >= (level_)) { \
+            (logger_ptr_)->print_log((level_), (fmt_), ##__VA_ARGS__); \
+        } \
+    } while(0)
+
 #endif
 
 } // namespace netlib::log

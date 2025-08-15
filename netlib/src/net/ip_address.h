@@ -496,6 +496,19 @@ namespace std
     };
 
     /// <summary>
+    /// Formatter specialization for std::format support of std::variant<net::ip_address_v4, net::ip_address_v6>
+    /// </summary>
+    template<>
+    struct formatter<std::variant<net::ip_address_v4, net::ip_address_v6>> : formatter<std::string> {
+        template<typename FormatContext>
+        auto format(const std::variant<net::ip_address_v4, net::ip_address_v6>& addr, FormatContext& ctx) const {
+            // Use std::visit to call the appropriate string conversion
+            return formatter<std::string>::format(
+                std::visit([](const auto& ip) { return std::string(ip); }, addr), ctx);
+        }
+    };
+
+    /// <summary>
     /// Hash for net::ip_address_v6
     /// </summary>
     template <>
