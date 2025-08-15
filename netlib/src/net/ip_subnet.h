@@ -181,6 +181,11 @@ namespace net
             return false;
         }
 
+        /// <summary>
+        /// Constructs an ip_subnet object from a CIDR notation string.
+        /// </summary>
+        /// <param name="subnet">The CIDR notation string (e.g., "192.168.1.0/24" or "2001:db8::/32").</param>
+        /// <returns>An optional ip_subnet object. If the CIDR notation is invalid, returns an empty optional.</returns>
         static std::optional<ip_subnet<T>> from_cidr(const std::string& subnet)
         {
             if (const auto pos = subnet.find('/'); pos != std::string::npos)
@@ -227,7 +232,7 @@ namespace net
                         {
                             if (mask <= 128)
                             {
-                                uint8_t address_mask[ip_address_v6::ipv6_address_max_length] = { 0 };
+                                uint8_t address_mask[ip_address_v6::ipv6_address_max_length] = {};
 
                                 const auto maxed_bytes = mask / 8;
                                 auto last_byte_bits = mask % 8;

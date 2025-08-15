@@ -19,6 +19,20 @@
 
 namespace net
 {
+    struct ip_address_v4;
+    struct ip_address_v6;
+
+    /**
+     * @brief A concept that checks if a given type is either net::ip_address_v4 or net::ip_address_v6
+     *
+     * This concept is used to constrain template parameters to be one of the two specific IP address types.
+     * The std::is_same function is used to perform the type comparison.
+     * This concept can be used in template arguments to provide compile-time type checking,
+     * ensuring the correct usage of IP address related functions or classes.
+      */
+    template <typename T>
+    concept ip_address = std::is_same_v<T, ip_address_v4> || std::is_same_v<T, ip_address_v6>;
+
     // --------------------------------------------------------------------------------
     /// <summary>
     /// Wrapper for in_addr. Represents IP version 4 address.
@@ -99,7 +113,7 @@ namespace net
         /// Attempts to parse std::string and create ip_address_v4 object value
         /// </summary>
         /// <param name="ip">IPv4 address represented as std::string</param>
-        /// <returns>pair of boolean and ip_address_v4, if boolean is true</returns>
+        /// <returns>a pair of  boolean and ip_address_v4, if boolean is true</returns>
         static std::pair<bool, ip_address_v4> from_string(const std::string& ip) noexcept
         {
             PCSTR terminator = nullptr;
@@ -147,9 +161,9 @@ namespace net
         bool operator <(const ip_address_v4& rhs) const noexcept { return (S_un.S_addr < rhs.S_un.S_addr); }
 
         /// <summary>
-        /// Checks if contains an IPv4 auto-configuration address(169.254.xxx.xxx)
+        /// Checks if contains an IPv4 autoconfiguration address(169.254.xxx.xxx)
         /// </summary>
-        /// <returns>true if assigned IPv4 is auto-configuration address</returns>
+        /// <returns>true if assigned IPv4 is autoconfiguration address</returns>
         [[nodiscard]] bool is_auto_config() const noexcept
         {
             if (S_un.S_un_b.s_b1 == 169 && S_un.S_un_b.s_b2 == 254)
@@ -306,7 +320,7 @@ namespace net
         /// Tries to parse IPv6 address string to ip_address_v6
         /// </summary>
         /// <param name="ip">IPv6 address represented as std::string</param>
-        /// <returns>pair of boolean and ip_address_v6, if boolean is true</returns>
+        /// <returns>a pair of  boolean and ip_address_v6, if boolean is true</returns>
         static std::pair<bool, ip_address_v6> from_string(const std::string& ip) noexcept
         {
             PCSTR terminator = nullptr;
@@ -360,7 +374,7 @@ namespace net
         bool operator <(const ip_address_v6& rhs) const noexcept { return (memcmp(this, &rhs, sizeof(in_addr6)) < 0); }
 
         /// <summary>
-        /// Calculates 32 bit hash from IPv6 address
+        /// Calculates 32-bit  hash from IPv6 address
         /// </summary>
         explicit operator uint32_t() const noexcept
         {

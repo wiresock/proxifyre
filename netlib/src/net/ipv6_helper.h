@@ -6,7 +6,7 @@
 namespace net
 {
     /// <summary>
-    /// IPv6 helper functions for parsing IPv6 headers, checksum and etc..
+    /// IPv6 helper functions for parsing IPv6 headers, checksum etc.
     /// </summary>
     struct ipv6_helper
     {
@@ -16,7 +16,7 @@ namespace net
         /// </summary>
         /// <param name="ip_header">pointer to IP header</param>
         /// <param name="packet_size">size of IP packet in octets</param>
-        /// <returns>pointer to IP packet payload (TCP, UDP, ICMPv6 and etc..) and protocol value</returns>
+        /// <returns>pointer to IP packet payload (TCP, UDP, ICMPv6 etc.) and protocol value</returns>
         // ********************************************************************************
         static std::pair<void*, unsigned char> find_transport_header(
             const ipv6hdr* ip_header,
@@ -105,7 +105,7 @@ namespace net
         /// </summary>
         /// <param name="packet">pinter to INTERMEDIATE_BUFFER structure</param>
         // ********************************************************************************
-        static void recalculate_tcp_udp_checksum(PINTERMEDIATE_BUFFER packet)
+        static void recalculate_tcp_udp_checksum(const PINTERMEDIATE_BUFFER packet)
         {
             tcphdr_ptr tcp_header = nullptr;
             udphdr_ptr udp_header = nullptr;
@@ -140,15 +140,15 @@ namespace net
                 header,
                 packet->m_Length - static_cast<uint32_t>(static_cast<uint8_t*>(header) - packet->m_IBuffer));
                 protocol
-                == IPPROTO_TCP)
+                == IPPROTO_TCP && tcp_header != nullptr)
             {
                 tcp_header->th_sum = checksum;
             }
-            else if (protocol == IPPROTO_UDP && udp_header)
+            else if (protocol == IPPROTO_UDP && udp_header != nullptr)
             {
                 udp_header->th_sum = checksum;
             }
-            else if (protocol == IPPROTO_ICMPV6 && icmp_header)
+            else if (protocol == IPPROTO_ICMPV6 && icmp_header != nullptr)
             {
                 icmp_header->checksum = checksum;
             }
@@ -164,16 +164,16 @@ namespace net
         /// <returns></returns>
         static uint64_t ip_checksum_partial(const void* p, size_t len, uint64_t sum)
         {
-            /*Main loop: 32 bits at a time.
-            We take advantage of intel's ability to do unaligned memory
-            accesses with minimal additional cost. Other architectures
-            probably want to be more careful here.*/
+            /* Main loop: 32 bits at a time.
+               We take advantage of Intel's ability to do unaligned memory
+               accesses with minimal additional cost. Other architectures
+               probably want to be more careful here. */
 
             auto p32 = static_cast<const uint32_t*>(p);
             for (; len >= sizeof(*p32); len -= sizeof(*p32))
                 sum += *p32++;
 
-            /*Handle un-32bit-aligned trailing bytes*/
+            /* Handle un-32bit-aligned trailing bytes */
             auto p16 = reinterpret_cast<const uint16_t*>(p32);
             if (len >= 2)
             {
@@ -183,7 +183,7 @@ namespace net
             if (len > 0)
             {
                 const auto p8 = reinterpret_cast<const uint8_t*>(p16);
-                sum += ntohs(*p8 << 8); /* RFC says pad last byte */
+                sum += ntohs(static_cast<uint16_t>(*p8) << 8); /* RFC says pad last byte */
             }
 
             return sum;
@@ -218,32 +218,25 @@ namespace net
             /* The IPv6 pseudo-header is defined in RFC 2460, Section 8.1. */
             struct ipv6_pseudo_header_t
             {
-                union
-                {
-                    struct header
-                    {
-                        in6_addr src_ip;
-                        in6_addr dst_ip;
-                        uint32_t length;
-                        uint8_t mbz[3];
-                        uint8_t next_header;
-                    } fields;
-
-                    uint32_t words[10];
-                };
+                in6_addr src_ip;
+                in6_addr dst_ip;
+                uint32_t length;
+                uint8_t mbz[3];
+                uint8_t next_header;
             };
 
             ipv6_pseudo_header_t pseudo_header{};
-            assert(sizeof(pseudo_header) == 40);
 
             /* Fill in the pseudo-header. */
-            pseudo_header.fields.src_ip = *src_ip;
-            pseudo_header.fields.dst_ip = *dst_ip;
-            pseudo_header.fields.length = htonl(len);
-            memset(pseudo_header.fields.mbz, 0, sizeof(pseudo_header.fields.mbz));
-            pseudo_header.fields.next_header = protocol;
+            pseudo_header.src_ip = *src_ip;
+            pseudo_header.dst_ip = *dst_ip;
+            pseudo_header.length = htonl(len);
+            memset(pseudo_header.mbz, 0, sizeof(pseudo_header.mbz));
+            pseudo_header.next_header = protocol;
+
             return ip_checksum_partial(&pseudo_header, sizeof(pseudo_header), 0);
         }
+
 
         // ********************************************************************************
         /// <summary>
