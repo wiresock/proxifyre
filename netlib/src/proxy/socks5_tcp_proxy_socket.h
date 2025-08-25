@@ -13,7 +13,7 @@ namespace proxy
      *
      * @tparam T Address type (e.g., IPv4 or IPv6).
      */
-    template <typename T>
+    template <net::ip_address T>
     class socks5_tcp_proxy_socket final : public tcp_proxy_socket<T>
     {
         /**
@@ -221,7 +221,14 @@ namespace proxy
                     {
                         connect_request_.cmd = 1;
                         connect_request_.reserved = 0;
-                        connect_request_.address_type = 1;
+                        if constexpr (address_type_t::af_type == AF_INET)
+                        {
+                            connect_request_.address_type = 1; // IPv4
+                        }
+                        else
+                        {
+                            connect_request_.address_type = 4; // IPv6
+                        }
                         connect_request_.dest_address = tcp_proxy_socket<T>::negotiate_ctx_->remote_address;
                         connect_request_.dest_port = htons(tcp_proxy_socket<T>::negotiate_ctx_->remote_port);
 
@@ -332,6 +339,8 @@ namespace proxy
             {
                 if (current_state_ == socks5_state::pre_login)
                 {
+                    NETLIB_LOG(log_level::debug, "Starting SOCKS5 negotiation with remote proxy");
+
                     auto socks5_ident_req_size = sizeof(ident_req_);
 
                     ident_req_.methods[0] = 0x0; // RFC 1928: X'00' NO AUTHENTICATION REQUIRED
@@ -343,6 +352,11 @@ namespace proxy
                     {
                         ident_req_.number_of_methods = 1;
                         socks5_ident_req_size = sizeof(socks5_ident_req<1>);
+                        NETLIB_LOG(log_level::debug, "SOCKS5 authentication methods: NO_AUTH only (no credentials provided)");
+                    }
+                    else
+                    {
+                        NETLIB_LOG(log_level::debug, "SOCKS5 authentication methods: NO_AUTH and USERNAME/PASSWORD");
                     }
 
                     io_context_send_negotiate_.wsa_buf.buf = reinterpret_cast<char*>(&ident_req_);
@@ -351,6 +365,8 @@ namespace proxy
                     io_context_recv_negotiate_.wsa_buf.len = sizeof(socks5_ident_resp);
 
                     DWORD flags = 0;
+
+                    NETLIB_LOG(log_level::debug, "Sending SOCKS5 identification request ({} bytes)", socks5_ident_req_size);
 
                     if ((::WSASend(
                         tcp_proxy_socket<T>::remote_socket_,
@@ -361,10 +377,14 @@ namespace proxy
                         &io_context_send_negotiate_,
                         nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                     {
+                        const auto error = WSAGetLastError();
+                        NETLIB_LOG(log_level::error, "Failed to send SOCKS5 identification request: WSA error {}", error);
                         tcp_proxy_socket<T>::close_client(false, false);
+                        return false;
                     }
 
                     current_state_ = socks5_state::login_sent;
+                    NETLIB_LOG(log_level::debug, "SOCKS5 identification request sent, waiting for response");
 
                     if ((::WSARecv(
                         tcp_proxy_socket<T>::remote_socket_,
@@ -375,13 +395,17 @@ namespace proxy
                         &io_context_recv_negotiate_,
                         nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                     {
+                        const auto error = WSAGetLastError();
+                        NETLIB_LOG(log_level::error, "Failed to receive SOCKS5 identification response: WSA error {}", error);
                         tcp_proxy_socket<T>::close_client(true, false);
+                        return false;
                     }
                 }
 
                 return false;
             }
 
+            NETLIB_LOG(log_level::debug, "SOCKS5 negotiation skipped - no negotiation context available");
             return true;
         }
     };

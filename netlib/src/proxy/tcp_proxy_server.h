@@ -633,7 +633,7 @@ namespace proxy
                 sa_local.sin_addr.s_addr = htonl(INADDR_ANY);
 
                 // bind socket's name
-                const auto status = bind(remote_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sockaddr));
+                const auto status = bind(remote_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sa_local));
 
                 if (status == SOCKET_ERROR)
                 {
@@ -652,7 +652,7 @@ namespace proxy
                 sa_local.sin6_addr = in6addr_any;
 
                 // bind socket's name
-                const auto status = bind(remote_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sockaddr));
+                const auto status = bind(remote_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sa_local));
 
                 if (status == SOCKET_ERROR)
                 {
@@ -726,18 +726,14 @@ namespace proxy
                 if (connect(remote_socket, reinterpret_cast<SOCKADDR*>(&sa_service), sizeof(sa_service)) ==
                     SOCKET_ERROR)
                 {
-                    const auto error = WSAGetLastError();
-                    if (error != WSAEWOULDBLOCK)
+                    if (const auto error = WSAGetLastError(); error != WSAEWOULDBLOCK)
                     {
                         NETLIB_LOG(log_level::warning, "connect_to_remote_host: IPv4 connect failed: {}", error);
                         shutdown(remote_socket, SD_BOTH);
                         closesocket(remote_socket);
                         return false;
                     }
-                    else
-                    {
-                        NETLIB_LOG(log_level::debug, "connect_to_remote_host: IPv4 connection in progress (WSAEWOULDBLOCK)");
-                    }
+                    NETLIB_LOG(log_level::debug, "connect_to_remote_host: IPv4 connection in progress (WSAEWOULDBLOCK)");
                 }
                 else
                 {
@@ -754,8 +750,7 @@ namespace proxy
                 if (connect(remote_socket, reinterpret_cast<SOCKADDR*>(&sa_service), sizeof(sa_service)) ==
                     SOCKET_ERROR)
                 {
-                    const auto error = WSAGetLastError();
-                    if (error != WSAEWOULDBLOCK)
+                    if (const auto error = WSAGetLastError(); error != WSAEWOULDBLOCK)
                     {
                         NETLIB_LOG(log_level::warning, "connect_to_remote_host: IPv6 connect failed: {}", error);
                         shutdown(remote_socket, SD_BOTH);

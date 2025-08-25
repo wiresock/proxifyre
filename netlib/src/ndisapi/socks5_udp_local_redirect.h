@@ -13,7 +13,7 @@ namespace ndisapi
     *
     * @tparam T IP address type (net::ip_address_v4 or net::ip_address_v6).
     */
-    template <typename T>
+    template <net::ip_address T>
     class socks5_udp_local_redirect : public netlib::log::logger<socks5_udp_local_redirect<T>>
     {
         /// <summary>
@@ -211,19 +211,18 @@ namespace ndisapi
                 if (ntohs(eth_header->h_proto) != ETH_P_IPV6)
                     return false;
 
-                auto* const ip_header = reinterpret_cast<ipv6hdr_ptr>(eth_header + 1);
+                const auto* const ip_header = reinterpret_cast<ipv6hdr_ptr>(eth_header + 1);
                 auto [p_header, proto] =
                     net::ipv6_helper::find_transport_header(ip_header, packet.m_Length - ETHER_HEADER_LENGTH);
 
                 if (p_header == nullptr || proto != IPPROTO_UDP)
                     return false;
 
-                auto* udp_header = static_cast<udphdr_ptr>(p_header);
+                const auto* udp_header = static_cast<udphdr_ptr>(p_header);
 
                 std::lock_guard lock(lock_);
 
-                if (const auto it = endpoints_.find(net::ip_endpoint<T>{T{ ip_header->ip6_src }, udp_header->th_sport});
-                    it == endpoints_.cend())
+                if (const auto it = endpoints_.find(udp_header->th_sport); it == endpoints_.cend())
                 {
                     endpoints_[udp_header->th_sport] =
                         std::chrono::steady_clock::now();
@@ -349,7 +348,7 @@ namespace ndisapi
 
                 std::lock_guard lock(lock_);
 
-                const auto it = endpoints_.find(net::ip_endpoint<T>{T{ ip_header->ip6_src }, udp_header->th_sport});
+                const auto it = endpoints_.find(udp_header->th_sport);
 
                 if (it == endpoints_.cend())
                 {
@@ -503,9 +502,7 @@ namespace ndisapi
 
                 std::lock_guard lock(lock_);
 
-                const auto it = endpoints_.find(net::ip_endpoint<T>{
-                    T{ ip_header->ip6_dst }, udp_header->th_dport
-                });
+                const auto it = endpoints_.find(udp_header->th_dport);
 
                 if (it == endpoints_.cend())
                     return false;

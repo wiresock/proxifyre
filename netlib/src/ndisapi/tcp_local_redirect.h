@@ -13,7 +13,7 @@ namespace ndisapi
      *
      * @tparam T IP address type (net::ip_address_v4 or net::ip_address_v6).
      */
-    template <typename T>
+    template <net::ip_address T>
     class tcp_local_redirect : public netlib::log::logger<tcp_local_redirect<T>>
     {
         using log_level = netlib::log::log_level;

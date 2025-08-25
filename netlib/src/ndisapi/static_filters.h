@@ -2,13 +2,10 @@
 
 namespace ndisapi
 {
-    template<typename T>
-    concept ip_address = std::is_same_v<T, net::ip_address_v4> || std::is_same_v<T, net::ip_address_v6>;
-
     /// <summary>
     /// Enum representing the possible actions that can be taken on a packet.
     /// </summary>
-    enum class action_t
+    enum class action_t : uint8_t
     {
         pass,           ///< Allow the packet to pass through.
         drop,           ///< Drop the packet.
@@ -20,14 +17,14 @@ namespace ndisapi
     /// <summary>
     /// Enum representing the direction of the packet.
     /// </summary>
-    enum class direction_t
+    enum class direction_t : uint8_t
     {
         in,     ///< Incoming packet.
         out,    ///< Outgoing packet.
         both    ///< Both incoming and outgoing packets.
     };
 
-    template <ip_address T>
+    template <net::ip_address T>
     class filter
     {
         /// <summary>network interface handle</summary>
@@ -380,7 +377,7 @@ namespace ndisapi
         /// <typeparam name="T">The type of the IP address (IPv4 or IPv6).</typeparam>
         /// <param name="filter">The filter to add.</param>
         /// <returns>True if the filter was successfully added; otherwise, false.</returns>
-        template <ip_address T>
+        template <net::ip_address T>
         bool add_filter_front(const filter<T>& filter)
         {
             STATIC_FILTER static_filter{};
@@ -399,7 +396,7 @@ namespace ndisapi
         /// <typeparam name="T">The type of the IP address (IPv4 or IPv6).</typeparam>
         /// <param name="filter">The filter to add.</param>
         /// <returns>True if the filter was successfully added; otherwise, false.</returns>
-        template <ip_address T>
+        template <net::ip_address T>
         bool add_filter_back(const filter<T>& filter)
         {
             STATIC_FILTER static_filter{};
@@ -419,7 +416,7 @@ namespace ndisapi
         /// <param name="filter">The filter to insert.</param>
         /// <param name="position">The position at which to insert the filter.</param>
         /// <returns>True if the filter was successfully inserted; otherwise, false.</returns>
-        template <ip_address T>
+        template <net::ip_address T>
         bool insert_filter(const filter<T>& filter, const uint32_t position)
         {
             if (position > filters_.size()) // Check if the position is out of bounds
@@ -469,7 +466,7 @@ namespace ndisapi
         /// </summary>
         /// <typeparam name="T">The type of the IP address (IPv4 or IPv6).</typeparam>
         /// <param name="predicate">A function that takes a filter and returns true if the filter should be removed.</param>
-        template <ip_address T>
+        template <net::ip_address T>
         void remove_filters_if(std::function<bool(const filter<T>&)> predicate)
         {
             size_t position = 0; // Start position tracking from 0
@@ -611,7 +608,7 @@ namespace ndisapi
         /// <typeparam name="T">The type of the IP address (IPv4 or IPv6).</typeparam>
         /// <param name="filter">The filter object to convert.</param>
         /// <param name="static_filter">The STATIC_FILTER structure to populate.</param>
-        template <ip_address T>
+        template <net::ip_address T>
         void to_static_filter(const filter<T>& filter, STATIC_FILTER& static_filter)
         {
             static_filter.m_Adapter.QuadPart = reinterpret_cast<ULONGLONG>(filter.get_adapter_handle());
@@ -776,7 +773,7 @@ namespace ndisapi
         /// <typeparam name="T">The type of the IP address (IPv4 or IPv6).</typeparam>
         /// <param name="static_filter">The STATIC_FILTER object to convert.</param>
         /// <param name="filter">The filter object to populate.</param>
-        template <ip_address T>
+        template <net::ip_address T>
         void from_static_filter(const STATIC_FILTER& static_filter, filter<T>& filter)
         {
             filter.set_adapter_handle(reinterpret_cast<HANDLE>(static_filter.m_Adapter.QuadPart));  // NOLINT(performance-no-int-to-ptr)

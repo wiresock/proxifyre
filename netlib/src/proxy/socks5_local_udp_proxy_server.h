@@ -557,7 +557,7 @@ namespace proxy
                 sa_local.sin_port = htons(0);
                 sa_local.sin_addr.s_addr = htonl(INADDR_ANY);
 
-                if (const auto status = bind(socks_tcp_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sockaddr))
+                if (const auto status = bind(socks_tcp_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sa_local))
                     ; status == SOCKET_ERROR)
                 {
                     closesocket(socks_tcp_socket);
@@ -571,7 +571,7 @@ namespace proxy
                 sa_local.sin6_port = htons(0);
                 sa_local.sin6_addr = in6addr_any;
 
-                if (const auto status = bind(socks_tcp_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sockaddr))
+                if (const auto status = bind(socks_tcp_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sa_local))
                     ; status == SOCKET_ERROR)
                 {
                     closesocket(socks_tcp_socket);
@@ -885,7 +885,7 @@ namespace proxy
                 sa_local.sin_port = htons(0);
                 sa_local.sin_addr.s_addr = htonl(INADDR_ANY);
 
-                if (const auto status = bind(remote_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sockaddr));
+                if (const auto status = bind(remote_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sa_local));
                     status == SOCKET_ERROR)
                 {
                     closesocket(remote_socket);
@@ -903,7 +903,7 @@ namespace proxy
                 sa_local.sin6_port = htons(0);
                 sa_local.sin6_addr = in6addr_any;
 
-                if (const auto status = bind(remote_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sockaddr));
+                if (const auto status = bind(remote_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sa_local));
                     status == SOCKET_ERROR)
                 {
                     closesocket(remote_socket);
@@ -939,7 +939,7 @@ namespace proxy
                 sockaddr_in6 sa_service{};
                 sa_service.sin6_family = address_type_t::af_type;
                 sa_service.sin6_addr = remote_address;
-                sa_service.sin6_port = htons(remote_port);
+                sa_service.sin6_port = htons(udp_port.value());
 
                 if (connect(remote_socket, reinterpret_cast<SOCKADDR*>(&sa_service), sizeof(sa_service)) ==
                     SOCKET_ERROR)

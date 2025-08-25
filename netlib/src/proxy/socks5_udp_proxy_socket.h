@@ -2,10 +2,10 @@
 
 namespace proxy
 {
-    template <typename T>
+    template <net::ip_address T>
     class socks5_udp_proxy_socket;
 
-    template <typename T>
+    template <net::ip_address T>
     struct socks5_udp_per_io_context : WSAOVERLAPPED
     {
         /**
@@ -104,7 +104,7 @@ namespace proxy
     *
     * @tparam T Address type (e.g., IPv4 or IPv6) used for remote peer addressing.
     */
-    template <typename T>
+    template <net::ip_address T>
     class socks5_udp_proxy_socket final : public netlib::log::logger<socks5_udp_proxy_socket<T>>
     {
     public:
@@ -544,7 +544,7 @@ namespace proxy
                         nullptr,
                         0,
                         reinterpret_cast<sockaddr*>(&local_address_sa_),
-                        sizeof(sockaddr),
+                        (address_type_t::af_type == AF_INET) ? sizeof(sockaddr_in) : sizeof(sockaddr_in6),
                         io_context_send_to_local,
                         nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                     {

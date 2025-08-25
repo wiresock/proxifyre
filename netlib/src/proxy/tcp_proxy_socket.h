@@ -32,7 +32,7 @@ namespace proxy
      *
      * @tparam T Address type (e.g., IPv4 or IPv6).
      */
-    template <typename T>
+    template <net::ip_address T>
     class tcp_proxy_socket;
 
     /**
@@ -46,7 +46,7 @@ namespace proxy
      *
      * @tparam T Address type (e.g., IPv4 or IPv6).
      */
-    template <typename T>
+    template <net::ip_address T>
     struct tcp_per_io_context : WSAOVERLAPPED
     {
         /**
@@ -101,7 +101,7 @@ namespace proxy
      *
      * Not copyable, but movable.
      */
-    template <typename T>
+    template <net::ip_address T>
     class tcp_proxy_socket : public netlib::log::logger<tcp_proxy_socket<T>>
     {
         friend tcp_proxy_server<tcp_proxy_socket>;
