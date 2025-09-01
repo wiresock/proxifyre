@@ -44,33 +44,34 @@ Here is an example configuration:
          }
      ]
 }
-```
+````
 
 ## Quick Start Guide
 
-This guide provides step-by-step instructions on how to set up and run the ProxiFyre application. 
+This guide provides step-by-step instructions on how to set up and run the ProxiFyre application.
 
 ### Pre-installation Steps
 
 #### 1. Install Windows Packet Filter (WinpkFilter)
 
-Windows Packet Filter is a critical dependency for our project. 
+Windows Packet Filter is a critical dependency for our project.
 
-- Visit the [Windows Packet Filter Github page](https://github.com/wiresock/ndisapi/releases) to download the latest version.
-- Follow the instructions on the page to install it.
+* Visit the [Windows Packet Filter Github page](https://github.com/wiresock/ndisapi/releases) to download the latest version.
+* Follow the instructions on the page to install it.
 
 #### 2. Install Visual Studio Runtime Libraries
 
 Visual Studio Runtime Libraries are required for running applications developed with Visual Studio.
 
-- Go to [Visual Studio 2022 redistributable download page](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170)
-- Identify your system architecture (x64, x86, or ARM64).
-- Download the appropriate installer for your platform to ensure compatibility and optimal performance.
-  - For x64 systems, download the x64 installer.
-  - For x86 systems, download the x86 installer.
-  - For ARM64 systems, download the ARM64 installer.
-- Locate the downloaded installer and double-click on it to begin the installation.
-- Follow the on-screen instructions to complete the installation
+* Go to [Visual Studio 2022 redistributable download page](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170)
+* Identify your system architecture (x64, x86, or ARM64).
+* Download the appropriate installer for your platform to ensure compatibility and optimal performance.
+
+  * For x64 systems, download the x64 installer.
+  * For x86 systems, download the x86 installer.
+  * For ARM64 systems, download the ARM64 installer.
+* Locate the downloaded installer and double-click on it to begin the installation.
+* Follow the on-screen instructions to complete the installation
 
 Please ensure you download the correct installer to avoid any installation issues.
 
@@ -86,6 +87,16 @@ Please ensure you download the correct installer to avoid any installation issue
 
 5. **Run the Application**: Navigate to the directory where you extracted the software. Find the main application executable (`.exe` file) and run it. It's recommended to run the application as an administrator to ensure all functionalities work as expected.
 
+⚠️ **Firewall Note**: If ProxiFyre does not appear to work, check Windows Firewall. ProxiFyre needs to accept and initiate network connections.
+
+* Temporarily disable the firewall to confirm if it’s blocking ProxiFyre.
+* If this resolves the issue, add an **inbound firewall rule** for `ProxiFyre.exe` instead of keeping the firewall disabled.
+
+  * Open **Windows Defender Firewall with Advanced Security**.
+  * Go to **Inbound Rules → New Rule... → Program**.
+  * Select `ProxiFyre.exe` and allow the connection.
+  * Apply to all profiles (Domain, Private, Public).
+
 ### Running as a Service
 
 ProxiFyre can be installed and run as a Windows service. Follow these steps:
@@ -93,18 +104,22 @@ ProxiFyre can be installed and run as a Windows service. Follow these steps:
 1. Open a command prompt as an administrator.
 2. Navigate to the directory containing `ProxiFyre.exe`.
 3. Use the following command to install the service:
+
    ```
    ProxiFyre.exe install
    ```
 4. Start the service with:
+
    ```
    ProxiFyre.exe start
    ```
 5. To stop the service, use:
+
    ```
    ProxiFyre.exe stop
    ```
 6. If you wish to uninstall the service, use:
+
    ```
    ProxiFyre.exe uninstall
    ```
@@ -113,7 +128,7 @@ ProxiFyre can be installed and run as a Windows service. Follow these steps:
 
 Logs are saved in the application folder under the `/logs` directory. The details and verbosity of the logs depend on the configuration set in the `app-config.json` file.
 
-## Build Prerequisites 
+## Build Prerequisites
 
 Before starting the build process, ensure the following requirements are met:
 
@@ -121,9 +136,9 @@ Before starting the build process, ensure the following requirements are met:
 
 2. **Install Microsoft GSL library via vcpkg:** Once vcpkg is installed, use it to download and install the Microsoft GSL library. Run the following commands in your terminal:
 
-    ```
+   ```
    vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows
-    ```
+   ```
 
 3. **Add online NuGet Package Source:** In some cases, you may need to add an online NuGet Package Source. To do this, navigate to `Visual Studio->Tools->Options->NuGet Package Manager->Package Sources` and add `https://nuget.org/api/v2`.
 
@@ -142,6 +157,3 @@ This project is a .Net C++/CLI class library that implements the local SOCKS5 ro
 ### 3. ProxiFyre
 
 This is a .Net-based Windows console application that employs the functionality provided by the socksify .Net C++/CLI class library.
-
-
-
