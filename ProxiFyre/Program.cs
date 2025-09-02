@@ -187,7 +187,7 @@ namespace ProxiFyre
             /// Gets the list of app names to exclude.
             /// </summary>
             [JsonProperty("excludes", NullValueHandling = NullValueHandling.Ignore)]
-            public List<string> ExcludedList { get; } = new List<string>();
+            public List<string> ExcludedList { get; }
         }
 
         /// <summary>
