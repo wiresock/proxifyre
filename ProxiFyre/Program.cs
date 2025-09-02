@@ -82,6 +82,11 @@ namespace ProxiFyre
                             $"Successfully associated {appName} to {appSettings.Socks5ProxyEndpoint} SOCKS5 proxy with protocols {string.Join(", ", appSettings.SupportedProtocols)}!");
             }
 
+            foreach (var excludedEntry in serviceSettings.ExcludedList)
+            {
+                // Add the relevant entries dynamically to the excluded list
+            }
+
             _socksify.Start();
 
             // Inform user that the application is running
@@ -148,10 +153,11 @@ namespace ProxiFyre
             /// </summary>
             /// <param name="logLevel">The log level as a string.</param>
             /// <param name="proxies">The list of proxy application settings.</param>
-            public ProxiFyreSettings(string logLevel, List<AppSettings> proxies)
+            public ProxiFyreSettings(string logLevel, List<AppSettings> proxies, List<string> excludedList)
             {
                 LogLevel = logLevel;
                 Proxies = proxies;
+                ExcludedList = excludedList;
             }
 
             /// <summary>
@@ -163,6 +169,12 @@ namespace ProxiFyre
             /// Gets the list of proxy application settings.
             /// </summary>
             public List<AppSettings> Proxies { get; }
+
+            /// <summary>
+            /// Gets the list of app names to exclude.
+            /// </summary>
+            [JsonProperty("excludes")]
+            public List<string> ExcludedList { get; } = new List<string>();
         }
 
         /// <summary>

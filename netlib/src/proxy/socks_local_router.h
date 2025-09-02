@@ -789,7 +789,7 @@ namespace proxy
             if (process && process->id == ::GetCurrentProcessId())
                 return false;
 
-            // Solution from NukaColaM to exclude programs linearly, will be rewritten to allow dynamic updates.
+            // Solution from NukaColaM (#46) to exclude programs linearly, will be rewritten to allow dynamic updates.
             static const std::vector<std::wstring> excluded_entries = {
                 L"svchost.exe"
             };
