@@ -233,7 +233,7 @@ namespace proxy
                             }
                             process_resolve_buffer_queue_cv_.notify_one();
                         }
-                        else 
+                        else
                         {
                             // Handle the error, e.g., log it or take corrective action
                             NETLIB_LOG(log_level::error, "Failed to allocate buffer.");
@@ -248,7 +248,7 @@ namespace proxy
                             return result.value();
                         }
                         // Queue for the later processing
-                        if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer)) 
+                        if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
                         {
                             {
                                 std::lock_guard lock(process_resolve_buffer_mutex_);
@@ -256,7 +256,7 @@ namespace proxy
                             }
                             process_resolve_buffer_queue_cv_.notify_one();
                         }
-                        else 
+                        else
                         {
                             // Handle the error, e.g., log it or take corrective action
                             NETLIB_LOG(log_level::error, "Failed to allocate buffer.");
@@ -350,7 +350,7 @@ namespace proxy
                 // Start proxies
                 for (auto& [tcp, udp] : proxy_servers_)
                 {
-                    if (tcp) 
+                    if (tcp)
                     {
                         if (!tcp->start())
                         {
@@ -675,7 +675,7 @@ namespace proxy
          */
         bool associate_process_name_to_proxy(const std::wstring& process_name, const size_t proxy_id)
         {
-            // The lock_guard object acquires the lock in a safe manner, 
+            // The lock_guard object acquires the lock in a safe manner,
             // ensuring it gets released even if an exception is thrown.
             std::lock_guard lock(lock_);
 
@@ -687,7 +687,7 @@ namespace proxy
                 return false; // Return false since the proxy_id is out of range
             }
 
-            // Associate the given process name to the specified proxy ID. 
+            // Associate the given process name to the specified proxy ID.
             // If the process_name already exists in the map, its associated proxy ID is updated.
             name_to_proxy_[to_upper(process_name)] = proxy_id;
 
@@ -788,6 +788,19 @@ namespace proxy
             // Exclude the current process by process ID
             if (process && process->id == ::GetCurrentProcessId())
                 return false;
+
+            // Solution from NukaColaM to exclude programs linearly, will be rewritten to allow dynamic updates.
+            static const std::vector<std::wstring> excluded_entries = {
+                L"svchost.exe"
+            };
+            for (const auto& excluded_entry : excluded_entries) {
+                if (
+                    to_upper(process->path_name).find(excluded_entry) != std::wstring::npos ||
+                    to_upper(process->name).find(excluded_entry) != std::wstring::npos
+                ) {
+                    return false;
+                }
+            }
 
             return (app.find(L'\\') != std::wstring::npos || app.find(L'/') != std::wstring::npos)
                 ? (to_upper(process->path_name).find(app) != std::wstring::npos)
@@ -1172,10 +1185,10 @@ namespace proxy
 
                     auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer_ptr->m_IBuffer);
 
-                    if (const auto* const ip_header = reinterpret_cast<iphdr_ptr>(ethernet_header + 1); 
+                    if (const auto* const ip_header = reinterpret_cast<iphdr_ptr>(ethernet_header + 1);
                         ip_header->ip_p == IPPROTO_UDP)
                     {
-                        if (const auto result = process_udp_packet(*buffer_ptr, true); 
+                        if (const auto result = process_udp_packet(*buffer_ptr, true);
                             result && result->action == packet_filter::packet_action::action_type::pass)
                         {
                             to_adapters.push_back(std::move(buffer_ptr));
@@ -1192,7 +1205,7 @@ namespace proxy
                     }
                     else if (ip_header->ip_p == IPPROTO_TCP)
                     {
-                        if (const auto result = process_tcp_packet(*buffer_ptr, true); 
+                        if (const auto result = process_tcp_packet(*buffer_ptr, true);
                             result && result->action == packet_filter::packet_action::action_type::pass)
                         {
                             to_adapters.push_back(std::move(buffer_ptr));
