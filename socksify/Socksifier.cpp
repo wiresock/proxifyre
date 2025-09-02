@@ -240,7 +240,7 @@ bool Socksifier::Socksifier::AssociateProcessNameToProxy(String^ processName, In
 /// <summary>
 /// Excludes a process from being tunnelled by the gateway.
 /// </summary>
-/// <param name="excludedEntry">The process name to exclude.</param>.</param>
+/// <param name="excludedEntry">The process name to exclude.</param>
 /// <returns>True if exclusion was successful, otherwise false.</returns>
 bool Socksifier::Socksifier::ExcludeProcessName(String^ excludedEntry)
 {
