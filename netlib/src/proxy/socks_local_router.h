@@ -908,7 +908,7 @@ namespace proxy
                 return false;
 
             // Create cache key
-            const match_cache_key cache_key{ process->id, app };
+            const match_cache_key cache_key{.process_id = process->id, .app_pattern = app };
             const auto now = std::chrono::steady_clock::now();
 
             // Check cache first
@@ -951,13 +951,10 @@ namespace proxy
                 // Perform cleanup if cache is getting large
                 if (match_cache_.size() >= max_cache_size)
                 {
-                    // Unlock and relock to avoid holding lock during cleanup
-                    lock.~lock_guard();
                     cleanup_match_cache();
-                    new (&lock) std::lock_guard<std::mutex>(match_cache_mutex_);
                 }
 
-                match_cache_[cache_key] = { matches, now };
+                match_cache_[cache_key] = {.matches = matches, .timestamp = now };
             }
 
             return matches;
@@ -1499,7 +1496,6 @@ namespace proxy
          */
         void cleanup_match_cache() const
         {
-            std::lock_guard lock(match_cache_mutex_);
             const auto now = std::chrono::steady_clock::now();
 
             // Remove expired entries
@@ -1515,7 +1511,7 @@ namespace proxy
                 }
             }
 
-            // If still too large, remove oldest entries
+            // If still too large, remove the oldest entries
             if (match_cache_.size() > max_cache_size)
             {
                 // Create vector of iterators sorted by timestamp
@@ -1533,7 +1529,7 @@ namespace proxy
                         return a->second.timestamp < b->second.timestamp;
                     });
 
-                // Remove oldest entries until we're under the limit
+                // Remove the oldest entries until we're under the limit
                 const size_t entries_to_remove = match_cache_.size() - max_cache_size;
                 for (size_t i = 0; i < entries_to_remove && i < entries.size(); ++i)
                 {
@@ -1541,6 +1537,5 @@ namespace proxy
                 }
             }
         }
-
     };
 }
