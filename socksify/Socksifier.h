@@ -254,6 +254,13 @@ namespace Socksifier
         bool AssociateProcessNameToProxy(String^ processName, IntPtr proxy);
 
         /// <summary>
+        /// Excludes a process from being tunnelled by the gateway.
+        /// </summary>
+        /// <param name="excludedEntry">The process name to exclude.</param>.</param>
+        /// <returns>True if exclusion was successful, otherwise false.</returns>
+        bool ExcludeProcessName(String^ excludedEntry);
+
+        /// <summary>
         /// Gets or sets the interval (in milliseconds) for log event notifications.
         /// </summary>
         property Int32 LogEventInterval

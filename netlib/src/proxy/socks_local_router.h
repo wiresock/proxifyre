@@ -80,6 +80,11 @@ namespace proxy
         std::unordered_map<std::wstring, size_t> name_to_proxy_;
 
         /**
+         * @brief A list of
+         */
+        std::vector<std::wstring> excluded_list_;
+
+        /**
          * @brief Shared mutex to protect concurrent access to shared resources.
          */
         std::shared_mutex lock_;
@@ -695,6 +700,23 @@ namespace proxy
         }
 
         /**
+         * Associates a process name to a specific proxy ID. Not sure if this function is thread-safe.
+         * @param excluded_entry the name of the process to exclude
+         * @return True if exclusion was successful, otherwise false
+         */
+        bool exclude_process_name(const std::wstring& excluded_entry)
+        {
+            // Tried to mimic the lock as in associate_process_name_to_proxy
+            std::lock_guard lock(lock_);
+
+            // Append the excluded entry
+            excluded_list_.push_back(excluded_entry);
+
+            // If successful, return true
+            return true;
+        }
+
+        /**
          * Parses a string to construct a network endpoint, consisting of an IPv4 address and a port number.
          * The format of the string is expected to be "IP:PORT".
          * @param endpoint The string representation of the network endpoint.
@@ -790,10 +812,7 @@ namespace proxy
                 return false;
 
             // Solution from NukaColaM (#46) to exclude programs linearly, will be rewritten to allow dynamic updates.
-            static const std::vector<std::wstring> excluded_entries = {
-                L"svchost.exe"
-            };
-            for (const auto& excluded_entry : excluded_entries) {
+            for (const auto& excluded_entry : excluded_list_) {
                 if (
                     to_upper(process->path_name).find(excluded_entry) != std::wstring::npos ||
                     to_upper(process->name).find(excluded_entry) != std::wstring::npos
