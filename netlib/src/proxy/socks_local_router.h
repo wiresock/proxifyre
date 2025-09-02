@@ -698,8 +698,8 @@ namespace proxy
                 // If the process_name already exists in the map, its associated proxy ID is updated.
                 name_to_proxy_[to_upper(process_name)] = proxy_id;
             }
-            catch (...)
-            {
+            catch (const std::exception& e) {
+                NETLIB_LOG(log_level::error, "Exception associating process name to proxy: {}", e.what());
                 return false; // Return false if any exception occurs during the association
             }
 
