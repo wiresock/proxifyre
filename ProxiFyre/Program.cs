@@ -88,7 +88,7 @@ namespace ProxiFyre
                 if (_socksify.ExcludeProcessName(excludedEntry)) {
                     LoggerInstance.Info($"Successfully excluded {excludedEntry} from being proxied.");
                 } else {
-                    LoggerInstance.Info($"Failed to exclude {excludedEntry} from being proxied.");
+                    LoggerInstance.Warn($"Failed to exclude {excludedEntry} from being proxied.");
                 }
             }
 
@@ -145,6 +145,13 @@ namespace ProxiFyre
         //            "password": "password2",
         //            "supportedProtocols": ["TCP"]
         //        }
+        //    ],
+        //    "excludes": [
+        //        "notepad.exe",
+        //        "calc.exe",
+        //        "C:\\Windows\\System32\\svchost.exe",
+        //        "Windows\\System32\\",
+        //        "antivirus"
         //    ]
         //}
 
@@ -158,6 +165,7 @@ namespace ProxiFyre
             /// </summary>
             /// <param name="logLevel">The log level as a string.</param>
             /// <param name="proxies">The list of proxy application settings.</param>
+            /// <param name="excludedList">The list of process names or paths to exclude from proxying.</param>
             public ProxiFyreSettings(string logLevel, List<AppSettings> proxies, List<string> excludedList)
             {
                 LogLevel = logLevel;

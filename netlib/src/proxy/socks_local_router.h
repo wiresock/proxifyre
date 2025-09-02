@@ -692,27 +692,40 @@ namespace proxy
                 return false; // Return false since the proxy_id is out of range
             }
 
-            // Associate the given process name to the specified proxy ID.
-            // If the process_name already exists in the map, its associated proxy ID is updated.
-            name_to_proxy_[to_upper(process_name)] = proxy_id;
+            try
+            {
+                // Associate the given process name to the specified proxy ID.
+                // If the process_name already exists in the map, its associated proxy ID is updated.
+                name_to_proxy_[to_upper(process_name)] = proxy_id;
+            }
+            catch (...)
+            {
+                return false; // Return false if any exception occurs during the association
+            }
 
             return true; // Return true to indicate the association was successful
         }
 
         /**
-         * Associates a process name to a specific proxy ID. Not sure if this function is thread-safe.
+         * @brief Adds a process name to the exclusion list. This function is thread-safe.
          * @param excluded_entry the name of the process to exclude
          * @return True if exclusion was successful, otherwise false
          */
-        bool exclude_process_name(const std::wstring& excluded_entry)
+        bool exclude_process_name(const std::wstring& excluded_entry) noexcept
         {
-            // Tried to mimic the lock as in associate_process_name_to_proxy
+            // The lock_guard makes this function thread-safe against other operations using `lock_`.
             std::lock_guard lock(lock_);
 
-            // Append the excluded entry
-            excluded_list_.push_back(to_upper(excluded_entry));
+            try
+            {
+                // Append the excluded entry
+                excluded_list_.push_back(to_upper(excluded_entry));
+            }
+            catch (...)
+            {
+                return false;
+            }
 
-            // If successful, return true
             return true;
         }
 
@@ -794,18 +807,27 @@ namespace proxy
         }
 
         /**
-         * @brief Matches an application name pattern against the process details.
+         * @brief Matches an application name pattern against the process details with exclusion support.
          *
-         * The function checks if the application name pattern includes a path (by looking for "/" or "\\").
-         * If a path is included in the pattern, the function matches against the process's path_name,
-         * otherwise it matches against the process's name. The matching is done case-insensitively.
-         * Additionally, this function excludes the current process (by process ID).
+         * This function performs a two-stage matching process:
+         * 1. First, it checks if the process should be excluded based on the exclusion list
+         * 2. Then, it performs pattern matching if the process is not excluded
+         *
+         * For both exclusion checking and pattern matching, the function uses intelligent field selection:
+         * - If the pattern/exclusion entry contains path separators ("/" or "\\"), it matches against the process's full path_name
+         * - If the pattern/exclusion entry contains no path separators, it matches against the process's name only
+         *
+         * The pattern matching is performed case-insensitively using substring matching.
+         * The function automatically excludes the current process (by process ID) to prevent self-matching.
          *
          * @param app The application name or pattern to check against the process details.
+         *            Can be either a simple process name (e.g., "notepad.exe") or a path-based pattern (e.g., "C:\\Windows\\System32\\notepad.exe").
          * @param process The process details to check against the application pattern.
-         * @return true if the process details match the application pattern and are not the current process, false otherwise.
+         *                Must contain valid name and path_name fields for comparison.
+         * @return true if the process details match the application pattern, are not in the exclusion list,
+         *              and are not the current process; false otherwise.
          */
-        bool match_app_name(const std::wstring& app, const std::shared_ptr<iphelper::network_process>& process)
+        bool match_app_name(const std::wstring& app, const std::shared_ptr<iphelper::network_process>& process) const
         {
             // Exclude the current process by process ID
             if (process && process->id == ::GetCurrentProcessId())
@@ -813,17 +835,17 @@ namespace proxy
 
             // Solution from NukaColaM (#46) to exclude programs linearly, will be rewritten to allow dynamic updates.
             for (const auto& excluded_entry : excluded_list_) {
-                if (
-                    process->path_name.find(excluded_entry) != std::wstring::npos ||
-                    process->name.find(excluded_entry) != std::wstring::npos
-                ) {
+                if ((excluded_entry.find(L'\\') != std::wstring::npos || excluded_entry.find(L'/') != std::wstring::npos)
+                    ? (process->path_name.find(excluded_entry) != std::wstring::npos)
+                    : (process->name.find(excluded_entry) != std::wstring::npos)
+                    ) {
                     return false;
                 }
             }
 
             return (app.find(L'\\') != std::wstring::npos || app.find(L'/') != std::wstring::npos)
-                ? (to_upper(process->path_name).find(app) != std::wstring::npos)
-                : (to_upper(process->name).find(app) != std::wstring::npos);
+                ? (process->path_name.find(app) != std::wstring::npos)
+                : (process->name.find(app) != std::wstring::npos);
         }
 
         /**
