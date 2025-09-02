@@ -208,6 +208,16 @@ bool socksify_unmanaged::associate_process_name_to_proxy(const std::wstring& pro
 }
 
 /**
+ * @brief Associates a process name to the exclusion list.
+ * @param process_name The process name to associate.
+ * @return True if addition was successful, false otherwise.
+ */
+bool socksify_unmanaged::exclude_process_name(const std::wstring& process_name) const
+{
+    return proxy_->exclude_process_name(process_name);
+}
+
+/**
  * @brief Sets the maximum number of log entries to keep.
  * @param log_limit The new log limit.
  */

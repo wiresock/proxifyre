@@ -236,3 +236,16 @@ bool Socksifier::Socksifier::AssociateProcessNameToProxy(String^ processName, In
         proxy.ToInt32());
 #endif //_WIN64
 }
+
+/// <summary>
+/// Excludes a process from being tunnelled by the gateway.
+/// </summary>
+/// <param name="excludedEntry">The process name to exclude.</param>
+/// <returns>True if exclusion was successful, otherwise false.</returns>
+bool Socksifier::Socksifier::ExcludeProcessName(String^ excludedEntry)
+{
+    if (!unmanaged_ptr_) {
+        return false;
+    }
+    return unmanaged_ptr_->exclude_process_name(msclr::interop::marshal_as<std::wstring>(excludedEntry));
+}

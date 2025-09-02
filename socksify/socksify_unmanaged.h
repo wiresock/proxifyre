@@ -86,6 +86,7 @@ public:
     [[nodiscard]] bool associate_process_name_to_proxy(
         const std::wstring& process_name,
         LONG_PTR proxy_id) const;
+    bool exclude_process_name(const std::wstring& process_name) const;
 
     /**
      * @brief Sets the maximum number of log entries to keep.
