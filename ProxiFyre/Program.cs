@@ -86,9 +86,9 @@ namespace ProxiFyre
             {
                 // Add the relevant entries dynamically to the excluded list
                 if (_socksify.ExcludeProcessName(excludedEntry)) {
-                    LoggerInstance.Info($"Successfully excluded {encludedEntry} from being proxied.");
+                    LoggerInstance.Info($"Successfully excluded {excludedEntry} from being proxied.");
                 } else {
-                    LoggerInstance.Info($"Failed to exclude {encludedEntry} from being proxied.");
+                    LoggerInstance.Info($"Failed to exclude {excludedEntry} from being proxied.");
                 }
             }
 

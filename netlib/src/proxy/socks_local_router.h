@@ -80,7 +80,7 @@ namespace proxy
         std::unordered_map<std::wstring, size_t> name_to_proxy_;
 
         /**
-         * @brief A list of
+         * @brief A list of excluded process names.
          */
         std::vector<std::wstring> excluded_list_;
 
@@ -710,7 +710,7 @@ namespace proxy
             std::lock_guard lock(lock_);
 
             // Append the excluded entry
-            excluded_list_.push_back(excluded_entry);
+            excluded_list_.push_back(to_upper(excluded_entry));
 
             // If successful, return true
             return true;
@@ -805,7 +805,7 @@ namespace proxy
          * @param process The process details to check against the application pattern.
          * @return true if the process details match the application pattern and are not the current process, false otherwise.
          */
-        static bool match_app_name(const std::wstring& app, const std::shared_ptr<iphelper::network_process>& process)
+        bool match_app_name(const std::wstring& app, const std::shared_ptr<iphelper::network_process>& process)
         {
             // Exclude the current process by process ID
             if (process && process->id == ::GetCurrentProcessId())
@@ -814,8 +814,8 @@ namespace proxy
             // Solution from NukaColaM (#46) to exclude programs linearly, will be rewritten to allow dynamic updates.
             for (const auto& excluded_entry : excluded_list_) {
                 if (
-                    to_upper(process->path_name).find(excluded_entry) != std::wstring::npos ||
-                    to_upper(process->name).find(excluded_entry) != std::wstring::npos
+                    process->path_name.find(excluded_entry) != std::wstring::npos ||
+                    process->name.find(excluded_entry) != std::wstring::npos
                 ) {
                     return false;
                 }

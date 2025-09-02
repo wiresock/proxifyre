@@ -242,7 +242,7 @@ bool Socksifier::Socksifier::AssociateProcessNameToProxy(String^ processName, In
 /// </summary>
 /// <param name="excludedEntry">The process name to exclude.</param>.</param>
 /// <returns>True if exclusion was successful, otherwise false.</returns>
-bool ExcludeProcessName(String^ excludedEntry)
+bool Socksifier::Socksifier::ExcludeProcessName(String^ excludedEntry)
 {
     if (!unmanaged_ptr_) {
         return false;
