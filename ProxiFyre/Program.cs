@@ -158,9 +158,6 @@ namespace ProxiFyre
         /// <summary>
         /// Represents the root configuration settings for ProxiFyre.
         /// </summary>
-        /// <summary>
-        /// Represents the root configuration settings for ProxiFyre.
-        /// </summary>
         private class ProxiFyreSettings
         {
             /// <summary>
