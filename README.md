@@ -1,50 +1,103 @@
 # ProxiFyre: SOCKS5 Proxifier for Windows
 
-ProxiFyre elevates the foundational capabilities of the Windows Packet Filter's [socksify](https://github.com/wiresock/ndisapi/tree/master/examples/cpp/socksify) demo, introducing robust enhancements. Not only does it seamlessly integrate support for UDP, but it also empowers users with the flexibility of managing multiple proxy instances. Streamlining its configuration process, ProxiFyre now dynamically sources its settings from an app-config.json file, ensuring a more intuitive and user-friendly experience. Furthermore, with its adaptability in mind, ProxiFyre can be effortlessly configured to run as a Windows Service, providing continuous operation without the need for manual intervention.
+ProxiFyre elevates the foundational capabilities of the Windows Packet Filter's [socksify](https://github.com/wiresock/ndisapi/tree/master/examples/cpp/socksify) demo, introducing robust enhancements. Not only does it seamlessly integrate support for UDP, but it also empowers users with the flexibility of managing multiple proxy instances. Streamlining its configuration process, ProxiFyre dynamically sources its settings from an `app-config.json` file, ensuring a more intuitive and user-friendly experience. Furthermore, with adaptability in mind, ProxiFyre can be effortlessly configured to run as a Windows Service, providing continuous operation without the need for manual intervention.
+
+As of **v2.1.1**, ProxiFyre also supports **process exclusions**, allowing you to specify which applications should *bypass* the proxy while others remain proxied. Additionally, performance has been improved through intelligent caching of process matching.
+
+---
 
 ## Configuration
 
-The application uses a configuration file named app-config.json. This JSON file should contain configurations for different applications. Each configuration object should have the following properties:
+The application uses a configuration file named `app-config.json`. This JSON file should contain configurations for different applications. Each configuration object should have the following properties:
 
 - **appNames**: An array of strings representing the names of applications this configuration applies to.
 - **socks5ProxyEndpoint**: A string that specifies the SOCKS5 proxy endpoint.
-- **username**: A string that specifies the username for the proxy.
-- **password**: A string that specifies the password for the proxy.
-- **supportedProtocols**: An array of strings specifying the supported protocols (e.g., "TCP", "UDP").
+- **username**: A string that specifies the username for the proxy (optional).
+- **password**: A string that specifies the password for the proxy (optional).
+- **supportedProtocols**: An array of strings specifying the supported protocols (e.g., `"TCP"`, `"UDP"`).
+- **excludes** *(new in v2.1.1)*: An array of application names or paths to exclude from proxy routing.
+
+---
 
 ### LogLevel
 
-LogLevel can have one of the following values which define the detail of the log: `Error`, `Warning`, `Info`, `Debug`, `All`
+LogLevel can have one of the following values which define the detail of the log:  
+`Error`, `Warning`, `Info`, `Debug`, `All`
+
+---
 
 ### appNames
 
-On the application name, it can be a partial name or full name of the executable, e.g. `firefox` or `firefox.exe` both will work for the firefox browser, but also any application whose name includes `firefox` or `firefox.exe`, e.g. `NewFirefox.exe`. If the pattern specified in the appName contains slashes or backslashes then it is treated as a pathname and instead of matching the executable name, the full pathname is matched against the pattern. It allows specifying an entire folder using a full or partial path which can be convenient for UWP applications, e.g. `C:\\Program Files\\WindowsApps\\ROBLOXCORPORATION.ROBLOX` for ROBLOX.
+- The application name can be a **partial** or **full name** of the executable.  
+  - Example: `firefox` or `firefox.exe` will both match the Firefox browser.  
+  - Any application containing that substring will also match, e.g., `NewFirefox.exe`.  
+- If the pattern contains **slashes or backslashes**, it is treated as a **pathname**.  
+  - This allows targeting an entire folder (useful for UWP apps).  
+  - Example: `C:\\Program Files\\WindowsApps\\ROBLOXCORPORATION.ROBLOX`
+
+---
+
+### Excludes (new in v2.1.1)
+
+The `excludes` section lets you define processes that should **bypass the proxy**.  
+This is useful when you want a global proxy setup but keep certain apps (like browsers, local dev tools, or games) unproxied.
+
+Example:
+
+```json
+{
+  "logLevel": "Error",
+  "proxies": [
+    {
+      "appNames": [""],
+      "socks5ProxyEndpoint": "oracle.sshvpn.me:1080",
+      "username": "username1",
+      "password": "password1",
+      "supportedProtocols": ["TCP", "UDP"]
+    }
+  ],
+  "excludes": [
+    "firefox",
+    "C:\\Program Files\\LocalApp\\NotProxiedApp.exe"
+  ]
+}
+````
+
+---
 
 ### SOCKS5 Proxy Authorization
 
-If the SOCKS5 proxy does not support authorization, you can skip the username and password in the configuration.
+If the SOCKS5 proxy does not support authorization, you can skip the `username` and `password` fields in the configuration.
 
-Here is an example configuration:
+---
+
+## Example Configuration
 
 ```json
 {
  "logLevel": "Error",
  "proxies": [
-         {
-         "appNames": ["chrome", "C:\\Program Files\\WindowsApps\\ROBLOXCORPORATION.ROBLOX"],
-         "socks5ProxyEndpoint": "158.101.205.51:1080",
-         "username": "username1",
-         "password": "password1",
-         "supportedProtocols": ["TCP", "UDP"]
-         },
-         {
-         "appNames": ["firefox", "firefox_dev"],
-         "socks5ProxyEndpoint": "127.0.0.1:8080",
-         "supportedProtocols": ["TCP"]
-         }
-     ]
+   {
+     "appNames": ["chrome", "C:\\Program Files\\WindowsApps\\ROBLOXCORPORATION.ROBLOX"],
+     "socks5ProxyEndpoint": "158.101.205.51:1080",
+     "username": "username1",
+     "password": "password1",
+     "supportedProtocols": ["TCP", "UDP"]
+   },
+   {
+     "appNames": ["firefox", "firefox_dev"],
+     "socks5ProxyEndpoint": "127.0.0.1:8080",
+     "supportedProtocols": ["TCP"]
+   }
+ ],
+ "excludes": [
+   "edge",
+   "localservice.exe"
+ ]
 }
-````
+```
+
+---
 
 ## Quick Start Guide
 
@@ -75,17 +128,21 @@ Visual Studio Runtime Libraries are required for running applications developed 
 
 Please ensure you download the correct installer to avoid any installation issues.
 
+---
+
 ### Installation Steps
 
-2. **Download the Latest Release**: Visit our [GitHub page](https://github.com/wiresock/socksify/releases) to download the latest release of the ProxiFyre software.
+1. **Download the Latest Release**: Visit our [GitHub Releases page](https://github.com/wiresock/proxifyre/releases) to download the latest release of the ProxiFyre software.
 
-3. **Unzip the Software**: After downloading, extract the contents of the .zip file to your preferred location.
+2. **Unzip the Software**: After downloading, extract the contents of the `.zip` file to your preferred location.
 
-4. **Create `app-config.json` File**: Following the template provided in the Configuration section of this document, create an `app-config.json` file. This file is crucial for the software to function properly. Save this file in the main application folder.
+3. **Create `app-config.json` File**: Following the template provided in the Configuration section of this document, create an `app-config.json` file. This file is crucial for the software to function properly. Save this file in the main application folder.
+
+---
 
 ### Running the Application
 
-5. **Run the Application**: Navigate to the directory where you extracted the software. Find the main application executable (`.exe` file) and run it. It's recommended to run the application as an administrator to ensure all functionalities work as expected.
+4. **Run the Application**: Navigate to the directory where you extracted the software. Find the main application executable (`ProxiFyre.exe`) and run it. It's recommended to run the application as an administrator to ensure all functionalities work as expected.
 
 ⚠️ **Firewall Note**: If ProxiFyre does not appear to work, check Windows Firewall. ProxiFyre needs to accept and initiate network connections.
 
@@ -96,6 +153,8 @@ Please ensure you download the correct installer to avoid any installation issue
   * Go to **Inbound Rules → New Rule... → Program**.
   * Select `ProxiFyre.exe` and allow the connection.
   * Apply to all profiles (Domain, Private, Public).
+
+---
 
 ### Running as a Service
 
@@ -124,9 +183,13 @@ ProxiFyre can be installed and run as a Windows service. Follow these steps:
    ProxiFyre.exe uninstall
    ```
 
+---
+
 ### Logging
 
 Logs are saved in the application folder under the `/logs` directory. The details and verbosity of the logs depend on the configuration set in the `app-config.json` file.
+
+---
 
 ## Build Prerequisites
 
@@ -140,7 +203,9 @@ Before starting the build process, ensure the following requirements are met:
    vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows
    ```
 
-3. **Add online NuGet Package Source:** In some cases, you may need to add an online NuGet Package Source. To do this, navigate to `Visual Studio->Tools->Options->NuGet Package Manager->Package Sources` and add `https://nuget.org/api/v2`.
+3. **Add online NuGet Package Source:** In some cases, you may need to add an online NuGet Package Source. To do this, navigate to `Visual Studio -> Tools -> Options -> NuGet Package Manager -> Package Sources` and add `https://nuget.org/api/v2`.
+
+---
 
 ## Projects
 
