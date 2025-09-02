@@ -158,6 +158,9 @@ namespace ProxiFyre
         /// <summary>
         /// Represents the root configuration settings for ProxiFyre.
         /// </summary>
+        /// <summary>
+        /// Represents the root configuration settings for ProxiFyre.
+        /// </summary>
         private class ProxiFyreSettings
         {
             /// <summary>
@@ -166,7 +169,7 @@ namespace ProxiFyre
             /// <param name="logLevel">The log level as a string.</param>
             /// <param name="proxies">The list of proxy application settings.</param>
             /// <param name="excludedList">The list of process names or paths to exclude from proxying.</param>
-            public ProxiFyreSettings(string logLevel, List<AppSettings> proxies, List<string> excludedList)
+            public ProxiFyreSettings(string logLevel, List<AppSettings> proxies, List<string> excludedList = null)
             {
                 LogLevel = logLevel;
                 Proxies = proxies;
@@ -186,8 +189,8 @@ namespace ProxiFyre
             /// <summary>
             /// Gets the list of app names to exclude.
             /// </summary>
-            [JsonProperty("excludes")]
-            public List<string> ExcludedList { get; }
+            [JsonProperty("excludes", NullValueHandling = NullValueHandling.Ignore)]
+            public List<string> ExcludedList { get; } = new List<string>();
         }
 
         /// <summary>
