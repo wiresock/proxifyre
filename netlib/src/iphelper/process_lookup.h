@@ -112,6 +112,11 @@ namespace iphelper
         std::wstring name;                  ///< Process name (uppercase)
         std::wstring path_name;             ///< Full path to executable (uppercase)
         std::wstring device_path_name;      ///< Device path version of path_name (uppercase)
+        std::optional<uint16_t> tcp_proxy_port = std::nullopt; // Optional tcp proxy port if the process is associated with a proxy
+        std::optional<uint16_t> udp_proxy_port = std::nullopt; // Optional udp proxy port if the process is associated with a proxy
+        bool excluded = false;          ///< Whether the process is excluded from proxying
+        bool bypass_tcp = false;        ///< Whether TCP connections should bypass proxying (no proxy configured)
+        bool bypass_udp = false;        ///< Whether UDP connections should bypass proxying (no proxy configured)
     };
 
     /**
@@ -473,7 +478,7 @@ namespace iphelper
         {
             const DWORD pid = row->dwOwningPid;
             if (is_system_process(pid)) {
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "TCPv4 entry with system process PID = {} ({}) skipping resolution",
                     pid,
                     pid == 0 ? "Idle" : "System");
@@ -483,7 +488,7 @@ namespace iphelper
 
             const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
             if (ext.error == owner_module_resolver::error_code::success) {
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "Resolved TCPv4 owner: pid={} tag={} name=\"{}\" path=\"{}\"",
                     pid,
                     tag,
@@ -499,7 +504,7 @@ namespace iphelper
 
             if (tag != 0 && ext.error == owner_module_resolver::error_code::service_not_found) {
                 if (owner_module_resolver::result img{}; owner_module_resolver::resolve_from_pid_and_tag(pid, 0, img)) {
-                    NETLIB_LOG(log_level::debug,
+                    NETLIB_DEBUG(
                         "Service tag not found; fell back to process image (TCPv4): pid={} tag={} name=\"{}\" path=\"{}\"",
                         pid,
                         tag,
@@ -514,7 +519,7 @@ namespace iphelper
                 }
             }
 
-            NETLIB_LOG(log_level::debug,
+            NETLIB_DEBUG(
                 "Failed to resolve TCPv4 owner: pid={} tag={} error={}{}",
                 pid,
                 tag,
@@ -541,7 +546,7 @@ namespace iphelper
         {
             const DWORD pid = row->dwOwningPid;
             if (is_system_process(pid)) {
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "TCPv6 entry with system process PID = {} ({}) skipping resolution",
                     pid,
                     pid == 0 ? "Idle" : "System");
@@ -551,7 +556,7 @@ namespace iphelper
 
             const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
             if (ext.error == owner_module_resolver::error_code::success) {
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "Resolved TCPv6 owner: pid={} tag={} name=\"{}\" path=\"{}\"",
                     pid,
                     tag,
@@ -567,7 +572,7 @@ namespace iphelper
 
             if (tag != 0 && ext.error == owner_module_resolver::error_code::service_not_found) {
                 if (owner_module_resolver::result img{}; owner_module_resolver::resolve_from_pid_and_tag(pid, 0, img)) {
-                    NETLIB_LOG(log_level::debug,
+                    NETLIB_DEBUG(
                         "Service tag not found; fell back to process image (TCPv6): pid={} tag={} name=\"{}\" path=\"{}\"",
                         pid,
                         tag,
@@ -582,7 +587,7 @@ namespace iphelper
                 }
             }
 
-            NETLIB_LOG(log_level::debug,
+            NETLIB_DEBUG(
                 "Failed to resolve TCPv6 owner: pid={} tag={} error={}{}",
                 pid,
                 tag,
@@ -609,7 +614,7 @@ namespace iphelper
         {
             const DWORD pid = row->dwOwningPid;
             if (is_system_process(pid)) {
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "UDPv4 entry with system process PID = {} ({}) skipping resolution",
                     pid,
                     pid == 0 ? "Idle" : "System");
@@ -619,7 +624,7 @@ namespace iphelper
 
             const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
             if (ext.error == owner_module_resolver::error_code::success) {
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "Resolved UDPv4 owner: pid={} tag={} name=\"{}\" path=\"{}\"",
                     pid,
                     tag,
@@ -635,7 +640,7 @@ namespace iphelper
 
             if (tag != 0 && ext.error == owner_module_resolver::error_code::service_not_found) {
                 if (owner_module_resolver::result img{}; owner_module_resolver::resolve_from_pid_and_tag(pid, 0, img)) {
-                    NETLIB_LOG(log_level::debug,
+                    NETLIB_DEBUG(
                         "Service tag not found; fell back to process image (UDPv4): pid={} tag={} name=\"{}\" path=\"{}\"",
                         pid,
                         tag,
@@ -650,7 +655,7 @@ namespace iphelper
                 }
             }
 
-            NETLIB_LOG(log_level::debug,
+            NETLIB_DEBUG(
                 "Failed to resolve UDPv4 owner: pid={} tag={} error={}{}",
                 pid,
                 tag,
@@ -677,7 +682,7 @@ namespace iphelper
         {
             const DWORD pid = row->dwOwningPid;
             if (is_system_process(pid)) {
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "UDPv6 entry with system process PID = {} ({}) skipping resolution",
                     pid,
                     pid == 0 ? "Idle" : "System");
@@ -687,7 +692,7 @@ namespace iphelper
 
             const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
             if (ext.error == owner_module_resolver::error_code::success) {
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "Resolved UDPv6 owner: pid={} tag={} name=\"{}\" path=\"{}\"",
                     pid,
                     tag,
@@ -703,7 +708,7 @@ namespace iphelper
 
             if (tag != 0 && ext.error == owner_module_resolver::error_code::service_not_found) {
                 if (owner_module_resolver::result img{}; owner_module_resolver::resolve_from_pid_and_tag(pid, 0, img)) {
-                    NETLIB_LOG(log_level::debug,
+                    NETLIB_DEBUG(
                         "Service tag not found; fell back to process image (UDPv6): pid={} tag={} name=\"{}\" path=\"{}\"",
                         pid,
                         tag,
@@ -718,7 +723,7 @@ namespace iphelper
                 }
             }
 
-            NETLIB_LOG(log_level::debug,
+            NETLIB_DEBUG(
                 "Failed to resolve UDPv6 owner: pid={} tag={} error={}{}",
                 pid,
                 tag,
