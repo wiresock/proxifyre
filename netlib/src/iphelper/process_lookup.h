@@ -112,8 +112,8 @@ namespace iphelper
         std::wstring name;                  ///< Process name (uppercase)
         std::wstring path_name;             ///< Full path to executable (uppercase)
         std::wstring device_path_name;      ///< Device path version of path_name (uppercase)
-        std::optional<uint16_t> tcp_proxy_port = std::nullopt; // Optional tcp proxy port if the process is associated with a proxy
-        std::optional<uint16_t> udp_proxy_port = std::nullopt; // Optional udp proxy port if the process is associated with a proxy
+        std::optional<uint16_t> tcp_proxy_port = std::nullopt; // Optional TCP proxy port if the process is associated with a proxy
+        std::optional<uint16_t> udp_proxy_port = std::nullopt; // Optional UDP proxy port if the process is associated with a proxy
         bool excluded = false;          ///< Whether the process is excluded from proxying
         bool bypass_tcp = false;        ///< Whether TCP connections should bypass proxying (no proxy configured)
         bool bypass_udp = false;        ///< Whether UDP connections should bypass proxying (no proxy configured)

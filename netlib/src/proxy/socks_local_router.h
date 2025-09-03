@@ -901,7 +901,7 @@ namespace proxy
 
             std::shared_lock lock(lock_);
 
-            // Cache miss - search through patterns
+            // Search for a matching process pattern
             for (const auto& [proxy_id, process_pattern] : proxy_to_names_)
             {
                 if (match_app_name(process_pattern, process))
@@ -1024,7 +1024,7 @@ namespace proxy
             if (process->excluded || process->bypass_udp)
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
 
-            if (const auto port = process->udp_proxy_port? process->udp_proxy_port:get_proxy_port_udp(process); port.has_value())
+            if (const auto port = process->udp_proxy_port ? process->udp_proxy_port : get_proxy_port_udp(process); port.has_value())
             {
                 if (udp_redirect_->is_new_endpoint(buffer))
                 {
@@ -1117,7 +1117,7 @@ namespace proxy
             if (process->excluded || process->bypass_tcp)
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
 
-            if (const auto port = process->tcp_proxy_port? process->tcp_proxy_port:get_proxy_port_tcp(process); port.has_value())
+            if (const auto port = process->tcp_proxy_port ? process->tcp_proxy_port : get_proxy_port_tcp(process); port.has_value())
             {
                 // If this is a SYN packet (connection initiation), map the source port to the destination endpoint
                 if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
