@@ -2003,8 +2003,10 @@ public:
         {
             SetLastError(ERROR_SUCCESS);
 
+            // Pass the base class pointer instead of 'this' to avoid offset issues
+            auto* base_ptr = static_cast<network_config_info*>(this);
             auto error_code = ::NotifyIpInterfaceChange(AF_UNSPEC, &network_config_info::ip_interface_changed_callback,
-                this, FALSE, &notify_ip_interface_change_);
+                base_ptr, FALSE, &notify_ip_interface_change_);
 
             if (NO_ERROR == error_code)
                 return true;
@@ -2037,15 +2039,17 @@ public:
         /// <summary>
         /// NotifyIpInterfaceChange callback. Calls ip_interface_changed_callback of CRTP derived class
         /// </summary>
-        /// <param name="caller_context">this pointer</param>
+        /// <param name="caller_context">base class pointer</param>
         /// <param name="row"> to MIB_IPINTERFACE_ROW</param>
         /// <param name="notification_type">type of notification</param>
         /// <returns></returns>
         static void __stdcall ip_interface_changed_callback(void* caller_context, PMIB_IPINTERFACE_ROW row,
             MIB_NOTIFICATION_TYPE notification_type)
         {
-            if (auto* const this_pointer = static_cast<T*>(caller_context); this_pointer)
+            if (auto* const base_pointer = static_cast<network_config_info<T>*>(caller_context); base_pointer)
             {
+                // Cast from base to derived class safely
+                auto* const this_pointer = static_cast<T*>(base_pointer);
                 this_pointer->notify_ip_interface_ref_.fetch_add(1);
                 this_pointer->ip_interface_changed_callback(row, notification_type);
                 this_pointer->notify_ip_interface_ref_.fetch_sub(1);
