@@ -141,7 +141,7 @@ namespace netlib::log {
      * @note Thread-safe for concurrent read/write operations
      * @note Default value includes all components (timestamp, thread, logger, level, path)
      */
-    inline std::atomic<log_verbosity> global_log_verbosity{ log_verbosity::all };
+    inline std::atomic global_log_verbosity{ log_verbosity::none };
 
     /**
      * @brief Sets the global log verbosity flags.
@@ -987,7 +987,10 @@ namespace netlib::log {
         friend Derived;
     };
 
+    // Enhanced logging macros that build on the existing NETLIB_LOG infrastructure
+
 #if NETLIB_HAS_SOURCE_LOCATION
+// Core macros with source location support
 #define NETLIB_LOG(level_, fmt_, ...) \
     do { \
         if (this->get_log_level() >= (level_)) { \
@@ -1003,6 +1006,7 @@ namespace netlib::log {
     } while(0)
 
 #else
+// Core macros without source location support
 #define NETLIB_LOG(level_, fmt_, ...) \
     do { \
         if (this->get_log_level() >= (level_)) { \
@@ -1018,5 +1022,29 @@ namespace netlib::log {
     } while(0)
 
 #endif
+
+// Convenience macros for specific log levels - for use within logger classes
+#define NETLIB_ERROR(fmt_, ...)   NETLIB_LOG(::netlib::log::log_level::error, fmt_, ##__VA_ARGS__)
+#define NETLIB_WARNING(fmt_, ...) NETLIB_LOG(::netlib::log::log_level::warning, fmt_, ##__VA_ARGS__)
+#define NETLIB_INFO(fmt_, ...)    NETLIB_LOG(::netlib::log::log_level::info, fmt_, ##__VA_ARGS__)
+#define NETLIB_DEBUG(fmt_, ...)   NETLIB_LOG(::netlib::log::log_level::debug, fmt_, ##__VA_ARGS__)
+
+// Convenience macros for use with logger pointers
+#define NETLIB_ERROR_PTR(logger_ptr_, fmt_, ...)   NETLIB_LOG_PTR(logger_ptr_, ::netlib::log::log_level::error, fmt_, ##__VA_ARGS__)
+#define NETLIB_WARNING_PTR(logger_ptr_, fmt_, ...) NETLIB_LOG_PTR(logger_ptr_, ::netlib::log::log_level::warning, fmt_, ##__VA_ARGS__)
+#define NETLIB_INFO_PTR(logger_ptr_, fmt_, ...)    NETLIB_LOG_PTR(logger_ptr_, ::netlib::log::log_level::info, fmt_, ##__VA_ARGS__)
+#define NETLIB_DEBUG_PTR(logger_ptr_, fmt_, ...)   NETLIB_LOG_PTR(logger_ptr_, ::netlib::log::log_level::debug, fmt_, ##__VA_ARGS__)
+
+// Simple string message macros (for pre-formatted messages)
+#define NETLIB_ERROR_STR(msg_)   do { if (this->get_log_level() >= ::netlib::log::log_level::error) this->print_log(::netlib::log::log_level::error, msg_); } while(0)
+#define NETLIB_WARNING_STR(msg_) do { if (this->get_log_level() >= ::netlib::log::log_level::warning) this->print_log(::netlib::log::log_level::warning, msg_); } while(0)
+#define NETLIB_INFO_STR(msg_)    do { if (this->get_log_level() >= ::netlib::log::log_level::info) this->print_log(::netlib::log::log_level::info, msg_); } while(0)
+#define NETLIB_DEBUG_STR(msg_)   do { if (this->get_log_level() >= ::netlib::log::log_level::debug) this->print_log(::netlib::log::log_level::debug, msg_); } while(0)
+
+// Simple string message macros for use with logger pointers
+#define NETLIB_ERROR_STR_PTR(logger_ptr_, msg_)   do { if ((logger_ptr_) && (logger_ptr_)->get_log_level() >= ::netlib::log::log_level::error) (logger_ptr_)->print_log(::netlib::log::log_level::error, msg_); } while(0)
+#define NETLIB_WARNING_STR_PTR(logger_ptr_, msg_) do { if ((logger_ptr_) && (logger_ptr_)->get_log_level() >= ::netlib::log::log_level::warning) (logger_ptr_)->print_log(::netlib::log::log_level::warning, msg_); } while(0)
+#define NETLIB_INFO_STR_PTR(logger_ptr_, msg_)    do { if ((logger_ptr_) && (logger_ptr_)->get_log_level() >= ::netlib::log::log_level::info) (logger_ptr_)->print_log(::netlib::log::log_level::info, msg_); } while(0)
+#define NETLIB_DEBUG_STR_PTR(logger_ptr_, msg_)   do { if ((logger_ptr_) && (logger_ptr_)->get_log_level() >= ::netlib::log::log_level::debug) (logger_ptr_)->print_log(::netlib::log::log_level::debug, msg_); } while(0)
 
 } // namespace netlib::log

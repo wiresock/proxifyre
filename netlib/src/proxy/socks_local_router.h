@@ -75,9 +75,9 @@ namespace proxy
         std::vector<std::pair<std::unique_ptr<s5_tcp_proxy_server>, std::unique_ptr<s5_udp_proxy_server>>> proxy_servers_;
 
         /**
-         * @brief Maps process names to their corresponding proxy indexes.
+         * @brief Maps proxy indexes to their corresponding process names (sorted by proxy ID).
          */
-        std::unordered_map<std::wstring, size_t> name_to_proxy_;
+        std::multimap<size_t, std::wstring> proxy_to_names_;
 
         /**
          * @brief A list of excluded process names.
@@ -162,63 +162,6 @@ namespace proxy
          * allowing the process resolution thread to efficiently wait for work.
          */
         std::condition_variable process_resolve_buffer_queue_cv_;
-
-        /// <summary>
-        /// Cache key for match_app_name results combining process ID and app pattern
-        /// </summary>
-        struct match_cache_key
-        {
-            unsigned long process_id;
-            std::wstring app_pattern;
-
-            bool operator==(const match_cache_key& other) const noexcept
-            {
-                return process_id == other.process_id && app_pattern == other.app_pattern;
-            }
-        };
-
-        /// <summary>
-        /// Hash function for match_cache_key
-        /// </summary>
-        struct match_cache_key_hash
-        {
-            std::size_t operator()(const match_cache_key& key) const noexcept
-            {
-                // Combine hash of process_id and app_pattern
-                const auto h1 = std::hash<unsigned long>{}(key.process_id);
-                const auto h2 = std::hash<std::wstring>{}(key.app_pattern);
-                return h1 ^ (h2 << 1);
-            }
-        };
-
-        /// <summary>
-        /// Cache entry for match_app_name results
-        /// </summary>
-        struct match_cache_entry
-        {
-            bool matches;
-            std::chrono::steady_clock::time_point timestamp;
-        };
-
-        /// <summary>
-        /// Cache for match_app_name results to optimize repeated lookups
-        /// </summary>
-        mutable std::unordered_map<match_cache_key, match_cache_entry, match_cache_key_hash> match_cache_;
-
-        /// <summary>
-        /// Mutex to protect the match cache
-        /// </summary>
-        mutable std::mutex match_cache_mutex_;
-
-        /// <summary>
-        /// Cache TTL - how long cache entries remain valid (in seconds)
-        /// </summary>
-        static constexpr std::chrono::seconds cache_ttl{ 30 };
-
-        /// <summary>
-        /// Maximum cache size to prevent unbounded growth
-        /// </summary>
-        static constexpr size_t max_cache_size{ 2000 };
         
     public:
         enum supported_protocols : uint8_t
@@ -752,11 +695,7 @@ namespace proxy
             try
             {
                 // Associate the given process name to the specified proxy ID.
-                // If the process_name already exists in the map, its associated proxy ID is updated.
-                name_to_proxy_[to_upper(process_name)] = proxy_id;
-
-                // Clear cache since proxy mappings changed
-                clear_match_cache();
+                proxy_to_names_.emplace(proxy_id, to_upper(process_name));
             }
             catch (const std::exception& e) {
                 NETLIB_LOG(log_level::error, "Exception associating process name to proxy: {}", e.what());
@@ -784,9 +723,6 @@ namespace proxy
             {
                 // Append the excluded entry
                 excluded_list_.push_back(to_upper(excluded_entry));
-
-                // Clear cache since exclusion list changed
-                clear_match_cache();
             }
             catch (const std::exception& e) {
                 NETLIB_LOG(log_level::error, "Exception excluding process name: {}", e.what());
@@ -880,7 +816,7 @@ namespace proxy
         /**
          * @brief Matches an application name pattern against the process details with exclusion support.
          *
-         * This function performs a two-stage matching process with comprehensive result caching:
+         * This function performs a two-stage matching process:
          * 1. First, it checks if the process should be excluded based on the exclusion list
          * 2. Then, it performs pattern matching if the process is not excluded
          *
@@ -890,14 +826,19 @@ namespace proxy
          *
          * The pattern matching is performed case-insensitively using substring matching.
          * The function automatically excludes the current process (by process ID) to prevent self-matching.
-         * Results are cached to improve performance for repeated calls with the same parameters.
          *
          * @param app The application name or pattern to check against the process details.
          *            Can be either a simple process name (e.g., "notepad.exe") or a path-based pattern (e.g., "C:\\Windows\\System32\\notepad.exe").
          * @param process The process details to check against the application pattern.
          *                Must contain valid name and path_name fields for comparison.
-         * @return true if the process details match the application pattern, are not in the exclusion list,
+         * @return true if the process details match the application pattern and are not in the exclusion list,
          *              and are not the current process; false otherwise.
+         *
+         * @note This function does not perform caching. Caching is handled at a higher level by the
+         *       get_proxy_port_tcp() and get_proxy_port_udp() functions using process_to_proxy_cache_.
+         *
+         * @note The function performs direct string matching without regex support. All comparisons
+         *       are case-sensitive as input is already converted to uppercase by calling functions.
          */
         bool match_app_name(const std::wstring& app, const std::shared_ptr<iphelper::network_process>& process) const
         {
@@ -907,57 +848,20 @@ namespace proxy
             if (process->id == ::GetCurrentProcessId())
                 return false;
 
-            // Create cache key
-            const match_cache_key cache_key{.process_id = process->id, .app_pattern = app };
-            const auto now = std::chrono::steady_clock::now();
-
-            // Check cache first
-            {
-                std::lock_guard lock(match_cache_mutex_);
-
-                if (const auto it = match_cache_.find(cache_key);
-                    it != match_cache_.end() && (now - it->second.timestamp) < cache_ttl)
-                {
-                    return it->second.matches;
-                }
-            }
-
-            // Cache miss or expired - compute the result
-            bool matches = true;
-
             // Check exclusion list
             for (const auto& excluded_entry : excluded_list_) {
                 if ((excluded_entry.find(L'\\') != std::wstring::npos || excluded_entry.find(L'/') != std::wstring::npos)
                     ? (process->path_name.find(excluded_entry) != std::wstring::npos)
                     : (process->name.find(excluded_entry) != std::wstring::npos)
                     ) {
-                    matches = false;
-                    break;
+                    process->excluded = true;
+                    return false; // Excluded
                 }
             }
 
-            // If not excluded, check pattern matching
-            if (matches)
-            {
-                matches = (app.find(L'\\') != std::wstring::npos || app.find(L'/') != std::wstring::npos)
+            return (app.find(L'\\') != std::wstring::npos || app.find(L'/') != std::wstring::npos)
                     ? (process->path_name.find(app) != std::wstring::npos)
                     : (process->name.find(app) != std::wstring::npos);
-            }
-
-            // Update cache
-            {
-                std::lock_guard lock(match_cache_mutex_);
-
-                // Perform cleanup if cache is getting large
-                if (match_cache_.size() >= max_cache_size)
-                {
-                    cleanup_match_cache();
-                }
-
-                match_cache_[cache_key] = {.matches = matches, .timestamp = now };
-            }
-
-            return matches;
         }
 
         /**
@@ -968,21 +872,20 @@ namespace proxy
          */
         std::optional<uint16_t> get_proxy_port_tcp(const std::shared_ptr<iphelper::network_process>& process)
         {
-            // Locks the proxy servers and process to proxy map for reading.
+            if (!process) return {};
+
             std::shared_lock lock(lock_);
 
-            // Iterate through each pair in the process to proxy mapping.
-            for (auto& [name, proxy_id] : name_to_proxy_)
+            for (const auto& [proxy_id, process_pattern] : proxy_to_names_)
             {
-                // Check if the current process name contains the given process name.
-                if (match_app_name(name, process))
-                    // If it does, return the TCP proxy port associated with the proxy ID.
+                if (match_app_name(process_pattern, process))
+                {
                     return proxy_servers_[proxy_id].first
-                               ? std::optional(proxy_servers_[proxy_id].first->proxy_port())
-                               : std::nullopt;
+                        ? std::optional(proxy_servers_[proxy_id].first->proxy_port())
+                        : std::nullopt;
+                }
             }
 
-            // If the process name is not found in any of the keys, return an empty std::optional.
             return {};
         }
 
@@ -994,21 +897,21 @@ namespace proxy
          */
         std::optional<uint16_t> get_proxy_port_udp(const std::shared_ptr<iphelper::network_process>& process)
         {
-            // Locks the proxy servers and process to proxy map for reading.
+            if (!process) return {};
+
             std::shared_lock lock(lock_);
 
-            // Iterate through each pair in the process to proxy mapping.
-            for (auto& [name, proxy_id] : name_to_proxy_)
+            // Search for a matching process pattern
+            for (const auto& [proxy_id, process_pattern] : proxy_to_names_)
             {
-                // Check if the current process name contains the given process name.
-                if (match_app_name(name, process))
-                    // If it does, return the UDP proxy port associated with the proxy ID.
+                if (match_app_name(process_pattern, process))
+                {
                     return proxy_servers_[proxy_id].second
-                               ? std::optional(proxy_servers_[proxy_id].second->proxy_port())
-                               : std::nullopt;
+                        ? std::optional(proxy_servers_[proxy_id].second->proxy_port())
+                        : std::nullopt;
+                }
             }
 
-            // If the process name is not found in any of the keys, return an empty std::optional.
             return {};
         }
 
@@ -1118,7 +1021,10 @@ namespace proxy
                 }
             }
 
-            if (const auto port = get_proxy_port_udp(process); port.has_value())
+            if (process->excluded || process->bypass_udp)
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+
+            if (const auto port = process->udp_proxy_port ? process->udp_proxy_port : get_proxy_port_udp(process); port.has_value())
             {
                 if (udp_redirect_->is_new_endpoint(buffer))
                 {
@@ -1137,6 +1043,10 @@ namespace proxy
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
 
+            }
+            else
+            {
+                process->bypass_udp = true;
             }
 
             return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
@@ -1204,7 +1114,10 @@ namespace proxy
                 }
             }
 
-            if (const auto port = get_proxy_port_tcp(process); port.has_value())
+            if (process->excluded || process->bypass_tcp)
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+
+            if (const auto port = process->tcp_proxy_port ? process->tcp_proxy_port : get_proxy_port_tcp(process); port.has_value())
             {
                 // If this is a SYN packet (connection initiation), map the source port to the destination endpoint
                 if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
@@ -1226,6 +1139,10 @@ namespace proxy
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
+            }
+            else
+            {
+                process->bypass_tcp = true;
             }
 
             // Otherwise, pass the packet through
@@ -1479,62 +1396,6 @@ namespace proxy
             {
                 std::unique_lock lock(adapters_to_filter_lock_);
                 adapters_to_filter_ = std::move(adapters_to_filter);
-            }
-        }
-
-        /**
-         * @brief Clears the match cache. Should be called when exclusion list or proxy mappings change.
-         */
-        void clear_match_cache() const
-        {
-            std::lock_guard lock(match_cache_mutex_);
-            match_cache_.clear();
-        }
-
-        /**
-         * @brief Performs cache cleanup by removing expired and oldest entries if needed.
-         */
-        void cleanup_match_cache() const
-        {
-            const auto now = std::chrono::steady_clock::now();
-
-            // Remove expired entries
-            for (auto it = match_cache_.begin(); it != match_cache_.end();)
-            {
-                if ((now - it->second.timestamp) >= cache_ttl)
-                {
-                    it = match_cache_.erase(it);
-                }
-                else
-                {
-                    ++it;
-                }
-            }
-
-            // If still too large, remove the oldest entries
-            if (match_cache_.size() > max_cache_size)
-            {
-                // Create vector of iterators sorted by timestamp
-                std::vector<decltype(match_cache_.begin())> entries;
-                entries.reserve(match_cache_.size());
-
-                for (auto it = match_cache_.begin(); it != match_cache_.end(); ++it)
-                {
-                    entries.push_back(it);
-                }
-
-                // Sort by timestamp (oldest first)
-                std::ranges::sort(entries,
-                    [](const auto& a, const auto& b) {
-                        return a->second.timestamp < b->second.timestamp;
-                    });
-
-                // Remove the oldest entries until we're under the limit
-                const size_t entries_to_remove = match_cache_.size() - max_cache_size;
-                for (size_t i = 0; i < entries_to_remove && i < entries.size(); ++i)
-                {
-                    match_cache_.erase(entries[i]);
-                }
             }
         }
     };
