@@ -89,6 +89,14 @@ public:
     bool exclude_process_name(const std::wstring& process_name) const;
 
     /**
+     * @brief Enables or disables IPv6 blocking for proxied applications.
+     * When enabled, IPv6 traffic from proxied applications will be dropped to prevent IP leaks.
+     * @param enabled True to enable IPv6 blocking, false to disable.
+     * @return True if the setting was applied successfully, false otherwise.
+     */
+    [[nodiscard]] bool set_ipv6_blocking(bool enabled) const;
+
+    /**
      * @brief Sets the maximum number of log entries to keep.
      * @param log_limit The new log limit.
      */

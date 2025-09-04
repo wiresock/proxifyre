@@ -261,6 +261,14 @@ namespace Socksifier
         bool ExcludeProcessName(String^ excludedEntry);
 
         /// <summary>
+        /// Enables or disables IPv6 blocking for proxied applications.
+        /// When enabled, IPv6 traffic from proxied applications will be dropped to prevent IP leaks.
+        /// </summary>
+        /// <param name="enabled">True to enable IPv6 blocking, false to disable.</param>
+        /// <returns>True if the setting was applied successfully, otherwise false.</returns>
+        bool SetIPv6Blocking(bool enabled);
+
+        /// <summary>
         /// Gets or sets the interval (in milliseconds) for log event notifications.
         /// </summary>
         property Int32 LogEventInterval

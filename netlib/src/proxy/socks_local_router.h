@@ -135,6 +135,11 @@ namespace proxy
         std::unordered_set<std::string> adapters_to_filter_;
 
         /**
+         * @brief Flag to track whether IPv6 blocking is enabled.
+         */
+        std::atomic_bool ipv6_blocking_enabled_{ false };
+
+        /**
          * @brief Thread for lazy process resolution.
          */
         std::thread process_resolve_thread_;
@@ -208,6 +213,23 @@ namespace proxy
                     auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
                     const auto destination_mac = net::mac_address(ethernet_header->h_dest);
 
+                    // Handle IPv6 packets
+                    if (ntohs(ethernet_header->h_proto) == ETH_P_IPV6)
+                    {
+                        // If IPv6 blocking is enabled, drop IPv6 packets from proxied processes
+                        if (ipv6_blocking_enabled_)
+                        {
+                            // For IPv6, we'll drop all IPv6 packets when blocking is enabled
+                            // This prevents IP leaks from proxied applications
+                            log_packet_to_pcap(buffer);
+                            return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+                        }
+                        
+                        // If IPv6 blocking is disabled, pass IPv6 packets through
+                        return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+                    }
+
+                    // Handle IPv4 packets (existing logic)
                     if (ntohs(ethernet_header->h_proto) != ETH_P_IP)
                     {
                         return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
@@ -734,6 +756,45 @@ namespace proxy
             }
 
             return true;
+        }
+
+        /**
+         * @brief Enables or disables IPv6 blocking for proxied applications.
+         * When enabled, IPv6 packets from proxied applications will be dropped to prevent IP leaks.
+         * @param enabled True to enable IPv6 blocking, false to disable.
+         * @return True if the setting was applied successfully, false otherwise.
+         */
+        bool set_ipv6_blocking(bool enabled) noexcept
+        {
+            std::lock_guard lock(lock_);
+            
+            try
+            {
+                ipv6_blocking_enabled_ = enabled;
+                
+                // If enabling IPv6 blocking, add drop filters for IPv6 traffic
+                if (enabled)
+                {
+                    add_ipv6_drop_filters();
+                }
+                else
+                {
+                    remove_ipv6_drop_filters();
+                }
+                
+                NETLIB_LOG(log_level::info, "IPv6 blocking {}", enabled ? "enabled" : "disabled");
+                return true;
+            }
+            catch (const std::exception& e)
+            {
+                NETLIB_LOG(log_level::error, "Exception setting IPv6 blocking: {}", e.what());
+                return false;
+            }
+            catch (...)
+            {
+                NETLIB_LOG(log_level::error, "Unknown exception setting IPv6 blocking.");
+                return false;
+            }
         }
 
         /**
@@ -1396,6 +1457,55 @@ namespace proxy
             {
                 std::unique_lock lock(adapters_to_filter_lock_);
                 adapters_to_filter_ = std::move(adapters_to_filter);
+            }
+        }
+
+        /**
+         * @brief Adds IPv6 drop filters to block IPv6 traffic from proxied applications.
+         */
+        void add_ipv6_drop_filters()
+        {
+            try
+            {
+                // Create an IPv6 filter to drop all IPv6 traffic
+                ndisapi::filter<net::ip_address_v6> ipv6_drop_filter;
+                ipv6_drop_filter
+                    .set_action(ndisapi::action_t::drop)
+                    .set_direction(ndisapi::direction_t::both)
+                    .set_ether_type(ETH_P_IPV6);
+
+                // Add the IPv6 drop filter to the static filters list
+                static_filters_.add_filter_front(ipv6_drop_filter);
+                
+                NETLIB_LOG(log_level::debug, "Added IPv6 drop filter");
+            }
+            catch (const std::exception& e)
+            {
+                NETLIB_LOG(log_level::error, "Failed to add IPv6 drop filters: {}", e.what());
+            }
+        }
+
+        /**
+         * @brief Removes IPv6 drop filters to allow IPv6 traffic.
+         */
+        void remove_ipv6_drop_filters()
+        {
+            try
+            {
+                // Remove all IPv6 drop filters
+                static_filters_.remove_filters_if<net::ip_address_v6>(
+                    [](const ndisapi::filter<net::ip_address_v6>& filter)
+                    {
+                        return filter.get_action() == ndisapi::action_t::drop && 
+                               filter.get_ether_type() && 
+                               filter.get_ether_type().value() == ETH_P_IPV6;
+                    });
+                
+                NETLIB_LOG(log_level::debug, "Removed IPv6 drop filters");
+            }
+            catch (const std::exception& e)
+            {
+                NETLIB_LOG(log_level::error, "Failed to remove IPv6 drop filters: {}", e.what());
             }
         }
     };

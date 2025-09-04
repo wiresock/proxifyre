@@ -92,6 +92,20 @@ namespace ProxiFyre
                 }
             }
 
+            // Configure IPv6 blocking if enabled
+            if (serviceSettings.BlockIPv6)
+            {
+                if (_socksify.SetIPv6Blocking(true))
+                {
+                    if (_logLevel >= LogLevel.Info)
+                        LoggerInstance.Info("IPv6 blocking enabled to prevent IP leaks from proxied applications.");
+                }
+                else
+                {
+                    LoggerInstance.Warn("Failed to enable IPv6 blocking.");
+                }
+            }
+
             _socksify.Start();
 
             // Inform user that the application is running
@@ -166,11 +180,13 @@ namespace ProxiFyre
             /// <param name="logLevel">The log level as a string.</param>
             /// <param name="proxies">The list of proxy application settings.</param>
             /// <param name="excludedList">The list of process names or paths to exclude from proxying.</param>
-            public ProxiFyreSettings(string logLevel, List<AppSettings> proxies, List<string> excludedList = null)
+            /// <param name="blockIPv6">Whether to block IPv6 traffic for proxied applications.</param>
+            public ProxiFyreSettings(string logLevel, List<AppSettings> proxies, List<string> excludedList = null, bool blockIPv6 = false)
             {
                 LogLevel = logLevel;
                 Proxies = proxies;
                 ExcludedList = excludedList ?? new List<string>();
+                BlockIPv6 = blockIPv6;
             }
 
             /// <summary>
@@ -188,6 +204,12 @@ namespace ProxiFyre
             /// </summary>
             [JsonProperty("excludes", NullValueHandling = NullValueHandling.Ignore)]
             public List<string> ExcludedList { get; }
+
+            /// <summary>
+            /// Gets whether to block IPv6 traffic for proxied applications to prevent IP leaks.
+            /// </summary>
+            [JsonProperty("blockIPv6", NullValueHandling = NullValueHandling.Ignore)]
+            public bool BlockIPv6 { get; }
         }
 
         /// <summary>

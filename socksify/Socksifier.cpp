@@ -249,3 +249,17 @@ bool Socksifier::Socksifier::ExcludeProcessName(String^ excludedEntry)
     }
     return unmanaged_ptr_->exclude_process_name(msclr::interop::marshal_as<std::wstring>(excludedEntry));
 }
+
+/// <summary>
+/// Enables or disables IPv6 blocking for proxied applications.
+/// When enabled, IPv6 traffic from proxied applications will be dropped to prevent IP leaks.
+/// </summary>
+/// <param name="enabled">True to enable IPv6 blocking, false to disable.</param>
+/// <returns>True if the setting was applied successfully, otherwise false.</returns>
+bool Socksifier::Socksifier::SetIPv6Blocking(bool enabled)
+{
+    if (!unmanaged_ptr_) {
+        return false;
+    }
+    return unmanaged_ptr_->set_ipv6_blocking(enabled);
+}
