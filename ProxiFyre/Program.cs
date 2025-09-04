@@ -175,41 +175,26 @@ namespace ProxiFyre
         private class ProxiFyreSettings
         {
             /// <summary>
-            /// Initializes a new instance of the <see cref="ProxiFyreSettings"/> class.
+            /// Gets or sets the log level for the service.
             /// </summary>
-            /// <param name="logLevel">The log level as a string.</param>
-            /// <param name="proxies">The list of proxy application settings.</param>
-            /// <param name="excludedList">The list of process names or paths to exclude from proxying.</param>
-            /// <param name="blockIPv6">Whether to block IPv6 traffic for proxied applications.</param>
-            public ProxiFyreSettings(string logLevel, List<AppSettings> proxies, List<string> excludedList = null, bool blockIPv6 = false)
-            {
-                LogLevel = logLevel;
-                Proxies = proxies;
-                ExcludedList = excludedList ?? new List<string>();
-                BlockIPv6 = blockIPv6;
-            }
+            public string LogLevel { get; set; } = "Error";
 
             /// <summary>
-            /// Gets the log level for the service.
+            /// Gets or sets the list of proxy application settings.
             /// </summary>
-            public string LogLevel { get; }
+            public List<AppSettings> Proxies { get; set; } = new List<AppSettings>();
 
             /// <summary>
-            /// Gets the list of proxy application settings.
-            /// </summary>
-            public List<AppSettings> Proxies { get; }
-
-            /// <summary>
-            /// Gets the list of app names to exclude.
+            /// Gets or sets the list of app names to exclude.
             /// </summary>
             [JsonProperty("excludes", NullValueHandling = NullValueHandling.Ignore)]
-            public List<string> ExcludedList { get; }
+            public List<string> ExcludedList { get; set; } = new List<string>();
 
             /// <summary>
-            /// Gets whether to block IPv6 traffic for proxied applications to prevent IP leaks.
+            /// Gets or sets whether to block IPv6 traffic for proxied applications to prevent IP leaks.
             /// </summary>
             [JsonProperty("blockIPv6", NullValueHandling = NullValueHandling.Ignore)]
-            public bool BlockIPv6 { get; }
+            public bool BlockIPv6 { get; set; } = false;
         }
 
         /// <summary>
@@ -218,46 +203,29 @@ namespace ProxiFyre
         internal class AppSettings
         {
             /// <summary>
-            /// Initializes a new instance of the <see cref="AppSettings"/> class.
-            /// </summary>
-            /// <param name="appNames">List of application names to associate with the proxy.</param>
-            /// <param name="socks5ProxyEndpoint">SOCKS5 proxy endpoint address.</param>
-            /// <param name="username">Username for proxy authentication.</param>
-            /// <param name="password">Password for proxy authentication.</param>
-            /// <param name="supportedProtocols">List of supported protocols (e.g., TCP, UDP).</param>
-            public AppSettings(List<string> appNames, string socks5ProxyEndpoint, string username, string password, List<string> supportedProtocols)
-            {
-                AppNames = appNames;
-                Socks5ProxyEndpoint = socks5ProxyEndpoint;
-                Username = username;
-                Password = password;
-                SupportedProtocols = supportedProtocols;
-            }
-
-            /// <summary>
             /// Gets or sets the list of application names to associate with the proxy.
             /// </summary>
-            public List<string> AppNames { get; set; }
+            public List<string> AppNames { get; set; } = new List<string>();
 
             /// <summary>
-            /// Gets the SOCKS5 proxy endpoint address.
+            /// Gets or sets the SOCKS5 proxy endpoint address.
             /// </summary>
-            public string Socks5ProxyEndpoint { get; }
+            public string Socks5ProxyEndpoint { get; set; } = "";
 
             /// <summary>
-            /// Gets the username for proxy authentication.
+            /// Gets or sets the username for proxy authentication.
             /// </summary>
-            public string Username { get; }
+            public string Username { get; set; } = "";
 
             /// <summary>
-            /// Gets the password for proxy authentication.
+            /// Gets or sets the password for proxy authentication.
             /// </summary>
-            public string Password { get; }
+            public string Password { get; set; } = "";
 
             /// <summary>
-            /// Gets the list of supported protocols (e.g., TCP, UDP).
+            /// Gets or sets the list of supported protocols (e.g., TCP, UDP).
             /// </summary>
-            public List<string> SupportedProtocols { get; }
+            public List<string> SupportedProtocols { get; set; } = new List<string>();
 
             /// <summary>
             /// Gets the supported protocols as an enum value.

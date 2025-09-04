@@ -1,0 +1,16 @@
+{
+  "logLevel": "Info",
+  "blockIPv6": true,
+  "proxies": [
+    {
+      "appNames": ["discord", "chrome"],
+      "socks5ProxyEndpoint": "proxy.example.com:1080",
+      "username": "your_username",
+      "password": "your_password", 
+      "supportedProtocols": ["TCP", "UDP"]
+    }
+  ],
+  "excludes": [
+    "notepad.exe"
+  ]
+}

@@ -26,6 +26,25 @@ LogLevel can have one of the following values which define the detail of the log
 
 ---
 
+### IPv6 Blocking *(new in v2.2.0)*
+
+- **blockIPv6** *(optional)*: A boolean value that enables IPv6 traffic blocking for proxied applications.
+  - When set to `true`, all IPv6 traffic from applications listed in `appNames` will be dropped, preventing IPv6 IP leaks.
+  - When set to `false` or omitted, IPv6 traffic passes through normally (default behavior).
+  - This feature is particularly useful for preventing IP leaks in applications like Discord that may use IPv6 for voice channels while IPv4 traffic goes through the proxy.
+
+Example:
+```json
+{
+  "logLevel": "Info",
+  "blockIPv6": true,
+  "proxies": [...],
+  "excludes": [...]
+}
+```
+
+---
+
 ### appNames
 
 - The application name can be a **partial** or **full name** of the executable.  
@@ -76,6 +95,7 @@ If the SOCKS5 proxy does not support authorization, you can skip the `username` 
 ```json
 {
  "logLevel": "Error",
+ "blockIPv6": true,
  "proxies": [
    {
      "appNames": ["chrome", "C:\\Program Files\\WindowsApps\\ROBLOXCORPORATION.ROBLOX"],
