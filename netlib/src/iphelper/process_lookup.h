@@ -168,8 +168,8 @@ namespace iphelper
          * @param log_stream Optional output stream for log messages
          */
         explicit process_lookup(const log_level log_level = log_level::error,
-            const std::shared_ptr<std::ostream>& log_stream = nullptr)
-            : netlib::log::logger<process_lookup>(log_level, log_stream)
+            std::shared_ptr<std::ostream> log_stream = nullptr)
+            : netlib::log::logger<process_lookup>(log_level, std::move(log_stream))
         {
             default_process_ = std::make_shared<network_process>(0, L"SYSTEM", L"SYSTEM");
             initialize_tcp_table();

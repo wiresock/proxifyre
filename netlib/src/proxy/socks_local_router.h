@@ -162,7 +162,20 @@ namespace proxy
          * allowing the process resolution thread to efficiently wait for work.
          */
         std::condition_variable process_resolve_buffer_queue_cv_;
-        
+
+        /**
+         * @brief Shared pointer to an output stream for PCAP (packet capture) logging.
+         *
+         * This stream is used to write packet capture data when PCAP logging is enabled.
+         * The stream is passed to the constructor and if valid, is used to initialize
+         * the pcap_logger_ for packet logging functionality. The shared ownership allows
+         * the stream to be safely shared across different components of the router.
+         *
+         * @see pcap_logger_
+         * @see log_packet_to_pcap()
+         */
+        std::shared_ptr<std::ostream> pcap_log_stream_;
+
     public:
         enum supported_protocols : uint8_t
         {
@@ -182,17 +195,18 @@ namespace proxy
          * @param pcap_log_stream Optional reference to an output stream for pcap logging.
          */
         explicit socks_local_router(const log_level log_level = log_level::error,
-                                    const std::shared_ptr<std::ostream>& log_stream = nullptr,
-                                    const std::shared_ptr<std::ostream>& pcap_log_stream = nullptr) :
-                                    logger(log_level, log_stream),
+                                    std::shared_ptr<std::ostream> log_stream = nullptr,
+                                    std::shared_ptr<std::ostream> pcap_log_stream = nullptr) :
+                                    logger(log_level, std::move(log_stream)),
                                     static_filters_{ true, true, log_level_, log_stream_ },
                                     process_lookup_v4_{ log_level_, log_stream_ },
-                                    process_lookup_v6_{ log_level_, log_stream_ }
+                                    process_lookup_v6_{ log_level_, log_stream_ },
+                                    pcap_log_stream_(std::move(pcap_log_stream))
         {
             using namespace std::string_literals;
 
             if (pcap_log_stream) {
-                pcap_logger_.emplace(*pcap_log_stream);
+                pcap_logger_.emplace(*pcap_log_stream_);
             }
 
             // Initialize TCP and UDP redirect objects

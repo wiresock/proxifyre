@@ -295,8 +295,8 @@ namespace ndisapi
             const bool filter_cache,
             const bool fragment_cache,
             const log_level log_level = log_level::error,
-            const std::shared_ptr<std::ostream>& log_stream = nullptr)
-            : logger(log_level, log_stream)
+            std::shared_ptr<std::ostream> log_stream = nullptr)
+            : logger(log_level, std::move(log_stream))
         {
             using namespace std::string_literals;
 
