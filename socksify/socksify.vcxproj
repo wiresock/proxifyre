@@ -148,12 +148,13 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <WarningLevel>Level3</WarningLevel>
       <PreprocessorDefinitions>_CRT_RAND_S;_LIB;_ENABLE_EXTENDED_ALIGNED_STORAGE;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <ConformanceMode>false</ConformanceMode>
+      <AdditionalIncludeDirectories>$(ProjectDir)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;</AdditionalDependencies>
@@ -268,14 +269,17 @@
     <ClInclude Include="..\netlib\src\winsys\object.h" />
     <ClInclude Include="logger.h" />
     <ClInclude Include="mixed_types.h" />
+    <ClInclude Include="policy\dest_inclusion_policy.h" />
     <ClInclude Include="Socksifier.h" />
-    <ClInclude Include="socksify_unmanaged.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="unmanaged.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AssemblyInfo.cpp" />
+    <ClCompile Include="policy\dest_inclusion_policy.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="Socksifier.cpp" />
     <ClCompile Include="socksify_unmanaged.cpp">
       <CompileAsManaged Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</CompileAsManaged>
@@ -284,6 +288,9 @@
       <CompileAsManaged Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">false</CompileAsManaged>
       <CompileAsManaged Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</CompileAsManaged>
       <CompileAsManaged Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">false</CompileAsManaged>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <EnableModules Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</EnableModules>
+      <EnableModules Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</EnableModules>
     </ClCompile>
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>

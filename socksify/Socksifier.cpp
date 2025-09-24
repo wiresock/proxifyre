@@ -1,251 +1,139 @@
 #include "pch.h"
+#include <msclr/lock.h>
 #include "Socksifier.h"
+#include <msclr/marshal_cppstd.h>
+
 #include "socksify_unmanaged.h"
+#include "policy/dest_inclusion_policy.h"
 
-// ReSharper disable CppInconsistentNaming
+namespace Managed = Socksifier;
 
-/// <summary>
-/// Initializes a new instance of the <see cref="Socksifier"/> class with the specified log level.
-/// Sets up the unmanaged core, log event, and starts the logging thread.
-/// </summary>
-/// <param name="log_level">The logging level to use.</param>
-Socksifier::Socksifier::Socksifier(LogLevel log_level)
+Managed::Socksifier::Socksifier(Managed::LogLevel log_level)
 {
-    unmanaged_ptr_ = socksify_unmanaged::get_instance(static_cast<log_level_mx>(log_level));
+    unmanaged_ptr_ = socksify_unmanaged::get_instance_with_level(
+        static_cast<log_level_mx>(static_cast<unsigned char>(static_cast<int>(log_level))));
 
-    log_event_ = gcnew Threading::AutoResetEvent(false);
-    unmanaged_ptr_->set_log_event(static_cast<HANDLE>(log_event_->SafeWaitHandle->DangerousGetHandle()));
-    logging_thread_ = gcnew Threading::Thread(gcnew Threading::ThreadStart(this, &Socksifier::log_thread));
+    log_event_ = gcnew System::Threading::AutoResetEvent(false);
+    logging_thread_ = gcnew System::Threading::Thread(
+        gcnew System::Threading::ThreadStart(this, &Managed::Socksifier::log_thread));
     logging_thread_->Start();
 }
 
-/// <summary>
-/// Finalizer for the <see cref="Socksifier"/> class.
-/// Ensures the logging thread is stopped and unmanaged resources are released.
-/// </summary>
-Socksifier::Socksifier::!Socksifier()
+Managed::Socksifier::!Socksifier()
 {
-    // Set flag that we are going to exit
     logger_thread_active_ = false;
+    if (log_event_) log_event_->Set();
+    if (logging_thread_ && logging_thread_->IsAlive) logging_thread_->Join();
 
-    if (log_event_ != nullptr)
-        log_event_->Set();
-
-    if (logging_thread_ != nullptr && logging_thread_->IsAlive)
-        logging_thread_->Join();
-
-    // Release unmanaged core
-    if (unmanaged_ptr_)
-    {
-        [[maybe_unused]] auto result = unmanaged_ptr_->stop();
-        unmanaged_ptr_ = nullptr;
-    }
-
-    // Dispose the AutoResetEvent
-    if (log_event_ != nullptr)
-    {
-        log_event_->Close();
-        log_event_ = nullptr;
-    }
+    if (unmanaged_ptr_) { unmanaged_ptr_->stop(); unmanaged_ptr_ = nullptr; }
+    if (log_event_) { log_event_->Close(); log_event_ = nullptr; }
 }
 
-/// <summary>
-/// Destructor for the <see cref="Socksifier"/> class.
-/// Calls the finalizer to clean up resources.
-/// </summary>
-Socksifier::Socksifier::~Socksifier()
+Managed::Socksifier::~Socksifier()
 {
     this->!Socksifier();
 }
 
-/// <summary>
-/// Thread procedure for processing and dispatching log events.
-/// Waits for log events or interval, reads logs from the unmanaged core, and raises managed log events.
-/// </summary>
-void Socksifier::Socksifier::log_thread()
+void Managed::Socksifier::RaiseLogEvent()
 {
-    do
+    LogEvent(this, gcnew LogEventArgs());
+}
+
+void Managed::Socksifier::log_thread()
+{
+    while (logger_thread_active_)
     {
         log_event_->WaitOne(log_event_interval_);
-
-        // Exit if thread was awakened to do it
-        if (!logger_thread_active_)
-            break;
-
-        if (unmanaged_ptr_)
-        {
-            if (auto log = unmanaged_ptr_->read_log(); !log.empty())
-            {
-                auto managed_log_list = gcnew Collections::Generic::List<LogEntry^>;
-                for (auto& [fst, snd] : log)
-                {
-                    if (std::holds_alternative<std::string>(snd))
-                        managed_log_list->Add(gcnew LogEntry(fst, ProxyGatewayEvent::Message,
-                            gcnew String(std::get<std::string>(snd).c_str())));
-                    else
-                    {
-                        switch (std::get<event_mx>(snd).type)
-                        {
-                        case event_type_mx::connected:
-                            managed_log_list->Add(gcnew LogEntry(fst, ProxyGatewayEvent::Connected, nullptr));
-                            break;
-                        case event_type_mx::disconnected:
-                            managed_log_list->Add(gcnew LogEntry(fst, ProxyGatewayEvent::Disconnected, nullptr));
-                            break;
-                        case event_type_mx::address_error:
-                            managed_log_list->Add(gcnew LogEntry(fst, ProxyGatewayEvent::AddressError, nullptr));
-                            break;
-                        default:
-                            break;
-                        }
-                    }
-                }
-
-                LogEvent(this, gcnew LogEventArgs(managed_log_list));
-            }
-        }
-    } while (logger_thread_active_);
+        if (!logger_thread_active_) break;
+        RaiseLogEvent();
+    }
 }
 
-/// <summary>
-/// Gets the current log limit from the unmanaged core.
-/// </summary>
-/// <returns>The log limit.</returns>
-UInt32 Socksifier::Socksifier::GetLogLimit()
-{
-    return unmanaged_ptr_->get_log_limit();
-}
-
-/// <summary>
-/// Sets the log limit in the unmanaged core.
-/// </summary>
-/// <param name="value">The new log limit.</param>
-void Socksifier::Socksifier::SetLogLimit(const UInt32 value)
-{
-    unmanaged_ptr_->set_log_limit(value);
-}
-
-/// <summary>
-/// Gets the singleton instance of the <see cref="Socksifier"/> class with the specified log level.
-/// </summary>
-/// <param name="log_level">The logging level to use.</param>
-/// <returns>The singleton instance.</returns>
-Socksifier::Socksifier^ Socksifier::Socksifier::GetInstance(const LogLevel log_level)
+Managed::Socksifier^ Managed::Socksifier::GetInstance(Managed::LogLevel log_level)
 {
     if (instance_ == nullptr)
     {
-        msclr::lock l(Socksifier::typeid);
-
-        if (instance_ == nullptr)
-            instance_ = gcnew Socksifier(log_level);
+        msclr::lock l(Managed::Socksifier::typeid);
+        if (instance_ == nullptr) instance_ = gcnew Managed::Socksifier(log_level);
     }
-
     return instance_;
 }
 
-/// <summary>
-/// Gets the singleton instance of the <see cref="Socksifier"/> class with the default log level.
-/// </summary>
-/// <returns>The singleton instance.</returns>
-Socksifier::Socksifier^ Socksifier::Socksifier::GetInstance()
+Managed::Socksifier^ Managed::Socksifier::GetInstance()
 {
-    return GetInstance(LogLevel::All);
-}
-
-/// <summary>
-/// Starts the proxy gateway via the unmanaged core.
-/// </summary>
-/// <returns>True if started successfully, otherwise false.</returns>
-bool Socksifier::Socksifier::Start()
-{
-    if (unmanaged_ptr_)
-        return unmanaged_ptr_->start();
-
-    return false;
-}
-
-/// <summary>
-/// Stops the proxy gateway via the unmanaged core.
-/// </summary>
-/// <returns>True if stopped successfully, otherwise false.</returns>
-bool Socksifier::Socksifier::Stop()
-{
-    if (unmanaged_ptr_)
-        return unmanaged_ptr_->stop();
-    return false;
-}
-
-/// <summary>
-/// Adds a SOCKS5 proxy to the gateway.
-/// </summary>
-/// <param name="endpoint">The proxy endpoint (IP:Port).</param>
-/// <param name="username">The username for authentication.</param>
-/// <param name="password">The password for authentication.</param>
-/// <param name="protocols">The supported protocols.</param>
-/// <param name="start">Whether to start the proxy immediately.</param>
-/// <returns>A handle to the proxy instance, or -1 on failure.</returns>
-IntPtr Socksifier::Socksifier::AddSocks5Proxy(String^ endpoint, String^ username, String^ password,
-    SupportedProtocolsEnum protocols, const bool start)
-{
-    if (!unmanaged_ptr_)
-        return static_cast<IntPtr>(-1);
-
-    auto protocols_mx = supported_protocols_mx::both;
-    switch (protocols)
+    if (instance_ == nullptr)
     {
-    case SupportedProtocolsEnum::TCP:
-        protocols_mx = supported_protocols_mx::tcp;
-        break;
-    case SupportedProtocolsEnum::UDP:
-        protocols_mx = supported_protocols_mx::udp;
-        break;
-    default:
-        break;
+        msclr::lock l(Managed::Socksifier::typeid);
+        if (instance_ == nullptr) instance_ = gcnew Managed::Socksifier(Managed::LogLevel::Info);
     }
+    return instance_;
+}
+
+bool Managed::Socksifier::Start() { return unmanaged_ptr_ ? unmanaged_ptr_->start() : false; }
+bool Managed::Socksifier::Stop()  { return unmanaged_ptr_ ? unmanaged_ptr_->stop()  : false; }
+
+System::IntPtr Managed::Socksifier::AddSocks5Proxy(System::String^ endpoint, System::String^ username,
+    System::String^ password, Managed::SupportedProtocolsEnum protocols, const bool start)
+{
+    if (!unmanaged_ptr_) return System::IntPtr(-1);
+
+    unsigned char code = 2; // BOTH
+    if (protocols == Managed::SupportedProtocolsEnum::TCP) code = 0;
+    else if (protocols == Managed::SupportedProtocolsEnum::UDP) code = 1;
+
+    auto mx = static_cast<supported_protocols_mx>(code);
 
     if (username != nullptr && password != nullptr)
-    {
-        return static_cast<IntPtr>(unmanaged_ptr_->add_socks5_proxy(
-            msclr::interop::marshal_as<std::string>(endpoint),
-            protocols_mx,
-            start,
+        return System::IntPtr(unmanaged_ptr_->add_socks5_proxy(
+            msclr::interop::marshal_as<std::string>(endpoint), mx, start,
             msclr::interop::marshal_as<std::string>(username),
-            msclr::interop::marshal_as<std::string>(password)
-        ));
-    }
+            msclr::interop::marshal_as<std::string>(password)));
 
-    return static_cast<IntPtr>(unmanaged_ptr_->add_socks5_proxy(
-        msclr::interop::marshal_as<std::string>(endpoint), protocols_mx, start));
+    return System::IntPtr(unmanaged_ptr_->add_socks5_proxy(
+        msclr::interop::marshal_as<std::string>(endpoint), mx, start));
 }
 
-/// <summary>
-/// Associates a process name with a specific proxy instance.
-/// </summary>
-/// <param name="processName">The process name to associate.</param>
-/// <param name="proxy">The proxy handle.</param>
-/// <returns>True if association was successful, otherwise false.</returns>
-bool Socksifier::Socksifier::AssociateProcessNameToProxy(String^ processName, IntPtr proxy)
+bool Managed::Socksifier::AssociateProcessNameToProxy(System::String^ processName, System::IntPtr proxy)
 {
-    if (!unmanaged_ptr_)
-        return false;
+    if (!unmanaged_ptr_) return false;
 #if _WIN64
-    return unmanaged_ptr_->associate_process_name_to_proxy(msclr::interop::marshal_as<std::wstring>(processName),
-        proxy.ToInt64());
+    return unmanaged_ptr_->associate_process_name_to_proxy(
+        msclr::interop::marshal_as<std::wstring>(processName), proxy.ToInt64());
 #else
-    return unmanaged_ptr_->associate_process_name_to_proxy(msclr::interop::marshal_as<std::wstring>(processName),
-        proxy.ToInt32());
-#endif //_WIN64
+    return unmanaged_ptr_->associate_process_name_to_proxy(
+        msclr::interop::marshal_as<std::wstring>(processName), proxy.ToInt32());
+#endif
 }
 
-/// <summary>
-/// Excludes a process from being tunnelled by the gateway.
-/// </summary>
-/// <param name="excludedEntry">The process name to exclude.</param>
-/// <returns>True if exclusion was successful, otherwise false.</returns>
-bool Socksifier::Socksifier::ExcludeProcessName(String^ excludedEntry)
+bool Managed::Socksifier::ExcludeProcessName(System::String^ excludedEntry)
 {
-    if (!unmanaged_ptr_) {
-        return false;
-    }
+    if (!unmanaged_ptr_) return false;
     return unmanaged_ptr_->exclude_process_name(msclr::interop::marshal_as<std::wstring>(excludedEntry));
+}
+
+bool Managed::Socksifier::IncludeProcessDestinationCidr(System::String^ processName, System::String^ cidr)
+{
+    if (!unmanaged_ptr_) return false;
+    return unmanaged_ptr_->include_process_dst_cidr(
+        msclr::interop::marshal_as<std::wstring>(processName),
+        msclr::interop::marshal_as<std::string>(cidr));
+}
+bool Managed::Socksifier::RemoveProcessDestinationCidr(System::String^ processName, System::String^ cidr)
+{
+    if (!unmanaged_ptr_) return false;
+    return unmanaged_ptr_->remove_process_dst_cidr(
+        msclr::interop::marshal_as<std::wstring>(processName),
+        msclr::interop::marshal_as<std::string>(cidr));
+}
+bool Managed::Socksifier::IncludeGlobalDestinationCidr(System::String^ cidr)
+{
+    if (!unmanaged_ptr_) return false;
+    return unmanaged_ptr_->include_global_dst_cidr(
+        msclr::interop::marshal_as<std::string>(cidr));
+}
+bool Managed::Socksifier::RemoveGlobalDestinationCidr(System::String^ cidr)
+{
+    if (!unmanaged_ptr_) return false;
+    return unmanaged_ptr_->remove_global_dst_cidr(
+        msclr::interop::marshal_as<std::string>(cidr));
 }
