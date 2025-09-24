@@ -1,287 +1,285 @@
-﻿using Newtonsoft.Json;
-using NLog;
-using NLog.Config;
-using Socksifier;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using Topshelf;
-using LogLevel = Socksifier.LogLevel;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using NLog;
+using NLog.Config;
+using NLog.Targets;
+using Newtonsoft.Json;
 
 namespace ProxiFyre
 {
-    /// <summary>
-    /// Main class for the SOCKS proxy application.
-    /// Handles service lifecycle, configuration loading, and proxy association.
-    /// </summary>
-    public class ProxiFyreService
+    internal static class Program
     {
-        /// <summary>
-        /// NLog logger instance for logging service events.
-        /// </summary>
-        private static readonly Logger LoggerInstance = LogManager.GetCurrentClassLogger();
+        // ===== Native policy (DIP) interop: per-process rule only =============
+        // Exported from socksify.dll (C/C++): int dip_add_process(const wchar_t*, const char*);
+        [DllImport("socksify.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int dip_add_process(string process_name, [MarshalAs(UnmanagedType.LPStr)] string cidr);
 
-        /// <summary>
-        /// The current log level for the service.
-        /// </summary>
-        private static LogLevel _logLevel;
+        private static Logger Log;
 
-        /// <summary>
-        /// The Socksifier instance used to manage SOCKS5 proxies.
-        /// </summary>
-        private Socksifier.Socksifier _socksify;
-
-        /// <summary>
-        /// Starts the ProxiFyre service, loads configuration, and initializes proxies.
-        /// </summary>
-        public void Start()
+        private static int Main(string[] args)
         {
-            // Get the current executable path
-            var executablePath = Assembly.GetExecutingAssembly().Location;
-            var directoryPath = Path.GetDirectoryName(executablePath);
+            ConfigureLogging();
+            Log = LogManager.GetCurrentClassLogger();
 
-            // Form the path to app-config.json
-            var configFilePath = Path.Combine(directoryPath ?? string.Empty, "app-config.json");
-
-            // Form the path to NLog.config
-            var logConfigFilePath = Path.Combine(directoryPath ?? string.Empty, "NLog.config");
-
-            // Load the configuration from JSON
-            var serviceSettings = JsonConvert.DeserializeObject<ProxiFyreSettings>(File.ReadAllText(configFilePath));
-
-            LogManager.Configuration = new XmlLoggingConfiguration(logConfigFilePath);
-
-            // Handle the global log level from the configuration
-            _logLevel = Enum.TryParse<LogLevel>(serviceSettings.LogLevel, true, out var globalLogLevel)
-                ? globalLogLevel
-                : LogLevel.Info;
-
-            // Get an instance of the Socksifier
-            _socksify = Socksifier.Socksifier.GetInstance(_logLevel);
-
-            // Attach the LogPrinter method to the LogEvent event
-            _socksify.LogEvent += LogPrinter;
-
-            // Set the limit for logging and the interval between logs
-            _socksify.LogLimit = 100;
-            _socksify.LogEventInterval = 1000;
-
-            foreach (var appSettings in serviceSettings.Proxies)
+            try
             {
-                // Add the defined SOCKS5 proxies
-                var proxy = _socksify.AddSocks5Proxy(appSettings.Socks5ProxyEndpoint, appSettings.Username,
-                    appSettings.Password, appSettings.SupportedProtocolsParse,
-                    true); // Assuming the AddSocks5Proxy method supports a list of protocols
+                AppConfig cfg = LoadConfig();
 
-                foreach (var appName in appSettings.AppNames)
-                    // Associate the defined application names to the proxies
-                    if (proxy.ToInt64() != -1 && _socksify.AssociateProcessNameToProxy(appName, proxy) && _logLevel >= LogLevel.Info)
-                        LoggerInstance.Info(
-                            $"Successfully associated {appName} to {appSettings.Socks5ProxyEndpoint} SOCKS5 proxy with protocols {string.Join(", ", appSettings.SupportedProtocols)}!");
+                object socksifier = StartSocksifierViaReflection(cfg.ProxyHost, cfg.ProxyPort);
+
+                // Add processes to the managed socksifier if such method exists
+                if (cfg.Processes != null)
+                {
+                    foreach (ProcRule p in cfg.Processes)
+                    {
+                        if (p == null) continue;
+                        if (!p.Enabled) continue;
+                        if (string.IsNullOrWhiteSpace(p.Name)) continue;
+
+                        // Tell managed layer (best-effort)
+                        TryCallOneStringParam(socksifier, new[] { "Add", "Include", "AddProcess", "IncludeProcess", "Whitelist" }, p.Name.Trim());
+
+                        // Add DIP rules for each CIDR (optional)
+                        if (p.IpRanges != null)
+                        {
+                            foreach (string cidr in p.IpRanges)
+                            {
+                                if (string.IsNullOrWhiteSpace(cidr)) continue;
+                                int ok = dip_add_process(p.Name.Trim(), cidr.Trim());
+                                if (ok != 1)
+                                    Log.Warn("dip_add_process failed: {0} / {1}", p.Name, cidr);
+                            }
+                        }
+                    }
+                }
+
+                Log.Info("ProxiFyre running. Press Ctrl+C to exit.");
+                ManualResetEvent quit = new ManualResetEvent(false);
+                Console.CancelKeyPress += (s, e) => { e.Cancel = true; quit.Set(); };
+                quit.WaitOne();
+
+                TryCallNoParam(socksifier, new[] { "Stop", "Shutdown" });
+                Log.Info("ProxiFyre stopped.");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Log.Fatal(ex, "Fatal error in ProxiFyre.");
+                return 1;
+            }
+            finally
+            {
+                LogManager.Shutdown();
+            }
+        }
+
+        // ===== Logging: always ProxiFyre.log, roll daily to ProxiFyre_yyyyMMdd.txt
+        private static void ConfigureLogging()
+        {
+            LoggingConfiguration config = new LoggingConfiguration();
+
+            string logDir = AppDomain.CurrentDomain.BaseDirectory;
+            FileTarget fileTarget = new FileTarget("file");
+            fileTarget.FileName = Path.Combine(logDir, "ProxiFyre.log");
+            fileTarget.Layout = "${longdate}|${level:uppercase=true}|${message}${onexception:inner=${newline}${exception:format=tostring}}";
+            fileTarget.ConcurrentWrites = true;
+            fileTarget.KeepFileOpen = false;
+
+            // Daily rolling
+            fileTarget.ArchiveEvery = FileArchivePeriod.Day;
+            fileTarget.ArchiveNumbering = ArchiveNumberingMode.Date;
+            fileTarget.ArchiveDateFormat = "yyyyMMdd";
+            // Rolled files: ProxiFyre_yyyyMMdd.txt
+            fileTarget.ArchiveFileName = Path.Combine(logDir, "ProxiFyre_{#}.txt");
+            fileTarget.Encoding = Encoding.UTF8;
+            fileTarget.MaxArchiveFiles = 30; // keep last 30 days
+
+            config.AddRule(LogLevel.Info, LogLevel.Fatal, fileTarget);
+
+            LogManager.Configuration = config;
+        }
+
+        // ===== JSON config loader (file next to the exe)
+        private static AppConfig LoadConfig()
+        {
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string[] candidates = new string[]
+            {
+                Path.Combine(baseDir, "ProxiFyre.json"),
+                Path.Combine(baseDir, "config.json")
+            };
+
+            string path = null;
+            foreach (string c in candidates)
+            {
+                if (File.Exists(c)) { path = c; break; }
             }
 
-            foreach (var excludedEntry in serviceSettings.ExcludedList)
+            if (path == null)
+                throw new FileNotFoundException("No config JSON found (ProxiFyre.json or config.json) next to the exe.");
+
+            string json = File.ReadAllText(path);
+            AppConfig cfg = JsonConvert.DeserializeObject<AppConfig>(json);
+            if (cfg == null) cfg = new AppConfig();
+
+            if (cfg.ProxyPort <= 0) cfg.ProxyPort = 1080;
+            if (string.IsNullOrWhiteSpace(cfg.ProxyHost)) cfg.ProxyHost = "127.0.0.1";
+
+            return cfg;
+        }
+
+        // ===== Managed Socksifier boot via reflection (no compile-time tie)
+        private static object StartSocksifierViaReflection(string host, int port)
+        {
+            try
             {
-                // Add the relevant entries dynamically to the excluded list
-                if (_socksify.ExcludeProcessName(excludedEntry)) {
-                    LoggerInstance.Info($"Successfully excluded {excludedEntry} from being proxied.");
-                } else {
-                    LoggerInstance.Warn($"Failed to exclude {excludedEntry} from being proxied.");
+                Type type = null;
+
+                // Look in already loaded assemblies
+                foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    Type found;
+                    try { found = a.GetTypes().FirstOrDefault(t => t != null && t.Name == "Socksifier"); }
+                    catch { found = null; }
+                    if (found != null) { type = found; break; }
+                }
+
+                // Try load socksify.dll as managed assembly (if not found)
+                if (type == null)
+                {
+                    string candidate = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "socksify.dll");
+                    if (File.Exists(candidate))
+                    {
+                        try
+                        {
+                            Assembly asm = Assembly.LoadFrom(candidate);
+                            type = asm.GetTypes().FirstOrDefault(t => t != null && t.Name == "Socksifier");
+                        }
+                        catch { /* ignore */ }
+                    }
+                }
+
+                if (type == null)
+                {
+                    Log.Warn("Managed type 'Socksifier' not found; continuing with DIP policy only.");
+                    return null;
+                }
+
+                // Get instance (static Instance or default ctor)
+                object instance = null;
+                PropertyInfo instanceProp = type.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
+                if (instanceProp != null)
+                {
+                    try { instance = instanceProp.GetValue(null, null); } catch { instance = null; }
+                }
+                if (instance == null)
+                {
+                    try { instance = Activator.CreateInstance(type); } catch { instance = null; }
+                }
+
+                if (instance == null)
+                {
+                    Log.Warn("Could not create 'Socksifier' instance; continuing with DIP policy only.");
+                    return null;
+                }
+
+                // Start(host, port) or Start()
+                MethodInfo start = type.GetMethod("Start", new[] { typeof(string), typeof(int) });
+                if (start != null)
+                {
+                    try { start.Invoke(instance, new object[] { host, port }); }
+                    catch (Exception ex) { Log.Warn(ex, "Socksifier.Start(host,port) failed; attempting Start()."); start = null; }
+                }
+                if (start == null)
+                {
+                    MethodInfo startNoArgs = type.GetMethod("Start", Type.EmptyTypes);
+                    if (startNoArgs != null)
+                    {
+                        try { startNoArgs.Invoke(instance, new object[0]); }
+                        catch (Exception ex) { Log.Warn(ex, "Socksifier.Start() failed; proceeding without managed start."); }
+                    }
+                    else
+                    {
+                        Log.Warn("'Socksifier.Start' not found; proceeding without managed start.");
+                    }
+                }
+
+                Log.Info("Socksifier started on {0}:{1}", host, port);
+                return instance;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to start Socksifier via reflection.");
+                return null;
+            }
+        }
+
+        private static void TryCallNoParam(object instance, string[] methodNames)
+        {
+            if (instance == null) return;
+            Type t = instance.GetType();
+            foreach (string name in methodNames)
+            {
+                MethodInfo m = t.GetMethod(name, BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
+                if (m != null)
+                {
+                    try { m.Invoke(instance, new object[0]); return; }
+                    catch (Exception ex) { Log.Debug(ex, "Call {0}() failed (ignored).", name); }
                 }
             }
-
-            _socksify.Start();
-
-            // Inform user that the application is running
-            if (_logLevel >= LogLevel.Info)
-                LoggerInstance.Info("ProxiFyre Service is running...");
         }
 
-        /// <summary>
-        /// Stops the ProxiFyre service and disposes of resources.
-        /// </summary>
-        public void Stop()
+        private static void TryCallOneStringParam(object instance, string[] methodNames, string arg)
         {
-            // Dispose of the Socksifier before exiting
-            _socksify.Dispose();
-            if (_logLevel >= LogLevel.Info)
-                LoggerInstance.Info("ProxiFyre Service has stopped.");
-            LogManager.Shutdown();
-        }
-
-        /// <summary>
-        /// Handles logging events from the Socksifier and logs them using NLog.
-        /// </summary>
-        /// <param name="sender">The event sender.</param>
-        /// <param name="e">The log event arguments.</param>
-        private static void LogPrinter(object sender, LogEventArgs e)
-        {
-            // Loop through each log entry and log it using NLog
-            foreach (var entry in e.Log.Where(entry => entry != null))
+            if (instance == null) return;
+            Type t = instance.GetType();
+            foreach (string name in methodNames)
             {
-                // Format log entry with ISO 8601 timestamp, event, description, and data.
-                //var logMessage =
-                //    $"{DateTimeOffset.FromUnixTimeMilliseconds(entry.TimeStamp):u} | Event: {entry.Event} | Description: {entry.Description ?? string.Empty} | Data: {entry.Data}";
-                LoggerInstance.Info(entry.Description?.Replace("\n", "").Replace("\r", ""));
-            }
-        }
-
-        //{
-        //    "logLevel": "Warning",
-        //    "proxies": [
-        //        {
-        //            "appNames": ["chrome", "chrome_canary"],
-        //            "socks5ProxyEndpoint": "158.101.205.51:1080",
-        //            "username": "username1",
-        //            "password": "password1",
-        //            "supportedProtocols": ["TCP", "UDP"]
-        //        },
-        //        {
-        //            "appNames": ["firefox", "firefox_dev"],
-        //            "socks5ProxyEndpoint": "159.101.205.52:1080",
-        //            "username": "username2",
-        //            "password": "password2",
-        //            "supportedProtocols": ["TCP"]
-        //        }
-        //    ],
-        //    "excludes": [
-        //        "notepad.exe",
-        //        "calc.exe",
-        //        "C:\\Windows\\System32\\svchost.exe",
-        //        "Windows\\System32\\",
-        //        "antivirus"
-        //    ]
-        //}
-
-        /// <summary>
-        /// Represents the root configuration settings for ProxiFyre.
-        /// </summary>
-        private class ProxiFyreSettings
-        {
-            /// <summary>
-            /// Initializes a new instance of the <see cref="ProxiFyreSettings"/> class.
-            /// </summary>
-            /// <param name="logLevel">The log level as a string.</param>
-            /// <param name="proxies">The list of proxy application settings.</param>
-            /// <param name="excludedList">The list of process names or paths to exclude from proxying.</param>
-            public ProxiFyreSettings(string logLevel, List<AppSettings> proxies, List<string> excludedList = null)
-            {
-                LogLevel = logLevel;
-                Proxies = proxies;
-                ExcludedList = excludedList ?? new List<string>();
-            }
-
-            /// <summary>
-            /// Gets the log level for the service.
-            /// </summary>
-            public string LogLevel { get; }
-
-            /// <summary>
-            /// Gets the list of proxy application settings.
-            /// </summary>
-            public List<AppSettings> Proxies { get; }
-
-            /// <summary>
-            /// Gets the list of app names to exclude.
-            /// </summary>
-            [JsonProperty("excludes", NullValueHandling = NullValueHandling.Ignore)]
-            public List<string> ExcludedList { get; }
-        }
-
-        /// <summary>
-        /// Represents the settings for a single proxy and its associated applications.
-        /// </summary>
-        internal class AppSettings
-        {
-            /// <summary>
-            /// Initializes a new instance of the <see cref="AppSettings"/> class.
-            /// </summary>
-            /// <param name="appNames">List of application names to associate with the proxy.</param>
-            /// <param name="socks5ProxyEndpoint">SOCKS5 proxy endpoint address.</param>
-            /// <param name="username">Username for proxy authentication.</param>
-            /// <param name="password">Password for proxy authentication.</param>
-            /// <param name="supportedProtocols">List of supported protocols (e.g., TCP, UDP).</param>
-            public AppSettings(List<string> appNames, string socks5ProxyEndpoint, string username, string password, List<string> supportedProtocols)
-            {
-                AppNames = appNames;
-                Socks5ProxyEndpoint = socks5ProxyEndpoint;
-                Username = username;
-                Password = password;
-                SupportedProtocols = supportedProtocols;
-            }
-
-            /// <summary>
-            /// Gets or sets the list of application names to associate with the proxy.
-            /// </summary>
-            public List<string> AppNames { get; set; }
-
-            /// <summary>
-            /// Gets the SOCKS5 proxy endpoint address.
-            /// </summary>
-            public string Socks5ProxyEndpoint { get; }
-
-            /// <summary>
-            /// Gets the username for proxy authentication.
-            /// </summary>
-            public string Username { get; }
-
-            /// <summary>
-            /// Gets the password for proxy authentication.
-            /// </summary>
-            public string Password { get; }
-
-            /// <summary>
-            /// Gets the list of supported protocols (e.g., TCP, UDP).
-            /// </summary>
-            public List<string> SupportedProtocols { get; }
-
-            /// <summary>
-            /// Gets the supported protocols as an enum value.
-            /// </summary>
-            public SupportedProtocolsEnum SupportedProtocolsParse
-            {
-                get
+                MethodInfo m = t.GetMethod(name, BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(string) }, null);
+                if (m != null)
                 {
-                    if (SupportedProtocols.Count == 0 ||
-                        (SupportedProtocols.Contains("TCP") && SupportedProtocols.Contains("UDP")))
-                        return SupportedProtocolsEnum.BOTH;
-                    if (SupportedProtocols.Contains("TCP"))
-                        return SupportedProtocolsEnum.TCP;
-                    return SupportedProtocols.Contains("UDP")
-                        ? SupportedProtocolsEnum.UDP
-                        : SupportedProtocolsEnum.BOTH;
+                    try { m.Invoke(instance, new object[] { arg }); return; }
+                    catch (Exception ex) { Log.Debug(ex, "Call {0}(string) failed (ignored).", name); }
                 }
             }
         }
     }
 
-    /// <summary>
-    /// Entry point for the ProxiFyre service application.
-    /// </summary>
-    internal class Program
+    // ===== Config DTOs (C# 7.3 friendly, no nullable-ref syntax) ==============
+    internal class AppConfig
     {
-        /// <summary>
-        /// Main method. Configures and runs the ProxiFyre service using Topshelf.
-        /// </summary>
-        private static void Main()
+        public string ProxyHost { get; set; }
+        public int ProxyPort { get; set; }
+        public List<ProcRule> Processes { get; set; }
+
+        public AppConfig()
         {
-            HostFactory.Run(x =>
-            {
-                x.Service<ProxiFyreService>(s =>
-                {
-                    s.ConstructUsing(name => new ProxiFyreService());
-                    s.WhenStarted(tc => tc.Start());
-                    s.WhenStopped(tc => tc.Stop());
-                });
+            ProxyHost = "127.0.0.1";
+            ProxyPort = 1080;
+            Processes = new List<ProcRule>();
+        }
+    }
 
-                x.RunAsLocalSystem();
+    internal class ProcRule
+    {
+        // e.g. "chrome.exe"
+        public string Name { get; set; }
+        public bool Enabled { get; set; }
 
-                x.SetDescription("ProxiFyre - SOCKS5 Proxifyre Service");
-                x.SetDisplayName("ProxiFyre Service");
-                x.SetServiceName("ProxiFyreService");
-            });
+        // Optional. When present, only matching destinations are redirected for this process.
+        public List<string> IpRanges { get; set; }
+
+        public ProcRule()
+        {
+            Name = "";
+            Enabled = true;
+            IpRanges = new List<string>();
         }
     }
 }
