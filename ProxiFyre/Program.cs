@@ -2,284 +2,381 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Reflection;
-using System.Runtime.InteropServices;
-using System.Text;
+using System.Net.Sockets;
 using System.Threading;
+using Newtonsoft.Json;
 using NLog;
 using NLog.Config;
 using NLog.Targets;
-using Newtonsoft.Json;
+
+// Managed C++/CLI wrapper
+using ManagedSocksifier = Socksifier.Socksifier;
+using ManagedLogLevel = Socksifier.LogLevel;
+using ManagedProtocols = Socksifier.SupportedProtocolsEnum;
 
 namespace ProxiFyre
 {
+    // ----------------- Config DTOs (schema unchanged) -----------------
+    public sealed class AppConfig
+    {
+        public string logLevel;
+        public List<ProxyRule> proxies;
+    }
+
+    public sealed class ProxyRule
+    {
+        public List<string> appNames;
+        public string socks5ProxyEndpoint;      // "host:port"
+        public List<string> supportedProtocols; // ["TCP"], ["UDP"], ["TCP","UDP"]
+        public List<string> ipRanges;           // optional, per-process CIDR includes
+    }
+
     internal static class Program
     {
-        // ===== Native policy (DIP) interop: per-process rule only =============
-        // Exported from socksify.dll (C/C++): int dip_add_process(const wchar_t*, const char*);
-        [DllImport("socksify.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
-        private static extern int dip_add_process(string process_name, [MarshalAs(UnmanagedType.LPStr)] string cidr);
-
-        private static Logger Log;
+        private static readonly Logger Log = LogManager.GetCurrentClassLogger();
 
         private static int Main(string[] args)
         {
-            ConfigureLogging();
-            Log = LogManager.GetCurrentClassLogger();
-
             try
             {
-                AppConfig cfg = LoadConfig();
-
-                object socksifier = StartSocksifierViaReflection(cfg.ProxyHost, cfg.ProxyPort);
-
-                // Add processes to the managed socksifier if such method exists
-                if (cfg.Processes != null)
+                var baseDir = AppContext.BaseDirectory;
+                var configPath = Path.Combine(baseDir, "app-config.json");
+                if (!File.Exists(configPath))
                 {
-                    foreach (ProcRule p in cfg.Processes)
+                    Console.Error.WriteLine("Config file not found: " + configPath);
+                    return 2;
+                }
+
+                // Load config
+                var json = File.ReadAllText(configPath);
+                var cfg = JsonConvert.DeserializeObject<AppConfig>(json);
+                if (cfg == null || cfg.proxies == null || cfg.proxies.Count == 0)
+                {
+                    Console.Error.WriteLine("Invalid or empty app-config.json");
+                    return 3;
+                }
+
+                // NLog to file + console
+                ConfigureNLog(cfg.logLevel, baseDir);
+
+                Log.Info("ProxiFyre starting…");
+                Log.Info("Loaded config: {0}", configPath);
+
+                // Create socksifier instance (do NOT assume started)
+                var s = ManagedSocksifier.GetInstance(ToManagedLogLevel(cfg.logLevel));
+
+                // We will attempt: (A) add all proxies BEFORE Start(); if any Add fails,
+                // we will fall back to (B) Start() early and Add with start=true.
+                bool started = false;
+                int associations = 0;
+
+                foreach (var rule in cfg.proxies)
+                {
+                    if (rule == null) continue;
+
+                    string endpoint = (rule.socks5ProxyEndpoint ?? string.Empty).Trim();
+                    string host;
+                    int port;
+                    string parseErr;
+                    if (!TryParseEndpoint(endpoint, out host, out port, out parseErr))
                     {
-                        if (p == null) continue;
-                        if (!p.Enabled) continue;
-                        if (string.IsNullOrWhiteSpace(p.Name)) continue;
+                        Log.Error("Invalid socks5ProxyEndpoint '{0}': {1}", rule.socks5ProxyEndpoint, parseErr);
+                        continue;
+                    }
 
-                        // Tell managed layer (best-effort)
-                        TryCallOneStringParam(socksifier, new[] { "Add", "Include", "AddProcess", "IncludeProcess", "Whitelist" }, p.Name.Trim());
+                    // Optional preflight reachability for clear errors
+                    string reachErr;
+                    if (!TestTcpReachability(host, port, 1000, out reachErr))
+                    {
+                        Log.Error("Cannot connect to SOCKS5 {0}:{1} - {2}", host, port, reachErr);
+                        Log.Error("Skipping AddSocks5Proxy for endpoint {0}", endpoint);
+                        continue;
+                    }
 
-                        // Add DIP rules for each CIDR (optional)
-                        if (p.IpRanges != null)
+                    // Map config -> managed enum with native-compatible numeric values (TCP=1, UDP=2, BOTH=3)
+                    var prot = ToManagedProtocolsNativeCompatible(rule.supportedProtocols);
+
+                    // ---------- Plan A: Add before Start ----------
+                    IntPtr handle = s.AddSocks5Proxy(
+                        endpoint,
+                        string.Empty,
+                        string.Empty,
+                        prot,
+                        false // don't start yet; prefer single Start after all adds
+                    );
+
+                    // ---------- Plan B (fallback): Start early + Add with start=true ----------
+                    if (handle == IntPtr.Zero)
+                    {
+                        Log.Warn("AddSocks5Proxy({0}) returned null handle before Start(); trying fallback (Start-early + start=true).", endpoint);
+
+                        if (!started)
                         {
-                            foreach (string cidr in p.IpRanges)
+                            if (!s.Start())
                             {
-                                if (string.IsNullOrWhiteSpace(cidr)) continue;
-                                int ok = dip_add_process(p.Name.Trim(), cidr.Trim());
-                                if (ok != 1)
-                                    Log.Warn("dip_add_process failed: {0} / {1}", p.Name, cidr);
+                                Log.Error("Socksifier.Start() failed during fallback. Cannot add {0}.", endpoint);
+                                // give up on this rule
+                                continue;
+                            }
+                            started = true;
+                        }
+
+                        handle = s.AddSocks5Proxy(
+                            endpoint,
+                            string.Empty,
+                            string.Empty,
+                            prot,
+                            true // start immediately when already started
+                        );
+
+                        if (handle == IntPtr.Zero)
+                        {
+                            Log.Error("AddSocks5Proxy failed for endpoint {0}.", endpoint);
+                            Log.Error("If reachability is OK, verify matching x64 builds and try running as Administrator.");
+                            continue;
+                        }
+                    }
+
+                    // Associate processes → proxy handle
+                    if (rule.appNames != null)
+                    {
+                        foreach (var rawName in rule.appNames)
+                        {
+                            if (string.IsNullOrWhiteSpace(rawName)) continue;
+                            var proc = rawName.Trim();
+
+                            bool ok = s.AssociateProcessNameToProxy(proc, handle);
+                            if (ok)
+                            {
+                                Log.Info("Successfully associated {0} to {1} SOCKS5 proxy with protocols {2}!",
+                                         proc, endpoint, DescribeProtocols(rule.supportedProtocols));
+                                associations++;
+                            }
+                            else
+                            {
+                                Log.Warn("AssociateProcessNameToProxy failed for '{0}' -> {1}", proc, endpoint);
+                            }
+
+                            // Optional per-process CIDR includes
+                            if (rule.ipRanges != null && rule.ipRanges.Count > 0)
+                            {
+                                foreach (var rawCidr in rule.ipRanges)
+                                {
+                                    if (string.IsNullOrWhiteSpace(rawCidr)) continue;
+                                    var cidr = rawCidr.Trim();
+                                    bool added = s.IncludeProcessDestinationCidr(proc, cidr);
+                                    if (!added)
+                                        Log.Warn("IncludeProcessDestinationCidr failed for '{0}' with '{1}'", proc, cidr);
+                                }
                             }
                         }
                     }
                 }
 
-                Log.Info("ProxiFyre running. Press Ctrl+C to exit.");
-                ManualResetEvent quit = new ManualResetEvent(false);
-                Console.CancelKeyPress += (s, e) => { e.Cancel = true; quit.Set(); };
-                quit.WaitOne();
+                // If we haven’t started yet (Plan A succeeded everywhere), start once now.
+                if (!started)
+                {
+                    if (!s.Start())
+                    {
+                        Log.Error("Socksifier.Start() returned false.");
+                        return 5;
+                    }
+                    started = true;
+                }
 
-                TryCallNoParam(socksifier, new[] { "Stop", "Shutdown" });
+                if (associations == 0)
+                {
+                    Log.Warn("No process-to-proxy associations were registered. Nothing to do.");
+                }
+
+                Log.Info("ProxiFyre Service is running... (Press Ctrl+C to exit)");
+
+                using (var quit = new ManualResetEvent(false))
+                {
+                    Console.CancelKeyPress += (sender, e) =>
+                    {
+                        e.Cancel = true;
+                        quit.Set();
+                    };
+                    quit.WaitOne();
+                }
+
+                if (started)
+                {
+                    s.Stop();
+                }
+
                 Log.Info("ProxiFyre stopped.");
+                LogManager.Shutdown();
                 return 0;
             }
             catch (Exception ex)
             {
-                Log.Fatal(ex, "Fatal error in ProxiFyre.");
+                try
+                {
+                    Log.Fatal(ex, "Fatal error during startup.");
+                    LogManager.Shutdown();
+                }
+                catch
+                {
+                    Console.Error.WriteLine(ex.ToString());
+                }
                 return 1;
             }
-            finally
-            {
-                LogManager.Shutdown();
-            }
         }
 
-        // ===== Logging: always ProxiFyre.log, roll daily to ProxiFyre_yyyyMMdd.txt
-        private static void ConfigureLogging()
+        // ----------------- Helpers -----------------
+
+        private static bool TryParseEndpoint(string endpoint, out string host, out int port, out string error)
         {
-            LoggingConfiguration config = new LoggingConfiguration();
+            host = string.Empty;
+            port = 0;
+            error = null;
 
-            string logDir = AppDomain.CurrentDomain.BaseDirectory;
-            FileTarget fileTarget = new FileTarget("file");
-            fileTarget.FileName = Path.Combine(logDir, "ProxiFyre.log");
-            fileTarget.Layout = "${longdate}|${level:uppercase=true}|${message}${onexception:inner=${newline}${exception:format=tostring}}";
-            fileTarget.ConcurrentWrites = true;
-            fileTarget.KeepFileOpen = false;
-
-            // Daily rolling
-            fileTarget.ArchiveEvery = FileArchivePeriod.Day;
-            fileTarget.ArchiveNumbering = ArchiveNumberingMode.Date;
-            fileTarget.ArchiveDateFormat = "yyyyMMdd";
-            // Rolled files: ProxiFyre_yyyyMMdd.txt
-            fileTarget.ArchiveFileName = Path.Combine(logDir, "ProxiFyre_{#}.txt");
-            fileTarget.Encoding = Encoding.UTF8;
-            fileTarget.MaxArchiveFiles = 30; // keep last 30 days
-
-            config.AddRule(LogLevel.Info, LogLevel.Fatal, fileTarget);
-
-            LogManager.Configuration = config;
-        }
-
-        // ===== JSON config loader (file next to the exe)
-        private static AppConfig LoadConfig()
-        {
-            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string[] candidates = new string[]
+            if (string.IsNullOrWhiteSpace(endpoint))
             {
-                Path.Combine(baseDir, "ProxiFyre.json"),
-                Path.Combine(baseDir, "config.json")
-            };
-
-            string path = null;
-            foreach (string c in candidates)
-            {
-                if (File.Exists(c)) { path = c; break; }
+                error = "Empty endpoint";
+                return false;
             }
 
-            if (path == null)
-                throw new FileNotFoundException("No config JSON found (ProxiFyre.json or config.json) next to the exe.");
+            int idx = endpoint.LastIndexOf(':');
+            if (idx <= 0 || idx == endpoint.Length - 1)
+            {
+                error = "Expected format 'host:port'";
+                return false;
+            }
 
-            string json = File.ReadAllText(path);
-            AppConfig cfg = JsonConvert.DeserializeObject<AppConfig>(json);
-            if (cfg == null) cfg = new AppConfig();
+            host = endpoint.Substring(0, idx).Trim();
+            var portStr = endpoint.Substring(idx + 1).Trim();
 
-            if (cfg.ProxyPort <= 0) cfg.ProxyPort = 1080;
-            if (string.IsNullOrWhiteSpace(cfg.ProxyHost)) cfg.ProxyHost = "127.0.0.1";
+            int p;
+            if (!int.TryParse(portStr, out p) || p < 1 || p > 65535)
+            {
+                error = "Port must be an integer 1..65535";
+                return false;
+            }
 
-            return cfg;
+            if (host.Length == 0)
+            {
+                error = "Host cannot be empty";
+                return false;
+            }
+
+            port = p;
+            return true;
         }
 
-        // ===== Managed Socksifier boot via reflection (no compile-time tie)
-        private static object StartSocksifierViaReflection(string host, int port)
+        private static bool TestTcpReachability(string host, int port, int timeoutMs, out string error)
         {
+            error = null;
             try
             {
-                Type type = null;
-
-                // Look in already loaded assemblies
-                foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
+                using (var client = new TcpClient())
                 {
-                    Type found;
-                    try { found = a.GetTypes().FirstOrDefault(t => t != null && t.Name == "Socksifier"); }
-                    catch { found = null; }
-                    if (found != null) { type = found; break; }
-                }
-
-                // Try load socksify.dll as managed assembly (if not found)
-                if (type == null)
-                {
-                    string candidate = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "socksify.dll");
-                    if (File.Exists(candidate))
+                    var ar = client.BeginConnect(host, port, null, null);
+                    if (!ar.AsyncWaitHandle.WaitOne(timeoutMs))
                     {
-                        try
-                        {
-                            Assembly asm = Assembly.LoadFrom(candidate);
-                            type = asm.GetTypes().FirstOrDefault(t => t != null && t.Name == "Socksifier");
-                        }
-                        catch { /* ignore */ }
+                        error = "Connect timeout";
+                        return false;
                     }
+                    client.EndConnect(ar);
+                    return true;
                 }
-
-                if (type == null)
-                {
-                    Log.Warn("Managed type 'Socksifier' not found; continuing with DIP policy only.");
-                    return null;
-                }
-
-                // Get instance (static Instance or default ctor)
-                object instance = null;
-                PropertyInfo instanceProp = type.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
-                if (instanceProp != null)
-                {
-                    try { instance = instanceProp.GetValue(null, null); } catch { instance = null; }
-                }
-                if (instance == null)
-                {
-                    try { instance = Activator.CreateInstance(type); } catch { instance = null; }
-                }
-
-                if (instance == null)
-                {
-                    Log.Warn("Could not create 'Socksifier' instance; continuing with DIP policy only.");
-                    return null;
-                }
-
-                // Start(host, port) or Start()
-                MethodInfo start = type.GetMethod("Start", new[] { typeof(string), typeof(int) });
-                if (start != null)
-                {
-                    try { start.Invoke(instance, new object[] { host, port }); }
-                    catch (Exception ex) { Log.Warn(ex, "Socksifier.Start(host,port) failed; attempting Start()."); start = null; }
-                }
-                if (start == null)
-                {
-                    MethodInfo startNoArgs = type.GetMethod("Start", Type.EmptyTypes);
-                    if (startNoArgs != null)
-                    {
-                        try { startNoArgs.Invoke(instance, new object[0]); }
-                        catch (Exception ex) { Log.Warn(ex, "Socksifier.Start() failed; proceeding without managed start."); }
-                    }
-                    else
-                    {
-                        Log.Warn("'Socksifier.Start' not found; proceeding without managed start.");
-                    }
-                }
-
-                Log.Info("Socksifier started on {0}:{1}", host, port);
-                return instance;
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "Failed to start Socksifier via reflection.");
-                return null;
+                error = ex.Message;
+                return false;
             }
         }
 
-        private static void TryCallNoParam(object instance, string[] methodNames)
+        private static string DescribeProtocols(List<string> list)
         {
-            if (instance == null) return;
-            Type t = instance.GetType();
-            foreach (string name in methodNames)
+            if (list == null || list.Count == 0) return "TCP";
+            return string.Join(",", list);
+        }
+
+        private static ManagedLogLevel ToManagedLogLevel(string level)
+        {
+            if (string.IsNullOrWhiteSpace(level)) return ManagedLogLevel.Info;
+            switch (level.Trim().ToLowerInvariant())
             {
-                MethodInfo m = t.GetMethod(name, BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
-                if (m != null)
+                case "all":     return ManagedLogLevel.All;
+                case "debug":   return ManagedLogLevel.Debug;
+                case "info":    return ManagedLogLevel.Info;
+                case "warning":
+                case "warn":    return ManagedLogLevel.Warning;
+                case "error":   return ManagedLogLevel.Error;
+                default:        return ManagedLogLevel.Info;
+            }
+        }
+
+        // IMPORTANT: Many native builds expect TCP=1, UDP=2, BOTH=3.
+        // We return the managed enum *with those numeric values* using an explicit cast.
+        private static ManagedProtocols ToManagedProtocolsNativeCompatible(List<string> list)
+        {
+            bool hasTcp = false, hasUdp = false;
+
+            if (list != null)
+            {
+                foreach (var s in list)
                 {
-                    try { m.Invoke(instance, new object[0]); return; }
-                    catch (Exception ex) { Log.Debug(ex, "Call {0}() failed (ignored).", name); }
+                    if (string.IsNullOrWhiteSpace(s)) continue;
+                    var t = s.Trim().ToUpperInvariant();
+                    if (t == "TCP") hasTcp = true;
+                    else if (t == "UDP") hasUdp = true;
                 }
             }
+
+            if (hasTcp && hasUdp) return (ManagedProtocols)3; // BOTH
+            if (hasUdp && !hasTcp) return (ManagedProtocols)2; // UDP
+            return (ManagedProtocols)1;                         // TCP (default)
         }
 
-        private static void TryCallOneStringParam(object instance, string[] methodNames, string arg)
+        private static void ConfigureNLog(string level, string baseDir)
         {
-            if (instance == null) return;
-            Type t = instance.GetType();
-            foreach (string name in methodNames)
+            var cfg = new LoggingConfiguration();
+
+            var file = new FileTarget("file")
             {
-                MethodInfo m = t.GetMethod(name, BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(string) }, null);
-                if (m != null)
-                {
-                    try { m.Invoke(instance, new object[] { arg }); return; }
-                    catch (Exception ex) { Log.Debug(ex, "Call {0}(string) failed (ignored).", name); }
-                }
+                FileName = Path.Combine(baseDir, "ProxiFyre.log"),
+                ArchiveFileName = Path.Combine(baseDir, "ProxiFyre_${shortdate}.log"),
+                ArchiveEvery = FileArchivePeriod.Day,
+                ArchiveNumbering = ArchiveNumberingMode.Date,
+                MaxArchiveFiles = 30,
+                ConcurrentWrites = true,
+                KeepFileOpen = false,
+                Layout = "${longdate}|${level:uppercase=true}|${logger}|${message}${onexception:inner=${newline}${exception:format=tostring}}"
+            };
+
+            var console = new ColoredConsoleTarget("console")
+            {
+                Layout = "${longdate}|${level:uppercase=true}|${logger}|${message}"
+            };
+
+            cfg.AddTarget(file);
+            cfg.AddTarget(console);
+
+            var min = ToNLogLevel(level);
+            cfg.AddRule(min, LogLevel.Fatal, console);
+            cfg.AddRule(min, LogLevel.Fatal, file);
+
+            LogManager.Configuration = cfg;
+        }
+
+        private static LogLevel ToNLogLevel(string level)
+        {
+            if (string.IsNullOrWhiteSpace(level)) return LogLevel.Info;
+            switch (level.Trim().ToLowerInvariant())
+            {
+                case "all":     return LogLevel.Trace;
+                case "debug":   return LogLevel.Debug;
+                case "info":    return LogLevel.Info;
+                case "warning":
+                case "warn":    return LogLevel.Warn;
+                case "error":   return LogLevel.Error;
+                default:        return LogLevel.Info;
             }
-        }
-    }
-
-    // ===== Config DTOs (C# 7.3 friendly, no nullable-ref syntax) ==============
-    internal class AppConfig
-    {
-        public string ProxyHost { get; set; }
-        public int ProxyPort { get; set; }
-        public List<ProcRule> Processes { get; set; }
-
-        public AppConfig()
-        {
-            ProxyHost = "127.0.0.1";
-            ProxyPort = 1080;
-            Processes = new List<ProcRule>();
-        }
-    }
-
-    internal class ProcRule
-    {
-        // e.g. "chrome.exe"
-        public string Name { get; set; }
-        public bool Enabled { get; set; }
-
-        // Optional. When present, only matching destinations are redirected for this process.
-        public List<string> IpRanges { get; set; }
-
-        public ProcRule()
-        {
-            Name = "";
-            Enabled = true;
-            IpRanges = new List<string>();
         }
     }
 }

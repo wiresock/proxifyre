@@ -117,8 +117,6 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="Policy\DipBootstrap.cs" />
-    <Compile Include="Policy\DipInterop.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
