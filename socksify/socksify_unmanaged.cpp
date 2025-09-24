@@ -1,16 +1,16 @@
-#include "pch.h"
-#include "socksify_unmanaged.h"
-
-// Include the lightweight policy (no Windows headers inside)
-#include "policy/dest_inclusion_policy.h"
+#include "pch.h"                     // MUST be first in a /Yu "pch.h" project
 
 #include <memory>
+#include <string>
+
+#include "socksify_unmanaged.h"
+#include "policy/dest_inclusion_policy.h"
 
 // ---- Minimal internal stub (replace with your real router if you have one) ----
 namespace {
     struct router_stub {
         bool start() { return true; }
-        bool stop() { return false; }
+        bool stop()  { return false; }
     };
     std::unique_ptr<router_stub> g_router;
 }
