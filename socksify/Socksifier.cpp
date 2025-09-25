@@ -1,150 +1,207 @@
 #include "pch.h"
-#include <msclr/lock.h>
 #include "Socksifier.h"
-#include <msclr/marshal_cppstd.h>
-
-// Forward-declare the unmanaged enum/types so the included header sees them.
-enum class log_level_mx : unsigned char;
-enum class supported_protocols_mx : unsigned char;
-struct event_mx;
-
 #include "socksify_unmanaged.h"
-#include "policy/dest_inclusion_policy.h"
 
-namespace Managed = Socksifier;
+// ReSharper disable CppInconsistentNaming
 
-Managed::Socksifier::Socksifier(Managed::LogLevel /*log_level*/)
+Socksifier::Socksifier::Socksifier(LogLevel log_level)
 {
-    // Use the original API you reverted to:
-    unmanaged_ptr_ = socksify_unmanaged::get_instance();
+    unmanaged_ptr_ = socksify_unmanaged::get_instance(static_cast<log_level_mx>(log_level));
 
-    log_event_ = gcnew System::Threading::AutoResetEvent(false);
-    logging_thread_ = gcnew System::Threading::Thread(
-        gcnew System::Threading::ThreadStart(this, &Managed::Socksifier::log_thread));
+    log_event_ = gcnew Threading::AutoResetEvent(false);
+    unmanaged_ptr_->set_log_event(static_cast<HANDLE>(log_event_->SafeWaitHandle->DangerousGetHandle()));
+    logging_thread_ = gcnew Threading::Thread(gcnew Threading::ThreadStart(this, &Socksifier::log_thread));
     logging_thread_->Start();
 }
 
-Managed::Socksifier::!Socksifier()
+Socksifier::Socksifier::!Socksifier()
 {
+    // Set flag that we are going to exit
     logger_thread_active_ = false;
-    if (log_event_) log_event_->Set();
-    if (logging_thread_ && logging_thread_->IsAlive) logging_thread_->Join();
 
-    if (unmanaged_ptr_) { unmanaged_ptr_->stop(); unmanaged_ptr_ = nullptr; }
-    if (log_event_) { log_event_->Close(); log_event_ = nullptr; }
+    if (log_event_ != nullptr)
+        log_event_->Set();
+
+    if (logging_thread_ != nullptr && logging_thread_->IsAlive)
+        logging_thread_->Join();
+
+    // Release unmanaged core
+    if (unmanaged_ptr_)
+    {
+        [[maybe_unused]] auto result = unmanaged_ptr_->stop();
+        unmanaged_ptr_ = nullptr;
+    }
+
+    // Dispose the AutoResetEvent
+    if (log_event_ != nullptr)
+    {
+        log_event_->Close();
+        log_event_ = nullptr;
+    }
 }
 
-Managed::Socksifier::~Socksifier()
+Socksifier::Socksifier::~Socksifier()
 {
     this->!Socksifier();
 }
 
-void Managed::Socksifier::RaiseLogEvent()
+void Socksifier::Socksifier::log_thread()
 {
-    LogEvent(this, gcnew LogEventArgs());
-}
-
-void Managed::Socksifier::log_thread()
-{
-    while (logger_thread_active_)
+    do
     {
         log_event_->WaitOne(log_event_interval_);
-        if (!logger_thread_active_) break;
-        RaiseLogEvent();
-    }
+
+        // Exit if thread was awakened to do it
+        if (!logger_thread_active_)
+            break;
+
+        if (unmanaged_ptr_)
+        {
+            if (auto log = unmanaged_ptr_->read_log(); !log.empty())
+            {
+                auto managed_log_list = gcnew Collections::Generic::List<LogEntry^>;
+                for (auto& [fst, snd] : log)
+                {
+                    if (std::holds_alternative<std::string>(snd))
+                        managed_log_list->Add(gcnew LogEntry(fst, ProxyGatewayEvent::Message,
+                            gcnew String(std::get<std::string>(snd).c_str())));
+                    else
+                    {
+                        switch (std::get<event_mx>(snd).type)
+                        {
+                        case event_type_mx::connected:
+                            managed_log_list->Add(gcnew LogEntry(fst, ProxyGatewayEvent::Connected, nullptr));
+                            break;
+                        case event_type_mx::disconnected:
+                            managed_log_list->Add(gcnew LogEntry(fst, ProxyGatewayEvent::Disconnected, nullptr));
+                            break;
+                        case event_type_mx::address_error:
+                            managed_log_list->Add(gcnew LogEntry(fst, ProxyGatewayEvent::AddressError, nullptr));
+                            break;
+                        default:
+                            break;
+                        }
+                    }
+                }
+
+                LogEvent(this, gcnew LogEventArgs(managed_log_list));
+            }
+        }
+    } while (logger_thread_active_);
 }
 
-Managed::Socksifier^ Managed::Socksifier::GetInstance(Managed::LogLevel log_level)
+UInt32 Socksifier::Socksifier::GetLogLimit()
+{
+    return unmanaged_ptr_->get_log_limit();
+}
+
+void Socksifier::Socksifier::SetLogLimit(const UInt32 value)
+{
+    unmanaged_ptr_->set_log_limit(value);
+}
+
+Socksifier::Socksifier^ Socksifier::Socksifier::GetInstance(const LogLevel log_level)
 {
     if (instance_ == nullptr)
     {
-        msclr::lock l(Managed::Socksifier::typeid);
-        if (instance_ == nullptr) instance_ = gcnew Managed::Socksifier(log_level);
+        msclr::lock l(Socksifier::typeid);
+
+        if (instance_ == nullptr)
+            instance_ = gcnew Socksifier(log_level);
     }
+
     return instance_;
 }
 
-Managed::Socksifier^ Managed::Socksifier::GetInstance()
+Socksifier::Socksifier^ Socksifier::Socksifier::GetInstance()
 {
-    if (instance_ == nullptr)
+    return GetInstance(LogLevel::All);
+}
+
+bool Socksifier::Socksifier::Start()
+{
+    if (unmanaged_ptr_)
+        return unmanaged_ptr_->start();
+
+    return false;
+}
+
+bool Socksifier::Socksifier::Stop()
+{
+    if (unmanaged_ptr_)
+        return unmanaged_ptr_->stop();
+    return false;
+}
+
+IntPtr Socksifier::Socksifier::AddSocks5Proxy(String^ endpoint, String^ username, String^ password,
+    SupportedProtocolsEnum protocols, const bool start)
+{
+    if (!unmanaged_ptr_)
+        return static_cast<IntPtr>(-1);
+
+    auto protocols_mx = supported_protocols_mx::both;
+    switch (protocols)
     {
-        msclr::lock l(Managed::Socksifier::typeid);
-        if (instance_ == nullptr) instance_ = gcnew Managed::Socksifier(Managed::LogLevel::Info);
+    case SupportedProtocolsEnum::TCP:
+        protocols_mx = supported_protocols_mx::tcp;
+        break;
+    case SupportedProtocolsEnum::UDP:
+        protocols_mx = supported_protocols_mx::udp;
+        break;
+    default:
+        break;
     }
-    return instance_;
-}
-
-bool Managed::Socksifier::Start() { return unmanaged_ptr_ ? unmanaged_ptr_->start() : false; }
-bool Managed::Socksifier::Stop()  { return unmanaged_ptr_ ? unmanaged_ptr_->stop()  : false; }
-
-System::IntPtr Managed::Socksifier::AddSocks5Proxy(System::String^ endpoint, System::String^ username,
-    System::String^ password, Managed::SupportedProtocolsEnum protocols, const bool start)
-{
-    if (!unmanaged_ptr_) return System::IntPtr(-1);
-
-    // Map managed enum to the unmanaged "mx" enum underlying value (unsigned char).
-    unsigned char code = 2; // BOTH
-    if (protocols == Managed::SupportedProtocolsEnum::TCP) code = 0;
-    else if (protocols == Managed::SupportedProtocolsEnum::UDP) code = 1;
-
-    // We only need the name for the cast; forward-declare above keeps compile happy.
-    auto mx = static_cast<supported_protocols_mx>(code);
 
     if (username != nullptr && password != nullptr)
-        return System::IntPtr(unmanaged_ptr_->add_socks5_proxy(
-            msclr::interop::marshal_as<std::string>(endpoint), mx, start,
+    {
+        return static_cast<IntPtr>(unmanaged_ptr_->add_socks5_proxy(
+            msclr::interop::marshal_as<std::string>(endpoint),
+            protocols_mx,
+            start,
             msclr::interop::marshal_as<std::string>(username),
-            msclr::interop::marshal_as<std::string>(password)));
+            msclr::interop::marshal_as<std::string>(password)
+        ));
+    }
 
-    return System::IntPtr(unmanaged_ptr_->add_socks5_proxy(
-        msclr::interop::marshal_as<std::string>(endpoint), mx, start));
+    return static_cast<IntPtr>(unmanaged_ptr_->add_socks5_proxy(
+        msclr::interop::marshal_as<std::string>(endpoint), protocols_mx, start));
 }
 
-bool Managed::Socksifier::AssociateProcessNameToProxy(System::String^ processName, System::IntPtr proxy)
+bool Socksifier::Socksifier::AssociateProcessNameToProxy(String^ processName, IntPtr proxy)
 {
-    if (!unmanaged_ptr_) return false;
+    if (!unmanaged_ptr_)
+        return false;
 #if _WIN64
-    return unmanaged_ptr_->associate_process_name_to_proxy(
-        msclr::interop::marshal_as<std::wstring>(processName), proxy.ToInt64());
+    return unmanaged_ptr_->associate_process_name_to_proxy(msclr::interop::marshal_as<std::wstring>(processName),
+        proxy.ToInt64());
 #else
-    return unmanaged_ptr_->associate_process_name_to_proxy(
-        msclr::interop::marshal_as<std::wstring>(processName), proxy.ToInt32());
-#endif
+    return unmanaged_ptr_->associate_process_name_to_proxy(msclr::interop::marshal_as<std::wstring>(processName),
+        proxy.ToInt32());
+#endif //_WIN64
 }
 
-bool Managed::Socksifier::ExcludeProcessName(System::String^ excludedEntry)
+bool Socksifier::Socksifier::ExcludeProcessName(String^ excludedEntry)
 {
-    if (!unmanaged_ptr_) return false;
+    if (!unmanaged_ptr_) {
+        return false;
+    }
     return unmanaged_ptr_->exclude_process_name(msclr::interop::marshal_as<std::wstring>(excludedEntry));
 }
 
-// ---------- CIDR inclusion calls the tiny C-exports directly ----------
-bool Managed::Socksifier::IncludeProcessDestinationCidr(System::String^ processName, System::String^ cidr)
+// --- NEW: tiny forwards to unmanaged wrappers -------------------------------
+bool Socksifier::Socksifier::IncludeProcessDestinationCidr(String^ processName, String^ cidr)
 {
-    if (processName == nullptr || cidr == nullptr) return false;
-    auto wproc = msclr::interop::marshal_as<std::wstring>(processName);
-    auto scidr = msclr::interop::marshal_as<std::string>(cidr);
-    return dip_add_process(wproc.c_str(), scidr.c_str()) == 1;
+    if (!unmanaged_ptr_) return false;
+    return unmanaged_ptr_->include_process_dst_cidr(
+        msclr::interop::marshal_as<std::wstring>(processName),
+        msclr::interop::marshal_as<std::string>(cidr));
 }
 
-bool Managed::Socksifier::RemoveProcessDestinationCidr(System::String^ processName, System::String^ cidr)
+bool Socksifier::Socksifier::RemoveProcessDestinationCidr(String^ processName, String^ cidr)
 {
-    if (processName == nullptr || cidr == nullptr) return false;
-    auto wproc = msclr::interop::marshal_as<std::wstring>(processName);
-    auto scidr = msclr::interop::marshal_as<std::string>(cidr);
-    return dip_remove_process(wproc.c_str(), scidr.c_str()) == 1;
+    if (!unmanaged_ptr_) return false;
+    return unmanaged_ptr_->remove_process_dst_cidr(
+        msclr::interop::marshal_as<std::wstring>(processName),
+        msclr::interop::marshal_as<std::string>(cidr));
 }
-
-bool Managed::Socksifier::IncludeGlobalDestinationCidr(System::String^ cidr)
-{
-    if (cidr == nullptr) return false;
-    auto scidr = msclr::interop::marshal_as<std::string>(cidr);
-    return dip_add_global(scidr.c_str()) == 1;
-}
-
-bool Managed::Socksifier::RemoveGlobalDestinationCidr(System::String^ cidr)
-{
-    if (cidr == nullptr) return false;
-    auto scidr = msclr::interop::marshal_as<std::string>(cidr);
-    return dip_remove_global(scidr.c_str()) == 1;
-}
+// ---------------------------------------------------------------------------
