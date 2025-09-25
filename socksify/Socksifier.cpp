@@ -10,6 +10,11 @@ Socksifier::Socksifier::Socksifier(LogLevel log_level)
 
     log_event_ = gcnew Threading::AutoResetEvent(false);
     unmanaged_ptr_->set_log_event(static_cast<HANDLE>(log_event_->SafeWaitHandle->DangerousGetHandle()));
+
+    // Initialize a safe default before starting the logging thread.
+    // Program.cs may override this later (e.g., _socksify.LogEventInterval = 1000).
+    log_event_interval_ = 1000;
+
     logging_thread_ = gcnew Threading::Thread(gcnew Threading::ThreadStart(this, &Socksifier::log_thread));
     logging_thread_->Start();
 }
@@ -84,6 +89,7 @@ void Socksifier::Socksifier::log_thread()
                     }
                 }
 
+                // In C++/CLI, invoking the event directly is correct; it¡¯s safe if there are no subscribers.
                 LogEvent(this, gcnew LogEventArgs(managed_log_list));
             }
         }

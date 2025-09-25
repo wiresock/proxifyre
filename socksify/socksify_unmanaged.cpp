@@ -3,6 +3,9 @@
 // Bring in the small destination-inclusion policy C-API (added feature)
 #include "policy/dest_inclusion_policy.h"
 
+#include <cwctype>   // for towlower
+#include <string>
+
 // Force this TU to be compiled as native even if project defaults change
 #pragma managed(push, off)
 
@@ -13,6 +16,28 @@ struct mutex_impl
 {
     std::mutex lock;
 };
+
+/**
+ * @brief Helper to normalize process names to policy keys:
+ * - take only filename
+ * - drop trailing extension (e.g., .exe)
+ * - lowercase
+ */
+static std::wstring normalize_process_key(std::wstring s)
+{
+    // 1) strip any path
+    if (const auto pos = s.find_last_of(L"\\/"); pos != std::wstring::npos)
+        s = s.substr(pos + 1);
+
+    // 2) drop extension if present
+    if (const auto dot = s.find_last_of(L'.'); dot != std::wstring::npos)
+        s = s.substr(0, dot);
+
+    // 3) lowercase
+    for (auto& ch : s) ch = static_cast<wchar_t>(std::towlower(ch));
+
+    return s;
+}
 
 /**
  * @brief Constructs the socksify_unmanaged singleton instance.
@@ -69,6 +94,16 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
         print_log(log_level_mx::info, "[ERROR]: Failed to create the SOCKS5 Local Router instance!"s);
         throw std::runtime_error("[ERROR]: Failed to create the SOCKS5 Local Router instance!");
     }
+
+    // Wire destination-policy decider (optional gate).
+    // Normalizes process name to match policy keys added from Program.cs (e.g., "rdcman", "mstsc").
+    proxy_->set_redirect_decider([](const std::wstring& proc,
+                                    const sockaddr* sa,
+                                    int salen) -> bool
+    {
+        const std::wstring key = normalize_process_key(proc);
+        return dip_should_redirect_for(key.c_str(), sa, salen) == 1;
+    });
 
     print_log(log_level_mx::info, "SOCKS5 Local Router instance successfully created."s);
 }
@@ -128,7 +163,7 @@ bool socksify_unmanaged::stop() const
         return false;
     }
 
-    if (proxy_->stop())
+    if (!proxy_->stop())
     {
         print_log(log_level_mx::info, "[ERROR]: Failed to stop the SOCKS5 Local Router instance."s);
         return false;
@@ -141,12 +176,6 @@ bool socksify_unmanaged::stop() const
 
 /**
  * @brief Adds a SOCKS5 proxy to the gateway.
- * @param endpoint The proxy endpoint in "IP:Port" format.
- * @param protocol The supported protocol(s) for the proxy.
- * @param start Whether to start the proxy immediately.
- * @param login Optional username for authentication.
- * @param password Optional password for authentication.
- * @return A handle (LONG_PTR) to the proxy instance, or -1 on failure.
  */
 LONG_PTR socksify_unmanaged::add_socks5_proxy(
     const std::string& endpoint,
@@ -187,9 +216,6 @@ LONG_PTR socksify_unmanaged::add_socks5_proxy(
 
 /**
  * @brief Associates a process name with a specific proxy.
- * @param process_name The process name to associate.
- * @param proxy_id The handle of the proxy to associate with.
- * @return True if association was successful, otherwise false.
  */
 bool socksify_unmanaged::associate_process_name_to_proxy(const std::wstring& process_name,
     const LONG_PTR proxy_id) const
@@ -199,8 +225,6 @@ bool socksify_unmanaged::associate_process_name_to_proxy(const std::wstring& pro
 
 /**
  * @brief Associates a process name to the exclusion list.
- * @param process_name The process name to associate.
- * @return True if addition was successful, false otherwise.
  */
 bool socksify_unmanaged::exclude_process_name(const std::wstring& process_name) const
 {
@@ -209,7 +233,6 @@ bool socksify_unmanaged::exclude_process_name(const std::wstring& process_name) 
 
 /**
  * @brief Sets the maximum number of log entries to keep.
- * @param log_limit The new log limit.
  */
 void socksify_unmanaged::set_log_limit(const uint32_t log_limit)
 {
@@ -218,7 +241,6 @@ void socksify_unmanaged::set_log_limit(const uint32_t log_limit)
 
 /**
  * @brief Gets the current log limit.
- * @return The log limit.
  */
 uint32_t socksify_unmanaged::get_log_limit()
 {
@@ -227,7 +249,6 @@ uint32_t socksify_unmanaged::get_log_limit()
 
 /**
  * @brief Sets the event handle to signal when log limit is exceeded.
- * @param log_event The Windows event handle.
  */
 void socksify_unmanaged::set_log_event(HANDLE log_event)
 {
@@ -236,7 +257,6 @@ void socksify_unmanaged::set_log_event(HANDLE log_event)
 
 /**
  * @brief Reads and clears the log storage.
- * @return The log storage as a log_storage_mx_t object.
  */
 log_storage_mx_t socksify_unmanaged::read_log()
 {
@@ -245,7 +265,6 @@ log_storage_mx_t socksify_unmanaged::read_log()
 
 /**
  * @brief Static helper for printing log messages.
- * @param log The message to log.
  */
 void socksify_unmanaged::log_printer(const char* log)
 {
@@ -254,7 +273,6 @@ void socksify_unmanaged::log_printer(const char* log)
 
 /**
  * @brief Static helper for logging events.
- * @param log The event to log.
  */
 void socksify_unmanaged::log_event(const event_mx log)
 {
@@ -263,18 +281,17 @@ void socksify_unmanaged::log_event(const event_mx log)
 
 /**
  * @brief Prints a log message at the specified log level.
- * @param level The log level.
- * @param message The message to print.
  */
 void socksify_unmanaged::print_log(const log_level_mx level, const std::string& message) const
 {
-    if (level < log_level_)
+    // Inclusive threshold: log when level <= current level
+    if (level <= log_level_)
     {
         log_printer(message.c_str());
     }
 }
 
-// ---------- NEW: minimal per-process CIDR policy forwards ----------
+// ---------- per-process CIDR policy forwards ----------
 bool socksify_unmanaged::include_process_dst_cidr(const std::wstring& process_name,
                                                   const std::string& cidr) const
 {
@@ -286,6 +303,6 @@ bool socksify_unmanaged::remove_process_dst_cidr(const std::wstring& process_nam
 {
     return dip_remove_process(process_name.c_str(), cidr.c_str()) == 1;
 }
-// -------------------------------------------------------------------
+// -----------------------------------------------------
 
 #pragma managed(pop)
