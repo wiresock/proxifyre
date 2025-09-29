@@ -41,3 +41,5 @@
 /wiresock_service/obj/x86/Release/.NETFramework,Version=v4.7.2.AssemblyAttributes.cs
 ProxiFyre/bin
 ProxiFyre/obj
+.vs/
+/packages/
