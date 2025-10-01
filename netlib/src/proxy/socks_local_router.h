@@ -989,6 +989,24 @@ namespace proxy
         /**
          * @brief Processes a UDP packet for possible redirection through a proxy.
          *
+         * This function inspects the provided intermediate_buffer, attempts to resolve the associated process,
+         * and determines if the UDP packet should be redirected to a proxy port, passed through, or reverted.
+         * If the process cannot be resolved and @p postponed is false, the function returns std::nullopt,
+         * indicating that the packet should be queued for later processing. If @p postponed is true, a
+         * second attempt is made to resolve the process using an updated process table.
+         *
+         * If the process is associated with a UDP proxy, and the packet is from a new endpoint, the source
+         * port is recorded and a redirection is logged. The function then attempts to process the packet for
+         * client-to-server redirection. If the packet is from a known proxy port, it attempts to process it
+         * for server-to-client redirection.
+         *
+         * @param buffer Reference to the intermediate_buffer containing the packet data.
+         * @param postponed If false, only the current process table is used for lookup. If true, the process
+         *        table is refreshed and a second lookup is attempted.
+         * @return std::optional<packet_filter::packet_action> indicating the action to take:
+         *         - std::nullopt: process could not be resolved (should be queued for later)
+         *         - packet_action::revert: packet should be reverted (redirected)
+         *         - packet_action::pass: packet should be passed through
          * (unchanged comment)
          */
         std::optional<packet_filter::packet_action> process_udp_packet(ndisapi::intermediate_buffer& buffer, const bool postponed)
@@ -1087,6 +1105,24 @@ namespace proxy
         /**
          * @brief Processes a TCP packet for possible redirection through a proxy.
          *
+         * This function inspects the provided intermediate_buffer, attempts to resolve the associated process,
+         * and determines if the UDP packet should be redirected to a proxy port, passed through, or reverted.
+         * If the process cannot be resolved and @p postponed is false, the function returns std::nullopt,
+         * indicating that the packet should be queued for later processing. If @p postponed is true, a
+         * second attempt is made to resolve the process using an updated process table.
+         *
+         * If the process is associated with a UDP proxy, and the packet is from a new endpoint, the source
+         * port is recorded and a redirection is logged. The function then attempts to process the packet for
+         * client-to-server redirection. If the packet is from a known proxy port, it attempts to process it
+         * for server-to-client redirection.
+         *
+         * @param buffer Reference to the intermediate_buffer containing the packet data.
+         * @param postponed If false, only the current process table is used for lookup. If true, the process
+         *        table is refreshed and a second lookup is attempted.
+         * @return std::optional<packet_filter::packet_action> indicating the action to take:
+         *         - std::nullopt: process could not be resolved (should be queued for later)
+         *         - packet_action::revert: packet should be reverted (redirected)
+         *         - packet_action::pass: packet should be passed through
          * (unchanged comment)
          */
         std::optional<packet_filter::packet_action> process_tcp_packet(ndisapi::intermediate_buffer& buffer, const bool postponed)
