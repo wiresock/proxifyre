@@ -67,7 +67,7 @@ namespace ndisapi
                                     using namespace std::chrono_literals;
                                     if (current_time - a.second > 15min)
                                     {
-                                        NETLIB_LOG(log_level::info,
+                                        NETLIB_INFO(
                                             "DELETE UDP client endpoint (timeout): : {}",
                                             ntohs(a.first));
 
@@ -197,7 +197,7 @@ namespace ndisapi
                     endpoints_[udp_header->th_sport] =
                         std::chrono::steady_clock::now();
 
-                    NETLIB_LOG(log_level::info,
+                    NETLIB_INFO(
                         "NEW client UDP endpoint: : {}",
                         ntohs(udp_header->th_sport));
 
@@ -227,7 +227,7 @@ namespace ndisapi
                     endpoints_[udp_header->th_sport] =
                         std::chrono::steady_clock::now();
 
-                    NETLIB_LOG(log_level::info,
+                    NETLIB_INFO(
                         "NEW client UDP endpoint: : {}",
                         ntohs(udp_header->th_sport));
 
@@ -284,7 +284,7 @@ namespace ndisapi
                     return false;
                 }
 
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "C2S: {}:{} -> {}:{}",
                     std::string{ T{ip_header->ip_src} },
                     ntohs(udp_header->th_sport),
@@ -323,7 +323,7 @@ namespace ndisapi
 
                 it->second = std::chrono::steady_clock::now();
 
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "C2S: {}:{} -> {}:{}",
                     std::string{ T{ip_header->ip_src} },
                     ntohs(udp_header->th_sport),
@@ -355,7 +355,7 @@ namespace ndisapi
                     return false;
                 }
 
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "C2S: {}:{} -> {}:{}",
                     std::string{ T{ip_header->ip6_src} },
                     ntohs(udp_header->th_sport),
@@ -395,7 +395,7 @@ namespace ndisapi
 
                 it->second = std::chrono::steady_clock::now();
 
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "C2S: {}:{} -> {}:{}",
                     std::string{ T{ip_header->ip6_src} },
                     ntohs(udp_header->th_sport),
@@ -445,7 +445,7 @@ namespace ndisapi
                 if (it == endpoints_.cend())
                     return false;
 
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "S2C: {}:{} -> {}:{}",
                     std::string{ T{ip_header->ip_src} },
                     ntohs(udp_header->th_sport),
@@ -477,7 +477,7 @@ namespace ndisapi
 
                 it->second = std::chrono::steady_clock::now();
 
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "S2C: {}:{} -> {}:{}",
                     std::string{ T{ip_header->ip_src} },
                     ntohs(udp_header->th_sport),
@@ -507,6 +507,13 @@ namespace ndisapi
                 if (it == endpoints_.cend())
                     return false;
 
+                NETLIB_DEBUG(
+                    "S2C: {}:{} -> {}:{}",
+                    std::string{ T{ip_header->ip6_src} },
+                    ntohs(udp_header->th_sport),
+                    std::string{ T{ip_header->ip6_dst} },
+                    ntohs(udp_header->th_dport));
+
                 // Swap Ethernet addresses
                 std::swap(eth_header->h_dest, eth_header->h_source);
 
@@ -532,6 +539,13 @@ namespace ndisapi
                 net::ipv6_helper::recalculate_tcp_udp_checksum(&packet);
 
                 it->second = std::chrono::steady_clock::now();
+
+                NETLIB_DEBUG(
+                    "S2C: {}:{} -> {}:{}",
+                    std::string{ T{ip_header->ip6_src} },
+                    ntohs(udp_header->th_sport),
+                    std::string{ T{ip_header->ip6_dst} },
+                    ntohs(udp_header->th_dport));
 
                 return true;
             }

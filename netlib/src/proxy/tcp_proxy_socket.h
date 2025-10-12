@@ -297,34 +297,34 @@ namespace proxy
         {
             std::lock_guard lock(lock_);
 
-            NETLIB_LOG(log_level::debug, "~tcp_proxy_socket: Starting destructor cleanup");
+            NETLIB_DEBUG("~tcp_proxy_socket: Starting destructor cleanup");
 
             if (local_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
             {
-                NETLIB_LOG(log_level::debug, "~tcp_proxy_socket: Cleaning up local socket {}", static_cast<int>(local_socket_));
+                NETLIB_DEBUG("~tcp_proxy_socket: Cleaning up local socket {}", static_cast<int>(local_socket_));
 
                 if (shutdown(local_socket_, SD_BOTH) == SOCKET_ERROR) {
                     const auto error = WSAGetLastError();
-                    NETLIB_LOG(log_level::warning, "~tcp_proxy_socket: shutdown(local_socket_) failed: {}", error);
+                    NETLIB_WARNING("~tcp_proxy_socket: shutdown(local_socket_) failed: {}", error);
                 }
                 else {
-                    NETLIB_LOG(log_level::debug, "~tcp_proxy_socket: Local socket shutdown successful");
+                    NETLIB_DEBUG("~tcp_proxy_socket: Local socket shutdown successful");
                 }
 
                 // Cancel all pending I/O before closing
                 if (CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr) == FALSE) {
                     const auto error = GetLastError();
                     if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
-                        NETLIB_LOG(log_level::debug, "~tcp_proxy_socket: CancelIoEx(local_socket_) returned error: {}", error);
+                        NETLIB_DEBUG("~tcp_proxy_socket: CancelIoEx(local_socket_) returned error: {}", error);
                     }
                 }
 
                 if (closesocket(local_socket_) == SOCKET_ERROR) {
                     const auto error = WSAGetLastError();
-                    NETLIB_LOG(log_level::warning, "~tcp_proxy_socket: closesocket(local_socket_) failed: {}", error);
+                    NETLIB_WARNING("~tcp_proxy_socket: closesocket(local_socket_) failed: {}", error);
                 }
                 else {
-                    NETLIB_LOG(log_level::debug, "~tcp_proxy_socket: Local socket closed successfully");
+                    NETLIB_DEBUG("~tcp_proxy_socket: Local socket closed successfully");
                 }
 
                 local_socket_ = INVALID_SOCKET;
@@ -332,36 +332,36 @@ namespace proxy
 
             if (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
             {
-                NETLIB_LOG(log_level::debug, "~tcp_proxy_socket: Cleaning up remote socket {}", static_cast<int>(remote_socket_));
+                NETLIB_DEBUG("~tcp_proxy_socket: Cleaning up remote socket {}", static_cast<int>(remote_socket_));
 
                 if (shutdown(remote_socket_, SD_BOTH) == SOCKET_ERROR) {
                     const auto error = WSAGetLastError();
-                    NETLIB_LOG(log_level::warning, "~tcp_proxy_socket: shutdown(remote_socket_) failed: {}", error);
+                    NETLIB_WARNING("~tcp_proxy_socket: shutdown(remote_socket_) failed: {}", error);
                 }
                 else {
-                    NETLIB_LOG(log_level::debug, "~tcp_proxy_socket: Remote socket shutdown successful");
+                    NETLIB_DEBUG("~tcp_proxy_socket: Remote socket shutdown successful");
                 }
 
                 // Cancel all pending I/O before closing
                 if (CancelIoEx(reinterpret_cast<HANDLE>(remote_socket_), nullptr) == FALSE) {
                     const auto error = GetLastError();
                     if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
-                        NETLIB_LOG(log_level::debug, "~tcp_proxy_socket: CancelIoEx(remote_socket_) returned error: {}", error);
+                        NETLIB_DEBUG("~tcp_proxy_socket: CancelIoEx(remote_socket_) returned error: {}", error);
                     }
                 }
 
                 if (closesocket(remote_socket_) == SOCKET_ERROR) {
                     const auto error = WSAGetLastError();
-                    NETLIB_LOG(log_level::warning, "~tcp_proxy_socket: closesocket(remote_socket_) failed: {}", error);
+                    NETLIB_WARNING("~tcp_proxy_socket: closesocket(remote_socket_) failed: {}", error);
                 }
                 else {
-                    NETLIB_LOG(log_level::debug, "~tcp_proxy_socket: Remote socket closed successfully");
+                    NETLIB_DEBUG("~tcp_proxy_socket: Remote socket closed successfully");
                 }
 
                 remote_socket_ = INVALID_SOCKET;
             }
 
-            NETLIB_LOG(log_level::debug, "~tcp_proxy_socket: Destructor cleanup completed");
+            NETLIB_DEBUG("~tcp_proxy_socket: Destructor cleanup completed");
         }
 
         /**
@@ -477,52 +477,52 @@ namespace proxy
          */
         bool associate_to_completion_port(const ULONG_PTR completion_key, winsys::io_completion_port& completion_port)
         {
-            NETLIB_LOG(log_level::debug, "associate_to_completion_port: Starting association with completion key {}", completion_key);
+            NETLIB_DEBUG("associate_to_completion_port: Starting association with completion key {}", completion_key);
 
             connection_status_ = connection_status::client_established;
-            NETLIB_LOG(log_level::debug, "associate_to_completion_port: Connection status set to client_established");
+            NETLIB_DEBUG("associate_to_completion_port: Connection status set to client_established");
 
             if (local_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
             {
-                NETLIB_LOG(log_level::error, "associate_to_completion_port: Local socket is invalid (INVALID_SOCKET)");
+                NETLIB_ERROR("associate_to_completion_port: Local socket is invalid (INVALID_SOCKET)");
                 return false;
             }
 
             if (remote_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
             {
-                NETLIB_LOG(log_level::error, "associate_to_completion_port: Remote socket is invalid (INVALID_SOCKET)");
+                NETLIB_ERROR("associate_to_completion_port: Remote socket is invalid (INVALID_SOCKET)");
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "associate_to_completion_port: Associating local socket {} with completion port",
+            NETLIB_DEBUG("associate_to_completion_port: Associating local socket {} with completion port",
                 static_cast<int>(local_socket_));
 
             const bool local_result = completion_port.associate_socket(local_socket_, completion_key);
             if (!local_result)
             {
-                NETLIB_LOG(log_level::error, "associate_to_completion_port: Failed to associate local socket {} with completion port",
+                NETLIB_ERROR("associate_to_completion_port: Failed to associate local socket {} with completion port",
                     static_cast<int>(local_socket_));
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "associate_to_completion_port: Local socket {} associated successfully",
+            NETLIB_DEBUG("associate_to_completion_port: Local socket {} associated successfully",
                 static_cast<int>(local_socket_));
 
-            NETLIB_LOG(log_level::debug, "associate_to_completion_port: Associating remote socket {} with completion port",
+            NETLIB_DEBUG("associate_to_completion_port: Associating remote socket {} with completion port",
                 static_cast<int>(remote_socket_));
 
             const bool remote_result = completion_port.associate_socket(remote_socket_, completion_key);
             if (!remote_result)
             {
-                NETLIB_LOG(log_level::error, "associate_to_completion_port: Failed to associate remote socket {} with completion port",
+                NETLIB_ERROR("associate_to_completion_port: Failed to associate remote socket {} with completion port",
                     static_cast<int>(remote_socket_));
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "associate_to_completion_port: Remote socket {} associated successfully",
+            NETLIB_DEBUG("associate_to_completion_port: Remote socket {} associated successfully",
                 static_cast<int>(remote_socket_));
 
-            NETLIB_LOG(log_level::debug, "associate_to_completion_port: Successfully associated both sockets (local: {}, remote: {}) with completion key {}",
+            NETLIB_DEBUG("associate_to_completion_port: Successfully associated both sockets (local: {}, remote: {}) with completion key {}",
                 static_cast<int>(local_socket_),
                 static_cast<int>(remote_socket_),
                 completion_key);
@@ -555,197 +555,197 @@ namespace proxy
                 lock.lock();
             }
 
-            NETLIB_LOG(log_level::debug, "close_client: Starting cleanup (is_receive: {}, is_local: {})",
+            NETLIB_DEBUG("close_client: Starting cleanup (is_receive: {}, is_local: {})",
                 is_receive, is_local);
 
             if (is_local)
             {
-                NETLIB_LOG(log_level::debug, "close_client: Processing local socket closure");
+                NETLIB_DEBUG("close_client: Processing local socket closure");
 
                 if (local_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                 {
-                    NETLIB_LOG(log_level::debug, "close_client: Closing local socket {}",
+                    NETLIB_DEBUG("close_client: Closing local socket {}",
                         static_cast<int>(local_socket_));
 
                     if (shutdown(local_socket_, SD_BOTH) == SOCKET_ERROR) {
                         const auto error = WSAGetLastError();
-                        NETLIB_LOG(log_level::warning, "close_client: shutdown(local_socket_) failed: {}", error);
+                        NETLIB_WARNING("close_client: shutdown(local_socket_) failed: {}", error);
                     }
                     else {
-                        NETLIB_LOG(log_level::debug, "close_client: Local socket shutdown successful");
+                        NETLIB_DEBUG("close_client: Local socket shutdown successful");
                     }
 
                     // Cancel all pending I/O before closing
                     if (CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr) == FALSE) {
                         const auto error = GetLastError();
                         if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
-                            NETLIB_LOG(log_level::debug, "close_client: CancelIoEx(local_socket_) returned error: {}", error);
+                            NETLIB_DEBUG("close_client: CancelIoEx(local_socket_) returned error: {}", error);
                         }
                     }
                     else {
-                        NETLIB_LOG(log_level::debug, "close_client: Local socket I/O cancellation successful");
+                        NETLIB_DEBUG("close_client: Local socket I/O cancellation successful");
                     }
 
                     if (closesocket(local_socket_) == SOCKET_ERROR) {
                         const auto error = WSAGetLastError();
-                        NETLIB_LOG(log_level::warning, "close_client: closesocket(local_socket_) failed: {}", error);
+                        NETLIB_WARNING("close_client: closesocket(local_socket_) failed: {}", error);
                     }
                     else {
-                        NETLIB_LOG(log_level::debug, "close_client: Local socket closed successfully");
+                        NETLIB_DEBUG("close_client: Local socket closed successfully");
                     }
 
                     local_socket_ = INVALID_SOCKET;
                     connection_status_ = connection_status::client_completed;
-                    NETLIB_LOG(log_level::debug, "close_client: Connection status set to client_completed");
+                    NETLIB_DEBUG("close_client: Connection status set to client_completed");
                 }
                 else {
-                    NETLIB_LOG(log_level::debug, "close_client: Local socket already invalid, skipping closure");
+                    NETLIB_DEBUG("close_client: Local socket already invalid, skipping closure");
                 }
 
                 if (is_receive)
                 {
                     local_recv_buf_.len = 0;
-                    NETLIB_LOG(log_level::debug, "close_client: Reset local receive buffer length");
+                    NETLIB_DEBUG("close_client: Reset local receive buffer length");
                 }
                 else
                 {
                     local_send_buf_.len = 0;
-                    NETLIB_LOG(log_level::debug, "close_client: Reset local send buffer length");
+                    NETLIB_DEBUG("close_client: Reset local send buffer length");
                 }
 
                 if (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                 {
-                    NETLIB_LOG(log_level::debug, "close_client: Also closing remote socket {} due to local closure",
+                    NETLIB_DEBUG("close_client: Also closing remote socket {} due to local closure",
                         static_cast<int>(remote_socket_));
 
                     if (shutdown(remote_socket_, SD_BOTH) == SOCKET_ERROR) {
                         const auto error = WSAGetLastError();
-                        NETLIB_LOG(log_level::warning, "close_client: shutdown(remote_socket_) failed: {}", error);
+                        NETLIB_WARNING("close_client: shutdown(remote_socket_) failed: {}", error);
                     }
                     else {
-                        NETLIB_LOG(log_level::debug, "close_client: Remote socket shutdown successful");
+                        NETLIB_DEBUG("close_client: Remote socket shutdown successful");
                     }
 
                     // Cancel all pending I/O before closing
                     if (CancelIoEx(reinterpret_cast<HANDLE>(remote_socket_), nullptr) == FALSE) {
                         const auto error = GetLastError();
                         if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
-                            NETLIB_LOG(log_level::debug, "close_client: CancelIoEx(remote_socket_) returned error: {}", error);
+                            NETLIB_DEBUG("close_client: CancelIoEx(remote_socket_) returned error: {}", error);
                         }
                     }
                     else {
-                        NETLIB_LOG(log_level::debug, "close_client: Remote socket I/O cancellation successful");
+                        NETLIB_DEBUG("close_client: Remote socket I/O cancellation successful");
                     }
 
                     if (closesocket(remote_socket_) == SOCKET_ERROR) {
                         const auto error = WSAGetLastError();
-                        NETLIB_LOG(log_level::warning, "close_client: closesocket(remote_socket_) failed: {}", error);
+                        NETLIB_WARNING("close_client: closesocket(remote_socket_) failed: {}", error);
                     }
                     else {
-                        NETLIB_LOG(log_level::debug, "close_client: Remote socket closed successfully");
+                        NETLIB_DEBUG("close_client: Remote socket closed successfully");
                     }
 
                     remote_socket_ = INVALID_SOCKET;
                 }
                 else {
-                    NETLIB_LOG(log_level::debug, "close_client: Remote socket already invalid, skipping closure");
+                    NETLIB_DEBUG("close_client: Remote socket already invalid, skipping closure");
                 }
             }
             else
             {
-                NETLIB_LOG(log_level::debug, "close_client: Processing remote socket closure");
+                NETLIB_DEBUG("close_client: Processing remote socket closure");
 
                 if (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                 {
-                    NETLIB_LOG(log_level::debug, "close_client: Closing remote socket {}",
+                    NETLIB_DEBUG("close_client: Closing remote socket {}",
                         static_cast<int>(remote_socket_));
 
                     if (shutdown(remote_socket_, SD_BOTH) == SOCKET_ERROR) {
                         const auto error = WSAGetLastError();
-                        NETLIB_LOG(log_level::warning, "close_client: shutdown(remote_socket_) failed: {}", error);
+                        NETLIB_WARNING("close_client: shutdown(remote_socket_) failed: {}", error);
                     }
                     else {
-                        NETLIB_LOG(log_level::debug, "close_client: Remote socket shutdown successful");
+                        NETLIB_DEBUG("close_client: Remote socket shutdown successful");
                     }
 
                     // Cancel all pending I/O before closing
                     if (CancelIoEx(reinterpret_cast<HANDLE>(remote_socket_), nullptr) == FALSE) {
                         const auto error = GetLastError();
                         if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
-                            NETLIB_LOG(log_level::debug, "close_client: CancelIoEx(remote_socket_) returned error: {}", error);
+                            NETLIB_DEBUG("close_client: CancelIoEx(remote_socket_) returned error: {}", error);
                         }
                     }
                     else {
-                        NETLIB_LOG(log_level::debug, "close_client: Remote socket I/O cancellation successful");
+                        NETLIB_DEBUG("close_client: Remote socket I/O cancellation successful");
                     }
 
                     if (closesocket(remote_socket_) == SOCKET_ERROR) {
                         const auto error = WSAGetLastError();
-                        NETLIB_LOG(log_level::warning, "close_client: closesocket(remote_socket_) failed: {}", error);
+                        NETLIB_WARNING("close_client: closesocket(remote_socket_) failed: {}", error);
                     }
                     else {
-                        NETLIB_LOG(log_level::debug, "close_client: Remote socket closed successfully");
+                        NETLIB_DEBUG("close_client: Remote socket closed successfully");
                     }
 
                     remote_socket_ = INVALID_SOCKET;
                     connection_status_ = connection_status::client_completed;
-                    NETLIB_LOG(log_level::debug, "close_client: Connection status set to client_completed");
+                    NETLIB_DEBUG("close_client: Connection status set to client_completed");
                 }
                 else {
-                    NETLIB_LOG(log_level::debug, "close_client: Remote socket already invalid, skipping closure");
+                    NETLIB_DEBUG("close_client: Remote socket already invalid, skipping closure");
                 }
 
                 if (is_receive)
                 {
                     remote_recv_buf_.len = 0;
-                    NETLIB_LOG(log_level::debug, "close_client: Reset remote receive buffer length");
+                    NETLIB_DEBUG("close_client: Reset remote receive buffer length");
                 }
                 else
                 {
                     remote_send_buf_.len = 0;
-                    NETLIB_LOG(log_level::debug, "close_client: Reset remote send buffer length");
+                    NETLIB_DEBUG("close_client: Reset remote send buffer length");
                 }
 
                 if (local_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                 {
-                    NETLIB_LOG(log_level::debug, "close_client: Also closing local socket {} due to remote closure",
+                    NETLIB_DEBUG("close_client: Also closing local socket {} due to remote closure",
                         static_cast<int>(local_socket_));
 
                     if (shutdown(local_socket_, SD_BOTH) == SOCKET_ERROR) {
                         const auto error = WSAGetLastError();
-                        NETLIB_LOG(log_level::warning, "close_client: shutdown(local_socket_) failed: {}", error);
+                        NETLIB_WARNING("close_client: shutdown(local_socket_) failed: {}", error);
                     }
                     else {
-                        NETLIB_LOG(log_level::debug, "close_client: Local socket shutdown successful");
+                        NETLIB_DEBUG("close_client: Local socket shutdown successful");
                     }
 
                     // Cancel all pending I/O before closing
                     if (CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr) == FALSE) {
                         const auto error = GetLastError();
                         if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
-                            NETLIB_LOG(log_level::debug, "close_client: CancelIoEx(local_socket_) returned error: {}", error);
+                            NETLIB_DEBUG("close_client: CancelIoEx(local_socket_) returned error: {}", error);
                         }
                     }
                     else {
-                        NETLIB_LOG(log_level::debug, "close_client: Local socket I/O cancellation successful");
+                        NETLIB_DEBUG("close_client: Local socket I/O cancellation successful");
                     }
 
                     if (closesocket(local_socket_) == SOCKET_ERROR) {
                         const auto error = WSAGetLastError();
-                        NETLIB_LOG(log_level::warning, "close_client: closesocket(local_socket_) failed: {}", error);
+                        NETLIB_WARNING("close_client: closesocket(local_socket_) failed: {}", error);
                     }
                     else {
-                        NETLIB_LOG(log_level::debug, "close_client: Local socket closed successfully");
+                        NETLIB_DEBUG("close_client: Local socket closed successfully");
                     }
 
                     local_socket_ = INVALID_SOCKET;
                 }
                 else {
-                    NETLIB_LOG(log_level::debug, "close_client: Local socket already invalid, skipping closure");
+                    NETLIB_DEBUG("close_client: Local socket already invalid, skipping closure");
                 }
             }
 
-            NETLIB_LOG(log_level::debug, "close_client: Cleanup completed (is_receive: {}, is_local: {})",
+            NETLIB_DEBUG("close_client: Cleanup completed (is_receive: {}, is_local: {})",
                 is_receive, is_local);
         }
 
@@ -777,7 +777,7 @@ namespace proxy
 
             std::lock_guard lock(lock_);
 
-            NETLIB_LOG(log_level::debug, "is_ready_for_removal: Checking session readiness for removal");
+            NETLIB_DEBUG("is_ready_for_removal: Checking session readiness for removal");
 
             // Check if both sockets are closed
             const bool sockets_closed = (remote_socket_ == static_cast<SOCKET>(INVALID_SOCKET)) &&
@@ -785,8 +785,8 @@ namespace proxy
 
             if (sockets_closed)
             {
-                NETLIB_LOG(log_level::debug, "is_ready_for_removal: Both sockets are closed, checking buffer states");
-                NETLIB_LOG(log_level::debug, "is_ready_for_removal: Buffer lengths - remote_send: {}, local_send: {}, remote_recv: {}, local_recv: {}",
+                NETLIB_DEBUG("is_ready_for_removal: Both sockets are closed, checking buffer states");
+                NETLIB_DEBUG("is_ready_for_removal: Buffer lengths - remote_send: {}, local_send: {}, remote_recv: {}, local_recv: {}",
                     remote_send_buf_.len, local_send_buf_.len, remote_recv_buf_.len, local_recv_buf_.len);
 
                 if ((remote_send_buf_.len == 0 &&
@@ -794,14 +794,14 @@ namespace proxy
                     remote_recv_buf_.len == 0 &&
                     local_recv_buf_.len == 0))
                 {
-                    NETLIB_LOG(log_level::info, "is_ready_for_removal: Session is ready for removal - all sockets closed and buffers empty");
+                    NETLIB_INFO("is_ready_for_removal: Session is ready for removal - all sockets closed and buffers empty");
                     return true;
                 }
-                NETLIB_LOG(log_level::debug, "is_ready_for_removal: Sockets closed but buffers not empty, session not ready for removal");
+                NETLIB_DEBUG("is_ready_for_removal: Sockets closed but buffers not empty, session not ready for removal");
             }
             else
             {
-                NETLIB_LOG(log_level::debug, "is_ready_for_removal: Sockets still open - local: {}, remote: {}",
+                NETLIB_DEBUG("is_ready_for_removal: Sockets still open - local: {}, remote: {}",
                     local_socket_ == static_cast<SOCKET>(INVALID_SOCKET) ? "closed" : "open",
                     remote_socket_ == static_cast<SOCKET>(INVALID_SOCKET) ? "closed" : "open");
             }
@@ -812,35 +812,35 @@ namespace proxy
             const auto idle_duration = current_time - timestamp_;
             const auto idle_seconds = std::chrono::duration_cast<std::chrono::seconds>(idle_duration).count();
 
-            NETLIB_LOG(log_level::debug, "is_ready_for_removal: Session idle time: {} seconds (safety timeout: 3600 seconds)",
+            NETLIB_DEBUG("is_ready_for_removal: Session idle time: {} seconds (safety timeout: 3600 seconds)",
                 idle_seconds);
 
             if (idle_duration > 1h)  // Changed from 120s to 1 hour as safety measure
             {
-                NETLIB_LOG(log_level::warning, "is_ready_for_removal: Session has been idle for {} seconds (1 hour), performing safety cleanup", idle_seconds);
+                NETLIB_WARNING("is_ready_for_removal: Session has been idle for {} seconds (1 hour), performing safety cleanup", idle_seconds);
 
                 if (sockets_closed)
                 {
-                    NETLIB_LOG(log_level::debug, "is_ready_for_removal: Sockets already closed, performing buffer cleanup");
+                    NETLIB_DEBUG("is_ready_for_removal: Sockets already closed, performing buffer cleanup");
 
                     close_client<true>(true, true);
                     close_client<true>(true, false);
 
-                    NETLIB_LOG(log_level::debug, "is_ready_for_removal: Buffer cleanup completed for abandoned session");
+                    NETLIB_DEBUG("is_ready_for_removal: Buffer cleanup completed for abandoned session");
                 }
                 else
                 {
-                    NETLIB_LOG(log_level::warning, "is_ready_for_removal: Sockets still open after 1 hour idle - likely abandoned connection, performing safety closure");
+                    NETLIB_WARNING("is_ready_for_removal: Sockets still open after 1 hour idle - likely abandoned connection, performing safety closure");
 
                     if (local_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                     {
-                        NETLIB_LOG(log_level::warning, "is_ready_for_removal: Closing abandoned local socket {}",
+                        NETLIB_WARNING("is_ready_for_removal: Closing abandoned local socket {}",
                             static_cast<int>(local_socket_));
                     }
 
                     if (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                     {
-                        NETLIB_LOG(log_level::warning, "is_ready_for_removal: Closing abandoned remote socket {}",
+                        NETLIB_WARNING("is_ready_for_removal: Closing abandoned remote socket {}",
                             static_cast<int>(remote_socket_));
                     }
 
@@ -850,16 +850,16 @@ namespace proxy
                     // Extend timestamp by 1 minute to avoid immediate re-cleanup attempts
                     timestamp_ += 1min;
 
-                    NETLIB_LOG(log_level::debug, "is_ready_for_removal: Safety closure completed, timestamp extended by 1 minute");
+                    NETLIB_DEBUG("is_ready_for_removal: Safety closure completed, timestamp extended by 1 minute");
                 }
             }
             else
             {
-                NETLIB_LOG(log_level::debug, "is_ready_for_removal: Session within safety timeout, {} seconds remaining",
+                NETLIB_DEBUG("is_ready_for_removal: Session within safety timeout, {} seconds remaining",
                     3600 - idle_seconds);
             }
 
-            NETLIB_LOG(log_level::debug, "is_ready_for_removal: Session not ready for removal");
+            NETLIB_DEBUG("is_ready_for_removal: Session not ready for removal");
             return false;
         }
 
@@ -884,13 +884,13 @@ namespace proxy
          */
         virtual bool start()
         {
-            NETLIB_LOG(log_level::debug, "start: Starting proxy session initialization");
-            NETLIB_LOG(log_level::debug, "start: Local socket: {}, Remote socket: {}",
+            NETLIB_DEBUG("start: Starting proxy session initialization");
+            NETLIB_DEBUG("start: Local socket: {}, Remote socket: {}",
                 static_cast<int>(local_socket_), static_cast<int>(remote_socket_));
 
             if (is_disable_nagle_)
             {
-                NETLIB_LOG(log_level::debug, "start: Nagle's algorithm disabled, setting TCP_NODELAY on remote socket");
+                NETLIB_DEBUG("start: Nagle's algorithm disabled, setting TCP_NODELAY on remote socket");
 
                 auto i = 1;
                 const int result = setsockopt(remote_socket_, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&i), sizeof(i));
@@ -898,47 +898,47 @@ namespace proxy
                 if (result == SOCKET_ERROR)
                 {
                     const auto error = WSAGetLastError();
-                    NETLIB_LOG(log_level::warning, "start: Failed to set TCP_NODELAY on remote socket: {}", error);
+                    NETLIB_WARNING("start: Failed to set TCP_NODELAY on remote socket: {}", error);
                 }
                 else
                 {
-                    NETLIB_LOG(log_level::debug, "start: TCP_NODELAY successfully set on remote socket");
+                    NETLIB_DEBUG("start: TCP_NODELAY successfully set on remote socket");
                 }
             }
             else
             {
-                NETLIB_LOG(log_level::debug, "start: Nagle's algorithm enabled, TCP_NODELAY not set");
+                NETLIB_DEBUG("start: Nagle's algorithm enabled, TCP_NODELAY not set");
             }
 
-            NETLIB_LOG(log_level::debug, "start: Beginning negotiation phase");
+            NETLIB_DEBUG("start: Beginning negotiation phase");
 
-            NETLIB_LOG(log_level::debug, "start: Initiating local negotiation");
+            NETLIB_DEBUG("start: Initiating local negotiation");
             const bool local_negotiate_result = local_negotiate();
 
             if (local_negotiate_result)
             {
-                NETLIB_LOG(log_level::debug, "start: Local negotiation completed successfully");
+                NETLIB_DEBUG("start: Local negotiation completed successfully");
             }
             else
             {
-                NETLIB_LOG(log_level::debug, "start: Local negotiation is pending or failed");
+                NETLIB_DEBUG("start: Local negotiation is pending or failed");
             }
 
-            NETLIB_LOG(log_level::debug, "start: Initiating remote negotiation");
+            NETLIB_DEBUG("start: Initiating remote negotiation");
             const bool remote_negotiate_result = remote_negotiate();
 
             if (remote_negotiate_result)
             {
-                NETLIB_LOG(log_level::debug, "start: Remote negotiation completed successfully");
+                NETLIB_DEBUG("start: Remote negotiation completed successfully");
             }
             else
             {
-                NETLIB_LOG(log_level::debug, "start: Remote negotiation is pending or failed");
+                NETLIB_DEBUG("start: Remote negotiation is pending or failed");
             }
 
             if (local_negotiate_result && remote_negotiate_result)
             {
-                NETLIB_LOG(log_level::debug, "start: Both negotiations completed successfully, starting data relay immediately");
+                NETLIB_DEBUG("start: Both negotiations completed successfully, starting data relay immediately");
 
                 // if negotiate phase can be complete immediately (or not needed at all)
                 // start data relay here
@@ -946,18 +946,18 @@ namespace proxy
 
                 if (data_relay_result)
                 {
-                    NETLIB_LOG(log_level::info, "start: Proxy session started successfully with immediate data relay");
+                    NETLIB_INFO("start: Proxy session started successfully with immediate data relay");
                 }
                 else
                 {
-                    NETLIB_LOG(log_level::warning, "start: Failed to start data relay after successful negotiations");
+                    NETLIB_WARNING("start: Failed to start data relay after successful negotiations");
                 }
 
                 return data_relay_result;
             }
 
-            NETLIB_LOG(log_level::debug, "start: Negotiation is pending or incomplete, data relay will be started later");
-            NETLIB_LOG(log_level::debug, "start: Data relay will be initiated from process_receive_negotiate_complete or process_send_negotiate_complete");
+            NETLIB_DEBUG("start: Negotiation is pending or incomplete, data relay will be started later");
+            NETLIB_DEBUG("start: Data relay will be initiated from process_receive_negotiate_complete or process_send_negotiate_complete");
 
             // otherwise start_data_relay should be called from 
             // process_receive_negotiate_complete/process_send_negotiate_complete
@@ -1028,47 +1028,47 @@ namespace proxy
 
             timestamp_ = std::chrono::steady_clock::now();
 
-            NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Processing {} bytes from {} socket",
+            NETLIB_DEBUG("process_receive_buffer_complete: Processing {} bytes from {} socket",
                 io_size, io_context->is_local ? "local" : "remote");
 
             switch (connection_status_)
             {
             case connection_status::client_completed:
             {
-                NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Connection already completed, resetting buffer");
+                NETLIB_DEBUG("process_receive_buffer_complete: Connection already completed, resetting buffer");
 
                 if (io_context->is_local)
                 {
                     local_recv_buf_.len = 0;
-                    NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Reset local receive buffer length");
+                    NETLIB_DEBUG("process_receive_buffer_complete: Reset local receive buffer length");
                 }
                 else
                 {
                     remote_recv_buf_.len = 0;
-                    NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Reset remote receive buffer length");
+                    NETLIB_DEBUG("process_receive_buffer_complete: Reset remote receive buffer length");
                 }
 
                 break;
             }
             case connection_status::client_established:
             {
-                NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Connection established, processing data relay");
+                NETLIB_DEBUG("process_receive_buffer_complete: Connection established, processing data relay");
 
                 if (io_context->is_local)
                 {
-                    NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Data received from local socket: {} bytes", io_size);
+                    NETLIB_DEBUG("process_receive_buffer_complete: Data received from local socket: {} bytes", io_size);
 
                     // data received from locally connected socket
                     if (remote_send_buf_.len == 0)
                     {
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: No remote send in progress, forwarding to remote");
+                        NETLIB_DEBUG("process_receive_buffer_complete: No remote send in progress, forwarding to remote");
 
                         // if there is no "send to remotely connected socket" in progress
                         // then forward the received data to remote host
                         remote_send_buf_.buf = local_recv_buf_.buf;
                         remote_send_buf_.len = io_size;
 
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Sending {} bytes to remote socket", io_size);
+                        NETLIB_DEBUG("process_receive_buffer_complete: Sending {} bytes to remote socket", io_size);
 
                         if ((::WSASend(
                             remote_socket_,
@@ -1080,25 +1080,25 @@ namespace proxy
                             nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                         {
                             const auto error = WSAGetLastError();
-                            NETLIB_LOG(log_level::warning, "process_receive_buffer_complete: WSASend to remote failed: {}", error);
+                            NETLIB_WARNING("process_receive_buffer_complete: WSASend to remote failed: {}", error);
                             // Close connection to remote peer in case of error
                             close_client<true>(false, false);
                         }
                         else
                         {
-                            NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: WSASend to remote initiated successfully");
+                            NETLIB_DEBUG("process_receive_buffer_complete: WSASend to remote initiated successfully");
                         }
                     }
                     else
                     {
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Remote send already in progress (len={}), buffering data", remote_send_buf_.len);
+                        NETLIB_DEBUG("process_receive_buffer_complete: Remote send already in progress (len={}), buffering data", remote_send_buf_.len);
                     }
 
                     // shift the receive buffer for the amount of received data
                     // buffer is cyclic, adjust the available buffer size
                     // if end of the buffer is reached then go from the start
                     local_recv_buf_.buf += io_size;
-                    NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Advanced local receive buffer by {} bytes", io_size);
+                    NETLIB_DEBUG("process_receive_buffer_complete: Advanced local receive buffer by {} bytes", io_size);
 
                     if (local_recv_buf_.buf > remote_send_buf_.buf)
                     {
@@ -1106,26 +1106,26 @@ namespace proxy
                         {
                             local_recv_buf_.len = static_cast<ULONG>(from_local_to_remote_buffer_.data() +
                                 from_local_to_remote_buffer_.size() - local_recv_buf_.buf);
-                            NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Set local recv buffer len to {} (within buffer)", local_recv_buf_.len);
+                            NETLIB_DEBUG("process_receive_buffer_complete: Set local recv buffer len to {} (within buffer)", local_recv_buf_.len);
                         }
                         else
                         {
                             local_recv_buf_.buf = from_local_to_remote_buffer_.data();
                             local_recv_buf_.len = static_cast<ULONG>(remote_send_buf_.buf -
                                 from_local_to_remote_buffer_.data());
-                            NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Wrapped local recv buffer, len set to {}", local_recv_buf_.len);
+                            NETLIB_DEBUG("process_receive_buffer_complete: Wrapped local recv buffer, len set to {}", local_recv_buf_.len);
                         }
                     }
                     else
                     {
                         local_recv_buf_.len = static_cast<ULONG>(remote_send_buf_.buf - local_recv_buf_.buf);
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Set local recv buffer len to {} (normal case)", local_recv_buf_.len);
+                        NETLIB_DEBUG("process_receive_buffer_complete: Set local recv buffer len to {} (normal case)", local_recv_buf_.len);
                     }
 
                     // Initiate the new receive if we have space in the receive buffer
                     if (local_recv_buf_.len)
                     {
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Initiating new local receive with buffer size {}", local_recv_buf_.len);
+                        NETLIB_DEBUG("process_receive_buffer_complete: Initiating new local receive with buffer size {}", local_recv_buf_.len);
 
                         DWORD flags = 0;
 
@@ -1139,35 +1139,35 @@ namespace proxy
                             nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                         {
                             const auto error = WSAGetLastError();
-                            NETLIB_LOG(log_level::warning, "process_receive_buffer_complete: WSARecv from local failed: {}", error);
+                            NETLIB_WARNING("process_receive_buffer_complete: WSARecv from local failed: {}", error);
                             // Close connection to local peer in case of error
                             close_client<true>(true, true);
                         }
                         else
                         {
-                            NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: New local WSARecv initiated successfully");
+                            NETLIB_DEBUG("process_receive_buffer_complete: New local WSARecv initiated successfully");
                         }
                     }
                     else
                     {
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: No space in local receive buffer, skipping new receive");
+                        NETLIB_DEBUG("process_receive_buffer_complete: No space in local receive buffer, skipping new receive");
                     }
                 }
                 else
                 {
-                    NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Data received from remote socket: {} bytes", io_size);
+                    NETLIB_DEBUG("process_receive_buffer_complete: Data received from remote socket: {} bytes", io_size);
 
                     // data received from remotely connected socket
                     if (local_send_buf_.len == 0)
                     {
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: No local send in progress, forwarding to local");
+                        NETLIB_DEBUG("process_receive_buffer_complete: No local send in progress, forwarding to local");
 
                         // if there is no "send to locally connected socket" in progress
                         // then forward the received data to local host
                         local_send_buf_.buf = remote_recv_buf_.buf;
                         local_send_buf_.len = io_size;
 
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Sending {} bytes to local socket", io_size);
+                        NETLIB_DEBUG("process_receive_buffer_complete: Sending {} bytes to local socket", io_size);
 
                         if ((::WSASend(
                             local_socket_,
@@ -1179,25 +1179,25 @@ namespace proxy
                             nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                         {
                             const auto error = WSAGetLastError();
-                            NETLIB_LOG(log_level::warning, "process_receive_buffer_complete: WSASend to local failed: {}", error);
+                            NETLIB_WARNING("process_receive_buffer_complete: WSASend to local failed: {}", error);
                             // Close connection to local peer in case of error
                             close_client<true>(false, true);
                         }
                         else
                         {
-                            NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: WSASend to local initiated successfully");
+                            NETLIB_DEBUG("process_receive_buffer_complete: WSASend to local initiated successfully");
                         }
                     }
                     else
                     {
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Local send already in progress (len={}), buffering data", local_send_buf_.len);
+                        NETLIB_DEBUG("process_receive_buffer_complete: Local send already in progress (len={}), buffering data", local_send_buf_.len);
                     }
 
                     // shift the receive buffer for the amount of received data
                     // buffer is cyclic, adjust the available buffer size
                     // if end of the buffer is reached then go from the start
                     remote_recv_buf_.buf += io_size;
-                    NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Advanced remote receive buffer by {} bytes", io_size);
+                    NETLIB_DEBUG("process_receive_buffer_complete: Advanced remote receive buffer by {} bytes", io_size);
 
                     if (remote_recv_buf_.buf > local_send_buf_.buf)
                     {
@@ -1206,26 +1206,26 @@ namespace proxy
                         {
                             remote_recv_buf_.len = static_cast<DWORD>(from_remote_to_local_buffer_.data() +
                                 from_remote_to_local_buffer_.size() - remote_recv_buf_.buf);
-                            NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Set remote recv buffer len to {} (within buffer)", remote_recv_buf_.len);
+                            NETLIB_DEBUG("process_receive_buffer_complete: Set remote recv buffer len to {} (within buffer)", remote_recv_buf_.len);
                         }
                         else
                         {
                             remote_recv_buf_.buf = from_remote_to_local_buffer_.data();
                             remote_recv_buf_.len = static_cast<DWORD>(local_send_buf_.buf -
                                 from_remote_to_local_buffer_.data());
-                            NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Wrapped remote recv buffer, len set to {}", remote_recv_buf_.len);
+                            NETLIB_DEBUG("process_receive_buffer_complete: Wrapped remote recv buffer, len set to {}", remote_recv_buf_.len);
                         }
                     }
                     else
                     {
                         remote_recv_buf_.len = static_cast<DWORD>(local_send_buf_.buf - remote_recv_buf_.buf);
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Set remote recv buffer len to {} (normal case)", remote_recv_buf_.len);
+                        NETLIB_DEBUG("process_receive_buffer_complete: Set remote recv buffer len to {} (normal case)", remote_recv_buf_.len);
                     }
 
                     // initiate the new receive if we have space in receive buffer
                     if (remote_recv_buf_.len)
                     {
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Initiating new remote receive with buffer size {}", remote_recv_buf_.len);
+                        NETLIB_DEBUG("process_receive_buffer_complete: Initiating new remote receive with buffer size {}", remote_recv_buf_.len);
 
                         DWORD flags = 0;
 
@@ -1239,18 +1239,18 @@ namespace proxy
                             nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                         {
                             const auto error = WSAGetLastError();
-                            NETLIB_LOG(log_level::warning, "process_receive_buffer_complete: WSARecv from remote failed: {}", error);
+                            NETLIB_WARNING("process_receive_buffer_complete: WSARecv from remote failed: {}", error);
                             // Close connection to remote peer in case of error
                             close_client<true>(true, false);
                         }
                         else
                         {
-                            NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: New remote WSARecv initiated successfully");
+                            NETLIB_DEBUG("process_receive_buffer_complete: New remote WSARecv initiated successfully");
                         }
                     }
                     else
                     {
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: No space in remote receive buffer, skipping new receive");
+                        NETLIB_DEBUG("process_receive_buffer_complete: No space in remote receive buffer, skipping new receive");
                     }
                 }
 
@@ -1258,11 +1258,11 @@ namespace proxy
             }
             case connection_status::client_no_change:
             case connection_status::client_connected:
-                NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Connection not established yet, ignoring received data");
+                NETLIB_DEBUG("process_receive_buffer_complete: Connection not established yet, ignoring received data");
                 break;
             }
 
-            NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Completed processing {} bytes from {} socket",
+            NETLIB_DEBUG("process_receive_buffer_complete: Completed processing {} bytes from {} socket",
                 io_size, io_context->is_local ? "local" : "remote");
         }
 
@@ -1299,20 +1299,20 @@ namespace proxy
 
             timestamp_ = std::chrono::steady_clock::now();
 
-            NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Processing {} bytes sent to {} socket",
+            NETLIB_DEBUG("process_send_buffer_complete: Processing {} bytes sent to {} socket",
                 io_size, io_context->is_local ? "local" : "remote");
 
             if (io_context->is_local)
             {
-                NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Send completed to local socket: {} bytes", io_size);
+                NETLIB_DEBUG("process_send_buffer_complete: Send completed to local socket: {} bytes", io_size);
 
                 if (connection_status_ != connection_status::client_completed)
                 {
-                    NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Connection still active, checking for receive buffer restart");
+                    NETLIB_DEBUG("process_send_buffer_complete: Connection still active, checking for receive buffer restart");
 
                     if (remote_recv_buf_.len == 0)
                     {
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Remote receive buffer empty, setting up new receive");
+                        NETLIB_DEBUG("process_send_buffer_complete: Remote receive buffer empty, setting up new receive");
 
                         DWORD flags = 0;
 
@@ -1321,7 +1321,7 @@ namespace proxy
 
                         if (remote_recv_buf_.len > 0)
                         {
-                            NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Initiating remote receive with buffer size {}", remote_recv_buf_.len);
+                            NETLIB_DEBUG("process_send_buffer_complete: Initiating remote receive with buffer size {}", remote_recv_buf_.len);
 
                             if ((::WSARecv(
                                 remote_socket_,
@@ -1333,53 +1333,53 @@ namespace proxy
                                 nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                             {
                                 const auto error = WSAGetLastError();
-                                NETLIB_LOG(log_level::warning, "process_send_buffer_complete: WSARecv on remote failed: {}", error);
+                                NETLIB_WARNING("process_send_buffer_complete: WSARecv on remote failed: {}", error);
                                 close_client<true>(true, false);
                             }
                             else
                             {
-                                NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Remote WSARecv initiated successfully");
+                                NETLIB_DEBUG("process_send_buffer_complete: Remote WSARecv initiated successfully");
                             }
                         }
                         else
                         {
-                            NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Remote receive buffer length is 0, skipping receive");
+                            NETLIB_DEBUG("process_send_buffer_complete: Remote receive buffer length is 0, skipping receive");
                         }
                     }
                     else
                     {
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Remote receive buffer already active (len={})", remote_recv_buf_.len);
+                        NETLIB_DEBUG("process_send_buffer_complete: Remote receive buffer already active (len={})", remote_recv_buf_.len);
                     }
                 }
                 else
                 {
-                    NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Connection completed, skipping receive restart");
+                    NETLIB_DEBUG("process_send_buffer_complete: Connection completed, skipping receive restart");
                 }
 
                 // Advance the send buffer pointer
                 local_send_buf_.buf += io_size;
-                NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Advanced local send buffer by {} bytes", io_size);
+                NETLIB_DEBUG("process_send_buffer_complete: Advanced local send buffer by {} bytes", io_size);
 
                 // Handle buffer wrap-around
                 if (local_send_buf_.buf == from_remote_to_local_buffer_.data() + from_remote_to_local_buffer_.size())
                 {
                     local_send_buf_.buf = from_remote_to_local_buffer_.data();
-                    NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Local send buffer wrapped to beginning");
+                    NETLIB_DEBUG("process_send_buffer_complete: Local send buffer wrapped to beginning");
                 }
 
                 // Check if we've caught up with the receive buffer
                 if (local_send_buf_.buf == remote_recv_buf_.buf)
                 {
-                    NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Local send buffer caught up with remote receive buffer");
+                    NETLIB_DEBUG("process_send_buffer_complete: Local send buffer caught up with remote receive buffer");
 
                     if (connection_status_ == connection_status::client_completed)
                     {
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Connection completed, closing remote client");
+                        NETLIB_DEBUG("process_send_buffer_complete: Connection completed, closing remote client");
                         close_client<true>(false, false);
                     }
 
                     local_send_buf_.len = 0;
-                    NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Reset local send buffer length to 0");
+                    NETLIB_DEBUG("process_send_buffer_complete: Reset local send buffer length to 0");
                 }
                 else
                 {
@@ -1387,19 +1387,19 @@ namespace proxy
                     if (local_send_buf_.buf < remote_recv_buf_.buf)
                     {
                         local_send_buf_.len = static_cast<ULONG>(remote_recv_buf_.buf - local_send_buf_.buf);
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Set local send buffer len to {} (normal case)", local_send_buf_.len);
+                        NETLIB_DEBUG("process_send_buffer_complete: Set local send buffer len to {} (normal case)", local_send_buf_.len);
                     }
                     else
                     {
                         local_send_buf_.len = static_cast<ULONG>(from_remote_to_local_buffer_.data() +
                             from_remote_to_local_buffer_.size() - local_send_buf_.buf);
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Set local send buffer len to {} (wrapped case)", local_send_buf_.len);
+                        NETLIB_DEBUG("process_send_buffer_complete: Set local send buffer len to {} (wrapped case)", local_send_buf_.len);
                     }
 
                     // Continue sending if there's more data
                     if (local_send_buf_.len)
                     {
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Continuing send to local socket with {} bytes", local_send_buf_.len);
+                        NETLIB_DEBUG("process_send_buffer_complete: Continuing send to local socket with {} bytes", local_send_buf_.len);
 
                         if ((::WSASend(
                             local_socket_,
@@ -1411,31 +1411,31 @@ namespace proxy
                             nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                         {
                             const auto error = WSAGetLastError();
-                            NETLIB_LOG(log_level::warning, "process_send_buffer_complete: WSASend to local failed: {}", error);
+                            NETLIB_WARNING("process_send_buffer_complete: WSASend to local failed: {}", error);
                             close_client<true>(false, true);
                         }
                         else
                         {
-                            NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Continued local send initiated successfully");
+                            NETLIB_DEBUG("process_send_buffer_complete: Continued local send initiated successfully");
                         }
                     }
                     else
                     {
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: No more data to send to local socket");
+                        NETLIB_DEBUG("process_send_buffer_complete: No more data to send to local socket");
                     }
                 }
             }
             else
             {
-                NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Send completed to remote socket: {} bytes", io_size);
+                NETLIB_DEBUG("process_send_buffer_complete: Send completed to remote socket: {} bytes", io_size);
 
                 if (connection_status_ != connection_status::client_completed)
                 {
-                    NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Connection still active, checking for receive buffer restart");
+                    NETLIB_DEBUG("process_send_buffer_complete: Connection still active, checking for receive buffer restart");
 
                     if (local_recv_buf_.len == 0)
                     {
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Local receive buffer empty, setting up new receive");
+                        NETLIB_DEBUG("process_send_buffer_complete: Local receive buffer empty, setting up new receive");
 
                         DWORD flags = 0;
 
@@ -1444,7 +1444,7 @@ namespace proxy
 
                         if (local_recv_buf_.len)
                         {
-                            NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Initiating local receive with buffer size {}", local_recv_buf_.len);
+                            NETLIB_DEBUG("process_send_buffer_complete: Initiating local receive with buffer size {}", local_recv_buf_.len);
 
                             if ((::WSARecv(
                                 local_socket_,
@@ -1456,53 +1456,53 @@ namespace proxy
                                 nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                             {
                                 const auto error = WSAGetLastError();
-                                NETLIB_LOG(log_level::warning, "process_send_buffer_complete: WSARecv on local failed: {}", error);
+                                NETLIB_WARNING("process_send_buffer_complete: WSARecv on local failed: {}", error);
                                 close_client<true>(true, true);
                             }
                             else
                             {
-                                NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Local WSARecv initiated successfully");
+                                NETLIB_DEBUG("process_send_buffer_complete: Local WSARecv initiated successfully");
                             }
                         }
                         else
                         {
-                            NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Local receive buffer length is 0, skipping receive");
+                            NETLIB_DEBUG("process_send_buffer_complete: Local receive buffer length is 0, skipping receive");
                         }
                     }
                     else
                     {
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Local receive buffer already active (len={})", local_recv_buf_.len);
+                        NETLIB_DEBUG("process_send_buffer_complete: Local receive buffer already active (len={})", local_recv_buf_.len);
                     }
                 }
                 else
                 {
-                    NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Connection completed, skipping receive restart");
+                    NETLIB_DEBUG("process_send_buffer_complete: Connection completed, skipping receive restart");
                 }
 
                 // Advance the send buffer pointer
                 remote_send_buf_.buf += io_size;
-                NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Advanced remote send buffer by {} bytes", io_size);
+                NETLIB_DEBUG("process_send_buffer_complete: Advanced remote send buffer by {} bytes", io_size);
 
                 // Handle buffer wrap-around
                 if (remote_send_buf_.buf == from_local_to_remote_buffer_.data() + from_local_to_remote_buffer_.size())
                 {
                     remote_send_buf_.buf = from_local_to_remote_buffer_.data();
-                    NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Remote send buffer wrapped to beginning");
+                    NETLIB_DEBUG("process_send_buffer_complete: Remote send buffer wrapped to beginning");
                 }
 
                 // Check if we've caught up with the receive buffer
                 if (remote_send_buf_.buf == local_recv_buf_.buf)
                 {
-                    NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Remote send buffer caught up with local receive buffer");
+                    NETLIB_DEBUG("process_send_buffer_complete: Remote send buffer caught up with local receive buffer");
 
                     if (connection_status_ == connection_status::client_completed)
                     {
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Connection completed, closing local client");
+                        NETLIB_DEBUG("process_send_buffer_complete: Connection completed, closing local client");
                         close_client<true>(false, false);
                     }
 
                     remote_send_buf_.len = 0;
-                    NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Reset remote send buffer length to 0");
+                    NETLIB_DEBUG("process_send_buffer_complete: Reset remote send buffer length to 0");
                 }
                 else
                 {
@@ -1510,19 +1510,19 @@ namespace proxy
                     if (remote_send_buf_.buf < local_recv_buf_.buf)
                     {
                         remote_send_buf_.len = static_cast<ULONG>(local_recv_buf_.buf - remote_send_buf_.buf);
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Set remote send buffer len to {} (normal case)", remote_send_buf_.len);
+                        NETLIB_DEBUG("process_send_buffer_complete: Set remote send buffer len to {} (normal case)", remote_send_buf_.len);
                     }
                     else
                     {
                         remote_send_buf_.len = static_cast<ULONG>(from_local_to_remote_buffer_.data() +
                             from_local_to_remote_buffer_.size() - remote_send_buf_.buf);
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Set remote send buffer len to {} (wrapped case)", remote_send_buf_.len);
+                        NETLIB_DEBUG("process_send_buffer_complete: Set remote send buffer len to {} (wrapped case)", remote_send_buf_.len);
                     }
 
                     // Continue sending if there's more data
                     if (remote_send_buf_.len)
                     {
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Continuing send to remote socket with {} bytes", remote_send_buf_.len);
+                        NETLIB_DEBUG("process_send_buffer_complete: Continuing send to remote socket with {} bytes", remote_send_buf_.len);
 
                         if ((::WSASend(
                             remote_socket_,
@@ -1534,22 +1534,22 @@ namespace proxy
                             nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                         {
                             const auto error = WSAGetLastError();
-                            NETLIB_LOG(log_level::warning, "process_send_buffer_complete: WSASend to remote failed: {}", error);
+                            NETLIB_WARNING("process_send_buffer_complete: WSASend to remote failed: {}", error);
                             close_client<true>(false, false);
                         }
                         else
                         {
-                            NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Continued remote send initiated successfully");
+                            NETLIB_DEBUG("process_send_buffer_complete: Continued remote send initiated successfully");
                         }
                     }
                     else
                     {
-                        NETLIB_LOG(log_level::debug, "process_send_buffer_complete: No more data to send to remote socket");
+                        NETLIB_DEBUG("process_send_buffer_complete: No more data to send to remote socket");
                     }
                 }
             }
 
-            NETLIB_LOG(log_level::debug, "process_send_buffer_complete: Completed processing {} bytes sent to {} socket",
+            NETLIB_DEBUG("process_send_buffer_complete: Completed processing {} bytes sent to {} socket",
                 io_size, io_context->is_local ? "local" : "remote");
         }
 
@@ -1598,56 +1598,56 @@ namespace proxy
         bool inject_to_local(const char* data, const uint32_t length,
             proxy_io_operation type = proxy_io_operation::inject_io_write)
         {
-            NETLIB_LOG(log_level::debug, "inject_to_local: Starting injection of {} bytes (operation type: {})",
+            NETLIB_DEBUG("inject_to_local: Starting injection of {} bytes (operation type: {})",
                 length, static_cast<int>(type));
 
             // Validate input parameters
             if (data == nullptr)
             {
-                NETLIB_LOG(log_level::error, "inject_to_local: Data pointer is null, cannot inject");
+                NETLIB_ERROR("inject_to_local: Data pointer is null, cannot inject");
                 return false;
             }
 
             if (length == 0)
             {
-                NETLIB_LOG(log_level::warning, "inject_to_local: Injection length is 0, skipping operation");
+                NETLIB_WARNING("inject_to_local: Injection length is 0, skipping operation");
                 return true; // Consider this a successful no-op
             }
 
             if (local_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
             {
-                NETLIB_LOG(log_level::error, "inject_to_local: Local socket is invalid (INVALID_SOCKET)");
+                NETLIB_ERROR("inject_to_local: Local socket is invalid (INVALID_SOCKET)");
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_local: Allocating per-I/O context for local socket {}",
+            NETLIB_DEBUG("inject_to_local: Allocating per-I/O context for local socket {}",
                 static_cast<int>(local_socket_));
 
             auto context = new(std::nothrow) per_io_context_t{ type, this, true };
 
             if (context == nullptr)
             {
-                NETLIB_LOG(log_level::error, "inject_to_local: Failed to allocate per-I/O context");
+                NETLIB_ERROR("inject_to_local: Failed to allocate per-I/O context");
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_local: Allocating buffer for {} bytes", length);
+            NETLIB_DEBUG("inject_to_local: Allocating buffer for {} bytes", length);
 
             context->wsa_buf.buf = new(std::nothrow) char[length];
 
             if (context->wsa_buf.buf == nullptr)
             {
-                NETLIB_LOG(log_level::error, "inject_to_local: Failed to allocate buffer of {} bytes", length);
+                NETLIB_ERROR("inject_to_local: Failed to allocate buffer of {} bytes", length);
                 delete context;
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_local: Copying {} bytes of data to buffer", length);
+            NETLIB_DEBUG("inject_to_local: Copying {} bytes of data to buffer", length);
 
             memmove(context->wsa_buf.buf, data, length);
             context->wsa_buf.len = length;
 
-            NETLIB_LOG(log_level::debug, "inject_to_local: Initiating WSASend to local socket {} with {} bytes",
+            NETLIB_DEBUG("inject_to_local: Initiating WSASend to local socket {} with {} bytes",
                 static_cast<int>(local_socket_), length);
 
             if ((::WSASend(
@@ -1660,19 +1660,19 @@ namespace proxy
                 nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
             {
                 const auto error = WSAGetLastError();
-                NETLIB_LOG(log_level::warning, "inject_to_local: WSASend failed with error: {}", error);
+                NETLIB_WARNING("inject_to_local: WSASend failed with error: {}", error);
 
                 // Clean up allocated resources
                 delete[] context->wsa_buf.buf;
                 delete context;
 
-                NETLIB_LOG(log_level::debug, "inject_to_local: Closing local client due to WSASend failure");
+                NETLIB_DEBUG("inject_to_local: Closing local client due to WSASend failure");
                 close_client(false, true);
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_local: WSASend initiated successfully for {} bytes", length);
-            NETLIB_LOG(log_level::debug, "inject_to_local: Injection completed, context and buffer will be cleaned up on completion");
+            NETLIB_DEBUG("inject_to_local: WSASend initiated successfully for {} bytes", length);
+            NETLIB_DEBUG("inject_to_local: Injection completed, context and buffer will be cleaned up on completion");
 
             return true;
         }
@@ -1701,56 +1701,56 @@ namespace proxy
         bool inject_to_remote(const char* data, const uint32_t length,
             proxy_io_operation type = proxy_io_operation::inject_io_write)
         {
-            NETLIB_LOG(log_level::debug, "inject_to_remote: Starting injection of {} bytes (operation type: {})",
+            NETLIB_DEBUG("inject_to_remote: Starting injection of {} bytes (operation type: {})",
                 length, static_cast<int>(type));
 
             // Validate input parameters
             if (data == nullptr)
             {
-                NETLIB_LOG(log_level::error, "inject_to_remote: Data pointer is null, cannot inject");
+                NETLIB_ERROR("inject_to_remote: Data pointer is null, cannot inject");
                 return false;
             }
 
             if (length == 0)
             {
-                NETLIB_LOG(log_level::warning, "inject_to_remote: Injection length is 0, skipping operation");
+                NETLIB_WARNING("inject_to_remote: Injection length is 0, skipping operation");
                 return true; // Consider this a successful no-op
             }
 
             if (remote_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
             {
-                NETLIB_LOG(log_level::error, "inject_to_remote: Remote socket is invalid (INVALID_SOCKET)");
+                NETLIB_ERROR("inject_to_remote: Remote socket is invalid (INVALID_SOCKET)");
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_remote: Allocating per-I/O context for remote socket {}",
+            NETLIB_DEBUG("inject_to_remote: Allocating per-I/O context for remote socket {}",
                 static_cast<int>(remote_socket_));
 
             auto context = new(std::nothrow) per_io_context_t{ type, this, false };
 
             if (context == nullptr)
             {
-                NETLIB_LOG(log_level::error, "inject_to_remote: Failed to allocate per-I/O context");
+                NETLIB_ERROR("inject_to_remote: Failed to allocate per-I/O context");
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_remote: Allocating buffer for {} bytes", length);
+            NETLIB_DEBUG("inject_to_remote: Allocating buffer for {} bytes", length);
 
             context->wsa_buf.buf = new(std::nothrow) char[length];
 
             if (context->wsa_buf.buf == nullptr)
             {
-                NETLIB_LOG(log_level::error, "inject_to_remote: Failed to allocate buffer of {} bytes", length);
+                NETLIB_ERROR("inject_to_remote: Failed to allocate buffer of {} bytes", length);
                 delete context;
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_remote: Copying {} bytes of data to buffer", length);
+            NETLIB_DEBUG("inject_to_remote: Copying {} bytes of data to buffer", length);
 
             memmove(context->wsa_buf.buf, data, length);
             context->wsa_buf.len = length;
 
-            NETLIB_LOG(log_level::debug, "inject_to_remote: Initiating WSASend to remote socket {} with {} bytes",
+            NETLIB_DEBUG("inject_to_remote: Initiating WSASend to remote socket {} with {} bytes",
                 static_cast<int>(remote_socket_), length);
 
             if ((::WSASend(
@@ -1763,19 +1763,19 @@ namespace proxy
                 nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
             {
                 const auto error = WSAGetLastError();
-                NETLIB_LOG(log_level::warning, "inject_to_remote: WSASend failed with error: {}", error);
+                NETLIB_WARNING("inject_to_remote: WSASend failed with error: {}", error);
 
                 // Clean up allocated resources
                 delete[] context->wsa_buf.buf;
                 delete context;
 
-                NETLIB_LOG(log_level::debug, "inject_to_remote: Closing remote client due to WSASend failure");
+                NETLIB_DEBUG("inject_to_remote: Closing remote client due to WSASend failure");
                 close_client(false, false);
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_remote: WSASend initiated successfully for {} bytes", length);
-            NETLIB_LOG(log_level::debug, "inject_to_remote: Injection completed, context and buffer will be cleaned up on completion");
+            NETLIB_DEBUG("inject_to_remote: WSASend initiated successfully for {} bytes", length);
+            NETLIB_DEBUG("inject_to_remote: Injection completed, context and buffer will be cleaned up on completion");
 
             return true;
         }
@@ -1859,11 +1859,11 @@ namespace proxy
          */
         bool start_data_relay()
         {
-            NETLIB_LOG(log_level::debug, "start_data_relay: Starting data relay initialization");
+            NETLIB_DEBUG("start_data_relay: Starting data relay initialization");
 
             DWORD flags = 0;
 
-            NETLIB_LOG(log_level::debug, "start_data_relay: Initiating WSARecv on local socket {}",
+            NETLIB_DEBUG("start_data_relay: Initiating WSARecv on local socket {}",
                 static_cast<int>(local_socket_));
 
             auto ret = WSARecv(local_socket_, &local_recv_buf_, 1,
@@ -1871,25 +1871,25 @@ namespace proxy
 
             if (const auto wsa_error = WSAGetLastError(); ret == SOCKET_ERROR && (ERROR_IO_PENDING != wsa_error))
             {
-                NETLIB_LOG(log_level::warning, "start_data_relay: WSARecv on local socket failed with error: {}", wsa_error);
-                NETLIB_LOG(log_level::debug, "start_data_relay: Closing local client due to WSARecv failure");
+                NETLIB_WARNING("start_data_relay: WSARecv on local socket failed with error: {}", wsa_error);
+                NETLIB_DEBUG("start_data_relay: Closing local client due to WSARecv failure");
 
                 close_client(true, true);
                 remote_recv_buf_.len = 0;
 
-                NETLIB_LOG(log_level::debug, "start_data_relay: Data relay initialization failed on local socket");
+                NETLIB_DEBUG("start_data_relay: Data relay initialization failed on local socket");
                 return false;
             }
             else if (ret == SOCKET_ERROR && wsa_error == ERROR_IO_PENDING)
             {
-                NETLIB_LOG(log_level::debug, "start_data_relay: Local WSARecv initiated successfully (pending)");
+                NETLIB_DEBUG("start_data_relay: Local WSARecv initiated successfully (pending)");
             }
             else
             {
-                NETLIB_LOG(log_level::debug, "start_data_relay: Local WSARecv completed immediately");
+                NETLIB_DEBUG("start_data_relay: Local WSARecv completed immediately");
             }
 
-            NETLIB_LOG(log_level::debug, "start_data_relay: Initiating WSARecv on remote socket {}",
+            NETLIB_DEBUG("start_data_relay: Initiating WSARecv on remote socket {}",
                 static_cast<int>(remote_socket_));
 
             ret = WSARecv(remote_socket_, &remote_recv_buf_, 1,
@@ -1897,52 +1897,52 @@ namespace proxy
 
             if (const auto wsa_error = WSAGetLastError(); ret == SOCKET_ERROR && (ERROR_IO_PENDING != wsa_error))
             {
-                NETLIB_LOG(log_level::warning, "start_data_relay: WSARecv on remote socket failed with error: {}", wsa_error);
-                NETLIB_LOG(log_level::debug, "start_data_relay: Cleaning up local socket due to remote WSARecv failure");
+                NETLIB_WARNING("start_data_relay: WSARecv on remote socket failed with error: {}", wsa_error);
+                NETLIB_DEBUG("start_data_relay: Cleaning up local socket due to remote WSARecv failure");
 
                 if (shutdown(local_socket_, SD_BOTH) == SOCKET_ERROR) {
                     const auto shutdown_error = WSAGetLastError();
-                    NETLIB_LOG(log_level::warning, "start_data_relay: shutdown(local_socket_) failed: {}", shutdown_error);
+                    NETLIB_WARNING("start_data_relay: shutdown(local_socket_) failed: {}", shutdown_error);
                 }
                 else {
-                    NETLIB_LOG(log_level::debug, "start_data_relay: Local socket shutdown successful");
+                    NETLIB_DEBUG("start_data_relay: Local socket shutdown successful");
                 }
 
                 // Cancel all pending I/O before closing
                 if (CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr) == FALSE) {
                     const auto cancel_error = GetLastError();
                     if (cancel_error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
-                        NETLIB_LOG(log_level::debug, "start_data_relay: CancelIoEx(local_socket_) returned error: {}", cancel_error);
+                        NETLIB_DEBUG("start_data_relay: CancelIoEx(local_socket_) returned error: {}", cancel_error);
                     }
                 }
                 else {
-                    NETLIB_LOG(log_level::debug, "start_data_relay: Local socket I/O cancellation successful");
+                    NETLIB_DEBUG("start_data_relay: Local socket I/O cancellation successful");
                 }
 
                 if (closesocket(local_socket_) == SOCKET_ERROR) {
                     const auto close_error = WSAGetLastError();
-                    NETLIB_LOG(log_level::warning, "start_data_relay: closesocket(local_socket_) failed: {}", close_error);
+                    NETLIB_WARNING("start_data_relay: closesocket(local_socket_) failed: {}", close_error);
                 }
                 else {
-                    NETLIB_LOG(log_level::debug, "start_data_relay: Local socket closed successfully");
+                    NETLIB_DEBUG("start_data_relay: Local socket closed successfully");
                 }
 
-                NETLIB_LOG(log_level::debug, "start_data_relay: Closing remote client due to WSARecv failure");
+                NETLIB_DEBUG("start_data_relay: Closing remote client due to WSARecv failure");
                 close_client(true, false);
 
-                NETLIB_LOG(log_level::debug, "start_data_relay: Data relay initialization failed on remote socket");
+                NETLIB_DEBUG("start_data_relay: Data relay initialization failed on remote socket");
                 return false;
             }
             else if (ret == SOCKET_ERROR && wsa_error == ERROR_IO_PENDING)
             {
-                NETLIB_LOG(log_level::debug, "start_data_relay: Remote WSARecv initiated successfully (pending)");
+                NETLIB_DEBUG("start_data_relay: Remote WSARecv initiated successfully (pending)");
             }
             else
             {
-                NETLIB_LOG(log_level::debug, "start_data_relay: Remote WSARecv completed immediately");
+                NETLIB_DEBUG("start_data_relay: Remote WSARecv completed immediately");
             }
 
-            NETLIB_LOG(log_level::debug, "start_data_relay: Data relay successfully initialized for both sockets (local: {}, remote: {})",
+            NETLIB_DEBUG("start_data_relay: Data relay successfully initialized for both sockets (local: {}, remote: {})",
                 static_cast<int>(local_socket_), static_cast<int>(remote_socket_));
 
             return true;
