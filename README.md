@@ -7,7 +7,7 @@ This repo is based on ProxiFyre: SOCKS5 Proxifier for Windows. Appreciate it.
   * Set the content:
 ```
 {
- "logLevel": "Info",
+"logLevel": "Info",
 "proxies": [
     {
       "appNames": [ "rdcman", "mstsc" ],
