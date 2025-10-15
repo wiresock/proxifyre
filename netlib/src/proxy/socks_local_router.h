@@ -1242,6 +1242,13 @@ namespace proxy
 
         /**
          * @brief Sends a queue of packets to the Microsoft TCP/IP stack (MSTCP).
+         *
+         * This method takes a vector of intermediate_buffer pointers and sends them to the MSTCP stack
+         * using the underlying packet filter. The packets are sent unsorted, and the number of successfully
+         * sent packets is tracked internally.
+         *
+         * @param packet_queue Reference to a vector of intermediate_buffer pointers to be sent.
+         * @return true if the packets were successfully sent to MSTCP, false otherwise.
          */
         bool send_packets_to_mstcp(std::vector<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr>& packet_queue) const
         {
@@ -1348,6 +1355,13 @@ namespace proxy
 
         /**
          * @brief Callback function that is called when the IP interface changes.
+         *
+         * This function is triggered by changes in the network configuration and
+         * updates the network configuration accordingly.
+         *
+         * @param row Pointer to the MIB_IPINTERFACE_ROW structure that contains
+         *            information about the IP interface that changed.
+         * @param notification_type The type of notification that triggered the callback.
          */
         void ip_interface_changed_callback([[maybe_unused]] PMIB_IPINTERFACE_ROW row, [[maybe_unused]] MIB_NOTIFICATION_TYPE notification_type)
         {
@@ -1357,6 +1371,9 @@ namespace proxy
 
         /**
          * @brief Updates the network configuration by filtering or unfiltering network adapters.
+         *
+         * This function retrieves the list of network adapters and external network connections,
+         * determines which adapters need to be filtered, and applies the appropriate filters.
          */
         void update_network_configuration()
         {
