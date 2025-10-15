@@ -1,10 +1,10 @@
-# Based on ProxiFyre: SOCKS5 Proxifier for Windows
+This repo is based on ProxiFyre: SOCKS5 Proxifier for Windows. Appreciate it.
 
-# Add a windows UI
-
-# Support ip range so that only connections in that ip range will be forwarded to the proxy
-1. Create a config: `app-config.json`
-2. Set the content:
+## Changes.
+1. Add a windows UI
+2. Support ip range so that only connections in that ip range will be forwarded to the proxy
+  * Create a config: `app-config.json`
+  * Set the content:
 ```
 {
  "logLevel": "Info",
