@@ -1,4 +1,6 @@
 #pragma once
+#include <functional>
+
 namespace proxy
 {
     /**
@@ -175,6 +177,21 @@ namespace proxy
          * @see log_packet_to_pcap()
          */
         std::shared_ptr<std::ostream> pcap_log_stream_;
+
+        // -------------------- NEW: Optional redirect decider --------------------
+        // When provided, this callback decides whether a given flow for a process
+        // should be redirected (true) or passed through (false). If not set, the
+        // legacy behavior is preserved (allow redirect if process is associated).
+	public:
+	    using redirect_decider_t = std::function<bool(const std::wstring&, const sockaddr*, int)>;
+
+	    // Optional; if not set, legacy behavior (always redirect when associated) remains.
+	    void set_redirect_decider(redirect_decider_t cb) { redirect_decider_ = std::move(cb); }
+
+
+    private:
+        redirect_decider_t redirect_decider_; // empty => legacy behavior
+        // -----------------------------------------------------------------------
 
     public:
         enum supported_protocols : uint8_t
@@ -990,6 +1007,7 @@ namespace proxy
          *         - std::nullopt: process could not be resolved (should be queued for later)
          *         - packet_action::revert: packet should be reverted (redirected)
          *         - packet_action::pass: packet should be passed through
+         * (unchanged comment)
          */
         std::optional<packet_filter::packet_action> process_udp_packet(ndisapi::intermediate_buffer& buffer, const bool postponed)
         {
@@ -1038,6 +1056,24 @@ namespace proxy
             if (process->excluded || process->bypass_udp)
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
 
+            // -------- NEW: consult optional redirect decider (per-process CIDR include) --------
+			// Consult optional per-process destination include policy
+			if (redirect_decider_)
+			{
+			    sockaddr_in dst{};
+			    dst.sin_family = AF_INET;
+			    dst.sin_addr   = ip_header->ip_dst;      // <-- assign in_addr directly (fixes C2440)
+			    dst.sin_port   = udp_header->th_dport;   // already in network byte order
+
+			    if (!redirect_decider_(process->name, reinterpret_cast<sockaddr*>(&dst), sizeof(dst)))
+			    {
+			        // Do NOT redirect this destination for this process
+			        return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+			    }
+			}
+
+            // ------------------------------------------------------------------------------------
+
             if (const auto port = process->udp_proxy_port ? process->udp_proxy_port : get_proxy_port_udp(process); port.has_value())
             {
                 if (udp_redirect_->is_new_endpoint(buffer))
@@ -1070,15 +1106,15 @@ namespace proxy
          * @brief Processes a TCP packet for possible redirection through a proxy.
          *
          * This function inspects the provided intermediate_buffer, attempts to resolve the associated process,
-         * and determines if the TCP packet should be redirected to a proxy port, passed through, or reverted.
+         * and determines if the UDP packet should be redirected to a proxy port, passed through, or reverted.
          * If the process cannot be resolved and @p postponed is false, the function returns std::nullopt,
          * indicating that the packet should be queued for later processing. If @p postponed is true, a
          * second attempt is made to resolve the process using an updated process table.
          *
-         * If the process is associated with a TCP proxy, and the packet is a SYN (connection initiation),
-         * the source port is mapped to the destination endpoint and a redirection is logged. The function
-         * then attempts to process the packet for client-to-server redirection. If the packet is from a
-         * known proxy port, it attempts to process it for server-to-client redirection.
+         * If the process is associated with a UDP proxy, and the packet is from a new endpoint, the source
+         * port is recorded and a redirection is logged. The function then attempts to process the packet for
+         * client-to-server redirection. If the packet is from a known proxy port, it attempts to process it
+         * for server-to-client redirection.
          *
          * @param buffer Reference to the intermediate_buffer containing the packet data.
          * @param postponed If false, only the current process table is used for lookup. If true, the process
@@ -1087,6 +1123,7 @@ namespace proxy
          *         - std::nullopt: process could not be resolved (should be queued for later)
          *         - packet_action::revert: packet should be reverted (redirected)
          *         - packet_action::pass: packet should be passed through
+         * (unchanged comment)
          */
         std::optional<packet_filter::packet_action> process_tcp_packet(ndisapi::intermediate_buffer& buffer, const bool postponed)
         {
@@ -1130,6 +1167,24 @@ namespace proxy
 
             if (process->excluded || process->bypass_tcp)
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+
+            // -------- NEW: consult optional redirect decider (per-process CIDR include) --------
+			// Consult optional per-process destination include policy
+			if (redirect_decider_)
+			{
+			    sockaddr_in dst{};
+			    dst.sin_family = AF_INET;
+			    dst.sin_addr   = ip_header->ip_dst;      // <-- assign in_addr directly (fixes C2440)
+			    dst.sin_port   = tcp_header->th_dport;   // already in network byte order
+
+			    if (!redirect_decider_(process->name, reinterpret_cast<sockaddr*>(&dst), sizeof(dst)))
+			    {
+			        // Do NOT redirect this destination for this process
+			        return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+			    }
+			}
+
+            // ------------------------------------------------------------------------------------
 
             if (const auto port = process->tcp_proxy_port ? process->tcp_proxy_port : get_proxy_port_tcp(process); port.has_value())
             {

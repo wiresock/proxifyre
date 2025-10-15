@@ -7,6 +7,15 @@
 #ifndef PCH_H
 #define PCH_H
 
+// --- ADDED: Make Winsock available everywhere, and before any windows.h users
+#define NOMINMAX 1
+#include <WinSock2.h>
+#include <ws2tcpip.h>
+#include <in6addr.h>
+#include <ws2ipdef.h>
+#pragma comment(lib, "Ws2_32.lib")
+// --- END ADDED
+
 #include <msclr/marshal.h>
 #include <msclr/marshal_cppstd.h>
 #include <msclr/lock.h>
