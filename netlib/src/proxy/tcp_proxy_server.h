@@ -610,18 +610,18 @@ namespace proxy
 
             if (!remote_port)
             {
-                NETLIB_LOG(log_level::warning, "connect_to_remote_host: Invalid remote port (0) - rejecting connection");
+                NETLIB_WARNING("connect_to_remote_host: Invalid remote port (0) - rejecting connection");
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "connect_to_remote_host: Connecting to {}:{}", remote_ip, remote_port);
+            NETLIB_DEBUG("connect_to_remote_host: Connecting to {}:{}", remote_ip, remote_port);
 
             auto remote_socket = WSASocket(address_type_t::af_type, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
                 WSA_FLAG_OVERLAPPED);
 
             if (remote_socket == INVALID_SOCKET)
             {
-                NETLIB_LOG(log_level::error, "connect_to_remote_host: Failed to create remote socket: {}", WSAGetLastError());
+                NETLIB_ERROR("connect_to_remote_host: Failed to create remote socket: {}", WSAGetLastError());
                 return false;
             }
 
@@ -638,7 +638,7 @@ namespace proxy
                 if (status == SOCKET_ERROR)
                 {
                     const auto error = WSAGetLastError();
-                    NETLIB_LOG(log_level::error, "connect_to_remote_host: Failed to bind IPv4 remote socket: {}", error);
+                    NETLIB_ERROR("connect_to_remote_host: Failed to bind IPv4 remote socket: {}", error);
                     shutdown(remote_socket, SD_BOTH);
                     closesocket(remote_socket);
                     return false;
@@ -657,7 +657,7 @@ namespace proxy
                 if (status == SOCKET_ERROR)
                 {
                     const auto error = WSAGetLastError();
-                    NETLIB_LOG(log_level::error, "connect_to_remote_host: Failed to bind IPv6 remote socket: {}", error);
+                    NETLIB_ERROR("connect_to_remote_host: Failed to bind IPv6 remote socket: {}", error);
                     shutdown(remote_socket, SD_BOTH);
                     closesocket(remote_socket);
                     return false;
@@ -670,7 +670,7 @@ namespace proxy
             if (ret != 0)
             {
                 const auto error = WSAGetLastError();
-                NETLIB_LOG(log_level::warning, "connect_to_remote_host: Failed to set non-blocking mode: {}", error);
+                NETLIB_WARNING("connect_to_remote_host: Failed to set non-blocking mode: {}", error);
                 // Continue anyway, as this might not be critical
             }
 
@@ -681,7 +681,7 @@ namespace proxy
 
                 if (sock_array_events_.size() >= connections_array_size - 1)
                 {
-                    NETLIB_LOG(log_level::warning, "connect_to_remote_host: Socket array full, cannot add new connection");
+                    NETLIB_WARNING("connect_to_remote_host: Socket array full, cannot add new connection");
                     shutdown(remote_socket, SD_BOTH);
                     closesocket(remote_socket);
                     return false;
@@ -692,7 +692,7 @@ namespace proxy
 
                 if (std::get<0>(sock_array_events_.back()) == WSA_INVALID_EVENT)
                 {
-                    NETLIB_LOG(log_level::error, "connect_to_remote_host: Failed to create WSA event: {}", WSAGetLastError());
+                    NETLIB_ERROR("connect_to_remote_host: Failed to create WSA event: {}", WSAGetLastError());
                     sock_array_events_.pop_back();
                     shutdown(remote_socket, SD_BOTH);
                     closesocket(remote_socket);
@@ -702,7 +702,7 @@ namespace proxy
                 if (WSAEventSelect(remote_socket, std::get<0>(sock_array_events_.back()), FD_CONNECT) == SOCKET_ERROR)
                 {
                     const auto error = WSAGetLastError();
-                    NETLIB_LOG(log_level::warning, "connect_to_remote_host: WSAEventSelect failed: {}", error);
+                    NETLIB_WARNING("connect_to_remote_host: WSAEventSelect failed: {}", error);
                     WSACloseEvent(std::get<0>(sock_array_events_.back()));
                     sock_array_events_.pop_back();
                     shutdown(remote_socket, SD_BOTH);
@@ -713,7 +713,7 @@ namespace proxy
                 WSASetEvent(std::get<0>(sock_array_events_[0]));
             }
 
-            NETLIB_LOG(log_level::debug, "connect_to_remote_host: Initiating connection to {}:{}", remote_ip, remote_port);
+            NETLIB_DEBUG("connect_to_remote_host: Initiating connection to {}:{}", remote_ip, remote_port);
 
             // connect to server
             if constexpr (address_type_t::af_type == AF_INET)
@@ -728,16 +728,16 @@ namespace proxy
                 {
                     if (const auto error = WSAGetLastError(); error != WSAEWOULDBLOCK)
                     {
-                        NETLIB_LOG(log_level::warning, "connect_to_remote_host: IPv4 connect failed: {}", error);
+                        NETLIB_WARNING("connect_to_remote_host: IPv4 connect failed: {}", error);
                         shutdown(remote_socket, SD_BOTH);
                         closesocket(remote_socket);
                         return false;
                     }
-                    NETLIB_LOG(log_level::debug, "connect_to_remote_host: IPv4 connection in progress (WSAEWOULDBLOCK)");
+                    NETLIB_DEBUG("connect_to_remote_host: IPv4 connection in progress (WSAEWOULDBLOCK)");
                 }
                 else
                 {
-                    NETLIB_LOG(log_level::debug, "connect_to_remote_host: IPv4 connection completed immediately");
+                    NETLIB_DEBUG("connect_to_remote_host: IPv4 connection completed immediately");
                 }
             }
             else
@@ -752,23 +752,23 @@ namespace proxy
                 {
                     if (const auto error = WSAGetLastError(); error != WSAEWOULDBLOCK)
                     {
-                        NETLIB_LOG(log_level::warning, "connect_to_remote_host: IPv6 connect failed: {}", error);
+                        NETLIB_WARNING("connect_to_remote_host: IPv6 connect failed: {}", error);
                         shutdown(remote_socket, SD_BOTH);
                         closesocket(remote_socket);
                         return false;
                     }
                     else
                     {
-                        NETLIB_LOG(log_level::debug, "connect_to_remote_host: IPv6 connection in progress (WSAEWOULDBLOCK)");
+                        NETLIB_DEBUG("connect_to_remote_host: IPv6 connection in progress (WSAEWOULDBLOCK)");
                     }
                 }
                 else
                 {
-                    NETLIB_LOG(log_level::debug, "connect_to_remote_host: IPv6 connection completed immediately");
+                    NETLIB_DEBUG("connect_to_remote_host: IPv6 connection completed immediately");
                 }
             }
 
-            NETLIB_LOG(log_level::debug, "connect_to_remote_host: Successfully initiated connection to {}:{}", remote_ip, remote_port);
+            NETLIB_DEBUG("connect_to_remote_host: Successfully initiated connection to {}:{}", remote_ip, remote_port);
             return true;
         }
 
@@ -798,7 +798,7 @@ namespace proxy
                 }
 
                 if (sock_array_events_.size() >= connections_array_size) {
-                    NETLIB_LOG(log_level::warning, "Too many pending connections, rejecting new client.");
+                    NETLIB_WARNING("Too many pending connections, rejecting new client.");
                     closesocket(accepted);
                     continue;
                 }

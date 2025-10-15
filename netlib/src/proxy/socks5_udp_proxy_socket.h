@@ -260,20 +260,21 @@ namespace proxy
          * Transfers ownership of all resources from another instance to this one.
          * Moves the logger base, timestamp, packet pool, sockets, addresses, negotiation context,
          * session state, and I/O buffers. The source object's sockets are set to INVALID_SOCKET
-         * to prevent double closure.
+         * to prevent double closure. Note: atomic members cannot be moved, so their values are
+         * loaded from the source.
          *
          * @param other The socks5_udp_proxy_socket instance to move from.
          */
         socks5_udp_proxy_socket(socks5_udp_proxy_socket&& other) noexcept
             : logger(std::move(other)), // Initialize the base class
             timestamp_(other.timestamp_),
-            packet_pool_(other.packet_pool_),
+            packet_pool_(std::move(other.packet_pool_)),
             local_socket_(other.local_socket_),
             local_address_sa_(other.local_address_sa_),
             remote_peer_port_(other.remote_peer_port_),
             remote_peer_address_(std::move(other.remote_peer_address_)),
             negotiate_ctx_(std::move(other.negotiate_ctx_)),
-            ready_for_removal_(std::move(other.ready_for_removal_)),
+            ready_for_removal_(other.ready_for_removal_.load()),  // Load from atomic, don't move
             from_remote_to_local_buffer_(other.from_remote_to_local_buffer_),
             remote_recv_buf_(other.remote_recv_buf_),
             io_context_recv_from_remote_(std::move(other.io_context_recv_from_remote_))
@@ -290,7 +291,8 @@ namespace proxy
          * Transfers ownership of all resources from another instance to this one.
          * Moves the logger base, timestamp, packet pool, sockets, addresses, negotiation context,
          * session state, and I/O buffers. The source object's sockets are set to INVALID_SOCKET
-         * to prevent double closure. Self-assignment is safely handled.
+         * to prevent double closure. Self-assignment is safely handled. Note: atomic members cannot
+         * be moved, so their values are loaded and stored.
          *
          * @param other The socks5_udp_proxy_socket instance to move from.
          * @return Reference to this instance.
@@ -302,13 +304,13 @@ namespace proxy
                 logger::operator=(std::move(other)); // Assign the base class
 
                 timestamp_ = other.timestamp_;
-                packet_pool_ = other.packet_pool_;
+                packet_pool_ = std::move(other.packet_pool_);
                 local_socket_ = other.local_socket_;
                 local_address_sa_ = other.local_address_sa_;
                 remote_peer_port_ = other.remote_peer_port_;
                 remote_peer_address_ = std::move(other.remote_peer_address_);
                 negotiate_ctx_ = std::move(other.negotiate_ctx_);
-                ready_for_removal_ = std::move(other.ready_for_removal_);
+                ready_for_removal_.store(other.ready_for_removal_.load());  // Load and store, don't move
                 from_remote_to_local_buffer_ = other.from_remote_to_local_buffer_;
                 remote_recv_buf_ = other.remote_recv_buf_;
                 io_context_recv_from_remote_ = std::move(other.io_context_recv_from_remote_);
@@ -471,26 +473,26 @@ namespace proxy
         {
             timestamp_ = std::chrono::steady_clock::now();
 
-            NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Processing {} bytes from {} socket ({}:{})",
+            NETLIB_DEBUG("process_receive_buffer_complete: Processing {} bytes from {} socket ({}:{})",
                 io_size, io_context->is_local ? "local" : "remote",
                 remote_peer_address_, remote_peer_port_);
 
             if (io_context->is_local == true)
             {
-                NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: {}:{} received data from local socket: {} bytes",
+                NETLIB_DEBUG("process_receive_buffer_complete: {}:{} received data from local socket: {} bytes",
                     remote_peer_address_, remote_peer_port_, io_size);
 
-                NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Allocating I/O context for remote send operation");
+                NETLIB_DEBUG("process_receive_buffer_complete: Allocating I/O context for remote send operation");
 
                 if (auto* io_context_send_to_remote = socks5_udp_per_io_context<T>::allocate_io_context(
                     proxy_io_operation::relay_io_write, this, false); io_context_send_to_remote)
                 {
-                    NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: I/O context allocated, forwarding data to remote host");
+                    NETLIB_DEBUG("process_receive_buffer_complete: I/O context allocated, forwarding data to remote host");
 
                     // forward the received data to remote host
                     io_context_send_to_remote->wsa_buf = std::move(io_context->wsa_buf);
 
-                    NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: {}:{} sending {} bytes to remote socket",
+                    NETLIB_DEBUG("process_receive_buffer_complete: {}:{} sending {} bytes to remote socket",
                         remote_peer_address_, remote_peer_port_, io_size);
 
                     if ((::WSASend(
@@ -503,38 +505,38 @@ namespace proxy
                         nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                     {
                         const auto error = WSAGetLastError();
-                        NETLIB_LOG(log_level::warning, "process_receive_buffer_complete: WSASend to remote failed with error: {}", error);
+                        NETLIB_WARNING("process_receive_buffer_complete: WSASend to remote failed with error: {}", error);
                         // Close connection to remote peer in case of error
                         close_client();
                     }
                     else
                     {
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: WSASend to remote initiated successfully");
+                        NETLIB_DEBUG("process_receive_buffer_complete: WSASend to remote initiated successfully");
                     }
                 }
                 else
                 {
-                    NETLIB_LOG(log_level::error, "process_receive_buffer_complete: Failed to allocate I/O context for remote send, freeing packet");
+                    NETLIB_ERROR("process_receive_buffer_complete: Failed to allocate I/O context for remote send, freeing packet");
                     packet_pool_->free(std::move(io_context->wsa_buf));
                 }
             }
             else
             {
-                NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: {}:{} received data from remote socket: {} bytes",
+                NETLIB_DEBUG("process_receive_buffer_complete: {}:{} received data from remote socket: {} bytes",
                     remote_peer_address_, remote_peer_port_, io_size);
 
-                NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Allocating I/O context for local send operation");
+                NETLIB_DEBUG("process_receive_buffer_complete: Allocating I/O context for local send operation");
 
                 if (auto* io_context_send_to_local = socks5_udp_per_io_context<T>::allocate_io_context(
                     proxy_io_operation::relay_io_write, this, true, io_size);
                     io_context_send_to_local)
                 {
-                    NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: I/O context allocated, preparing data for local send");
+                    NETLIB_DEBUG("process_receive_buffer_complete: I/O context allocated, preparing data for local send");
 
                     io_context_send_to_local->wsa_buf->len = io_size;
                     memmove(io_context_send_to_local->wsa_buf->buf, from_remote_to_local_buffer_.data(), io_size);
 
-                    NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: {}:{} sending {} bytes to local socket",
+                    NETLIB_DEBUG("process_receive_buffer_complete: {}:{} sending {} bytes to local socket",
                         remote_peer_address_, remote_peer_port_, io_size);
 
                     if ((::WSASendTo(
@@ -549,21 +551,21 @@ namespace proxy
                         nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                     {
                         const auto error = WSAGetLastError();
-                        NETLIB_LOG(log_level::warning, "process_receive_buffer_complete: WSASendTo to local failed with error: {}", error);
+                        NETLIB_WARNING("process_receive_buffer_complete: WSASendTo to local failed with error: {}", error);
                         // Close connection to remote peer in case of error
                         close_client();
                     }
                     else
                     {
-                        NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: WSASendTo to local initiated successfully");
+                        NETLIB_DEBUG("process_receive_buffer_complete: WSASendTo to local initiated successfully");
                     }
                 }
                 else
                 {
-                    NETLIB_LOG(log_level::error, "process_receive_buffer_complete: Failed to allocate I/O context for local send");
+                    NETLIB_ERROR("process_receive_buffer_complete: Failed to allocate I/O context for local send");
                 }
 
-                NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Initiating new receive operation on remote socket");
+                NETLIB_DEBUG("process_receive_buffer_complete: Initiating new receive operation on remote socket");
 
                 DWORD flags = 0;
 
@@ -572,20 +574,20 @@ namespace proxy
 
                 if (const auto wsa_error = WSAGetLastError(); ret == SOCKET_ERROR && (ERROR_IO_PENDING != wsa_error))
                 {
-                    NETLIB_LOG(log_level::warning, "process_receive_buffer_complete: WSARecv on remote socket failed with error: {}", wsa_error);
+                    NETLIB_WARNING("process_receive_buffer_complete: WSARecv on remote socket failed with error: {}", wsa_error);
                     close_client();
                 }
                 else if (ret == SOCKET_ERROR && wsa_error == ERROR_IO_PENDING)
                 {
-                    NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: WSARecv on remote socket initiated successfully (pending)");
+                    NETLIB_DEBUG("process_receive_buffer_complete: WSARecv on remote socket initiated successfully (pending)");
                 }
                 else
                 {
-                    NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: WSARecv on remote socket completed immediately");
+                    NETLIB_DEBUG("process_receive_buffer_complete: WSARecv on remote socket completed immediately");
                 }
             }
 
-            NETLIB_LOG(log_level::debug, "process_receive_buffer_complete: Completed processing {} bytes from {} socket",
+            NETLIB_DEBUG("process_receive_buffer_complete: Completed processing {} bytes from {} socket",
                 io_size, io_context->is_local ? "local" : "remote");
         }
 
@@ -604,7 +606,7 @@ namespace proxy
             if (io_context->is_local == true)
             {
                 // Send to local complete
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "process_send_buffer_complete: {}:{} :send data to locally connected socket complete: {}",
                     remote_peer_address_,
                     remote_peer_port_,
@@ -613,7 +615,7 @@ namespace proxy
             else
             {
                 // Send to remote complete
-                NETLIB_LOG(log_level::debug,
+                NETLIB_DEBUG(
                     "process_send_buffer_complete: {}:{} :send data to remotely connected socket complete: {}",
                     remote_peer_address_,
                     remote_peer_port_,
@@ -657,64 +659,64 @@ namespace proxy
         bool inject_to_local(const char* data, const uint32_t length,
             proxy_io_operation type = proxy_io_operation::inject_io_write)
         {
-            NETLIB_LOG(log_level::debug, "inject_to_local: Starting injection of {} bytes (operation type: {}) to {}:{}",
+            NETLIB_DEBUG("inject_to_local: Starting injection of {} bytes (operation type: {}) to {}:{}",
                 length, static_cast<int>(type), remote_peer_address_, remote_peer_port_);
 
             // Validate input parameters
             if (data == nullptr)
             {
-                NETLIB_LOG(log_level::error, "inject_to_local: Data pointer is null, cannot inject to {}:{}",
+                NETLIB_ERROR("inject_to_local: Data pointer is null, cannot inject to {}:{}",
                     remote_peer_address_, remote_peer_port_);
                 return false;
             }
 
             if (length == 0)
             {
-                NETLIB_LOG(log_level::warning, "inject_to_local: Injection length is 0, skipping operation for {}:{}",
+                NETLIB_WARNING("inject_to_local: Injection length is 0, skipping operation for {}:{}",
                     remote_peer_address_, remote_peer_port_);
                 return true; // Consider this a successful no-op
             }
 
             if (local_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
             {
-                NETLIB_LOG(log_level::error, "inject_to_local: Local socket is invalid (INVALID_SOCKET) for {}:{}",
+                NETLIB_ERROR("inject_to_local: Local socket is invalid (INVALID_SOCKET) for {}:{}",
                     remote_peer_address_, remote_peer_port_);
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_local: Allocating per-I/O context for local socket injection ({}:{})",
+            NETLIB_DEBUG("inject_to_local: Allocating per-I/O context for local socket injection ({}:{})",
                 remote_peer_address_, remote_peer_port_);
 
             auto context = new(std::nothrow) per_io_context_t{ type, this, true };
 
             if (context == nullptr)
             {
-                NETLIB_LOG(log_level::error, "inject_to_local: Failed to allocate per-I/O context for {}:{}",
+                NETLIB_ERROR("inject_to_local: Failed to allocate per-I/O context for {}:{}",
                     remote_peer_address_, remote_peer_port_);
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_local: Allocating packet buffer of {} bytes from pool for {}:{}",
+            NETLIB_DEBUG("inject_to_local: Allocating packet buffer of {} bytes from pool for {}:{}",
                 length, remote_peer_address_, remote_peer_port_);
 
             context->wsa_buf = packet_pool_->allocate(length);
 
             if (!context->wsa_buf)
             {
-                NETLIB_LOG(log_level::error, "inject_to_local: Failed to allocate packet buffer of {} bytes for {}:{}",
+                NETLIB_ERROR("inject_to_local: Failed to allocate packet buffer of {} bytes for {}:{}",
                     length, remote_peer_address_, remote_peer_port_);
                 delete context;
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_local: Packet buffer allocated successfully, copying {} bytes for {}:{}",
+            NETLIB_DEBUG("inject_to_local: Packet buffer allocated successfully, copying {} bytes for {}:{}",
                 length, remote_peer_address_, remote_peer_port_);
 
             context->wsa_buf->buf->len = length;
             memmove(context->wsa_buf->buf, data, length);
             context->wsa_buf->len = length;
 
-            NETLIB_LOG(log_level::debug, "inject_to_local: Initiating WSASend to local socket {} with {} bytes for {}:{}",
+            NETLIB_DEBUG("inject_to_local: Initiating WSASend to local socket {} with {} bytes for {}:{}",
                 static_cast<int>(local_socket_), length, remote_peer_address_, remote_peer_port_);
 
             if ((::WSASend(
@@ -727,7 +729,7 @@ namespace proxy
                 nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
             {
                 const auto error = WSAGetLastError();
-                NETLIB_LOG(log_level::warning, "inject_to_local: WSASend failed with error: {} for {}:{}",
+                NETLIB_WARNING("inject_to_local: WSASend failed with error: {} for {}:{}",
                     error, remote_peer_address_, remote_peer_port_);
 
                 // Clean up allocated resources
@@ -736,9 +738,9 @@ namespace proxy
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_local: WSASend initiated successfully for {} bytes to {}:{}",
+            NETLIB_DEBUG("inject_to_local: WSASend initiated successfully for {} bytes to {}:{}",
                 length, remote_peer_address_, remote_peer_port_);
-            NETLIB_LOG(log_level::debug, "inject_to_local: Injection completed, context and buffer will be cleaned up on completion for {}:{}",
+            NETLIB_DEBUG("inject_to_local: Injection completed, context and buffer will be cleaned up on completion for {}:{}",
                 remote_peer_address_, remote_peer_port_);
 
             return true;
@@ -760,64 +762,64 @@ namespace proxy
         bool inject_to_remote(const char* data, const uint32_t length,
             proxy_io_operation type = proxy_io_operation::inject_io_write)
         {
-            NETLIB_LOG(log_level::debug, "inject_to_remote: Starting injection of {} bytes (operation type: {}) to {}:{}",
+            NETLIB_DEBUG("inject_to_remote: Starting injection of {} bytes (operation type: {}) to {}:{}",
                 length, static_cast<int>(type), remote_peer_address_, remote_peer_port_);
 
             // Validate input parameters
             if (data == nullptr)
             {
-                NETLIB_LOG(log_level::error, "inject_to_remote: Data pointer is null, cannot inject to {}:{}",
+                NETLIB_ERROR("inject_to_remote: Data pointer is null, cannot inject to {}:{}",
                     remote_peer_address_, remote_peer_port_);
                 return false;
             }
 
             if (length == 0)
             {
-                NETLIB_LOG(log_level::warning, "inject_to_remote: Injection length is 0, skipping operation for {}:{}",
+                NETLIB_WARNING("inject_to_remote: Injection length is 0, skipping operation for {}:{}",
                     remote_peer_address_, remote_peer_port_);
                 return true; // Consider this a successful no-op
             }
 
             if (remote_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
             {
-                NETLIB_LOG(log_level::error, "inject_to_remote: Remote socket is invalid (INVALID_SOCKET) for {}:{}",
+                NETLIB_ERROR("inject_to_remote: Remote socket is invalid (INVALID_SOCKET) for {}:{}",
                     remote_peer_address_, remote_peer_port_);
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_remote: Allocating per-I/O context for remote socket injection ({}:{})",
+            NETLIB_DEBUG("inject_to_remote: Allocating per-I/O context for remote socket injection ({}:{})",
                 remote_peer_address_, remote_peer_port_);
 
             auto context = new(std::nothrow) per_io_context_t{ type, this, false };
 
             if (context == nullptr)
             {
-                NETLIB_LOG(log_level::error, "inject_to_remote: Failed to allocate per-I/O context for {}:{}",
+                NETLIB_ERROR("inject_to_remote: Failed to allocate per-I/O context for {}:{}",
                     remote_peer_address_, remote_peer_port_);
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_remote: Allocating packet buffer of {} bytes from pool for {}:{}",
+            NETLIB_DEBUG("inject_to_remote: Allocating packet buffer of {} bytes from pool for {}:{}",
                 length, remote_peer_address_, remote_peer_port_);
 
             context->wsa_buf = packet_pool_->allocate(length);
 
             if (!context->wsa_buf)
             {
-                NETLIB_LOG(log_level::error, "inject_to_remote: Failed to allocate packet buffer of {} bytes for {}:{}",
+                NETLIB_ERROR("inject_to_remote: Failed to allocate packet buffer of {} bytes for {}:{}",
                     length, remote_peer_address_, remote_peer_port_);
                 delete context;
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_remote: Packet buffer allocated successfully, copying {} bytes for {}:{}",
+            NETLIB_DEBUG("inject_to_remote: Packet buffer allocated successfully, copying {} bytes for {}:{}",
                 length, remote_peer_address_, remote_peer_port_);
 
             context->wsa_buf->buf->len = length;
             memmove(context->wsa_buf->buf, data, length);
             context->wsa_buf->len = length;
 
-            NETLIB_LOG(log_level::debug, "inject_to_remote: Initiating WSASend to remote socket {} with {} bytes for {}:{}",
+            NETLIB_DEBUG("inject_to_remote: Initiating WSASend to remote socket {} with {} bytes for {}:{}",
                 static_cast<int>(remote_socket_), length, remote_peer_address_, remote_peer_port_);
 
             if ((::WSASend(
@@ -830,22 +832,22 @@ namespace proxy
                 nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
             {
                 const auto error = WSAGetLastError();
-                NETLIB_LOG(log_level::warning, "inject_to_remote: WSASend failed with error: {} for {}:{}",
+                NETLIB_WARNING("inject_to_remote: WSASend failed with error: {} for {}:{}",
                     error, remote_peer_address_, remote_peer_port_);
 
                 // Clean up allocated resources
                 packet_pool_->free(std::move(context->wsa_buf));
                 delete context;
 
-                NETLIB_LOG(log_level::debug, "inject_to_remote: Closing client due to WSASend failure for {}:{}",
+                NETLIB_DEBUG("inject_to_remote: Closing client due to WSASend failure for {}:{}",
                     remote_peer_address_, remote_peer_port_);
                 close_client();
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "inject_to_remote: WSASend initiated successfully for {} bytes to {}:{}",
+            NETLIB_DEBUG("inject_to_remote: WSASend initiated successfully for {} bytes to {}:{}",
                 length, remote_peer_address_, remote_peer_port_);
-            NETLIB_LOG(log_level::debug, "inject_to_remote: Injection completed, context and buffer will be cleaned up on completion for {}:{}",
+            NETLIB_DEBUG("inject_to_remote: Injection completed, context and buffer will be cleaned up on completion for {}:{}",
                 remote_peer_address_, remote_peer_port_);
 
             return true;
@@ -893,18 +895,18 @@ namespace proxy
          */
         bool start_data_relay()
         {
-            NETLIB_LOG(log_level::debug, "start_data_relay: Starting UDP data relay initialization for {}:{}",
+            NETLIB_DEBUG("start_data_relay: Starting UDP data relay initialization for {}:{}",
                 remote_peer_address_, remote_peer_port_);
 
             if (remote_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
             {
-                NETLIB_LOG(log_level::error, "start_data_relay: Remote socket is invalid (INVALID_SOCKET) for {}:{}",
+                NETLIB_ERROR("start_data_relay: Remote socket is invalid (INVALID_SOCKET) for {}:{}",
                     remote_peer_address_, remote_peer_port_);
                 close_client();
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "start_data_relay: Initiating WSARecv on remote socket {} for {}:{}",
+            NETLIB_DEBUG("start_data_relay: Initiating WSARecv on remote socket {} for {}:{}",
                 static_cast<int>(remote_socket_), remote_peer_address_, remote_peer_port_);
 
             DWORD flags = 0;
@@ -914,26 +916,26 @@ namespace proxy
 
             if (const auto wsa_error = WSAGetLastError(); ret == SOCKET_ERROR && (ERROR_IO_PENDING != wsa_error))
             {
-                NETLIB_LOG(log_level::warning, "start_data_relay: WSARecv on remote socket failed with error: {} for {}:{}",
+                NETLIB_WARNING("start_data_relay: WSARecv on remote socket failed with error: {} for {}:{}",
                     wsa_error, remote_peer_address_, remote_peer_port_);
 
-                NETLIB_LOG(log_level::debug, "start_data_relay: Closing client due to WSARecv failure for {}:{}",
+                NETLIB_DEBUG("start_data_relay: Closing client due to WSARecv failure for {}:{}",
                     remote_peer_address_, remote_peer_port_);
                 close_client();
                 return false;
             }
             else if (ret == SOCKET_ERROR && wsa_error == ERROR_IO_PENDING)
             {
-                NETLIB_LOG(log_level::debug, "start_data_relay: Remote WSARecv initiated successfully (pending) for {}:{}",
+                NETLIB_DEBUG("start_data_relay: Remote WSARecv initiated successfully (pending) for {}:{}",
                     remote_peer_address_, remote_peer_port_);
             }
             else
             {
-                NETLIB_LOG(log_level::debug, "start_data_relay: Remote WSARecv completed immediately for {}:{}",
+                NETLIB_DEBUG("start_data_relay: Remote WSARecv completed immediately for {}:{}",
                     remote_peer_address_, remote_peer_port_);
             }
 
-            NETLIB_LOG(log_level::info, "start_data_relay: UDP data relay successfully initialized for {}:{}",
+            NETLIB_INFO("start_data_relay: UDP data relay successfully initialized for {}:{}",
                 remote_peer_address_, remote_peer_port_);
 
             return true;

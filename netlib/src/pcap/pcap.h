@@ -1,4 +1,4 @@
-// ReSharper disable CppInconsistentNaming
+ï»¿// ReSharper disable CppInconsistentNaming
 #pragma once
 
 namespace pcap
@@ -158,10 +158,10 @@ namespace pcap
         LINKTYPE_STANAG_5066_D_PDU = 237,
         /// <summary>Linux netlink NETLINK NFLOG socket log messages</summary>
         LINKTYPE_NFLOG = 239,
-        /// <summary>Pseudo-header for Hilscher Gesellschaft für Systemautomation mbH netANALYZER devices,
+        /// <summary>Pseudo-header for Hilscher Gesellschaft fÃ¼r Systemautomation mbH netANALYZER devices,
         /// followed by an Ethernet frame, beginning with the MAC header and ending with the FCS</summary>
         LINKTYPE_NETANALYZER = 240,
-        /// <summary>Pseudo-header for Hilscher Gesellschaft für Systemautomation mbH netANALYZER devices,
+        /// <summary>Pseudo-header for Hilscher Gesellschaft fÃ¼r Systemautomation mbH netANALYZER devices,
         /// followed by an Ethernet frame, beginning with the preamble, SFD, and MAC header, and ending
         /// with the FCS</summary>
         LINKTYPE_NETANALYZER_TRANSPARENT = 241,

@@ -339,7 +339,7 @@ namespace proxy
             {
                 if (current_state_ == socks5_state::pre_login)
                 {
-                    NETLIB_LOG(log_level::debug, "Starting SOCKS5 negotiation with remote proxy");
+                    NETLIB_DEBUG("Starting SOCKS5 negotiation with remote proxy");
 
                     auto socks5_ident_req_size = sizeof(ident_req_);
 
@@ -352,11 +352,11 @@ namespace proxy
                     {
                         ident_req_.number_of_methods = 1;
                         socks5_ident_req_size = sizeof(socks5_ident_req<1>);
-                        NETLIB_LOG(log_level::debug, "SOCKS5 authentication methods: NO_AUTH only (no credentials provided)");
+                        NETLIB_DEBUG("SOCKS5 authentication methods: NO_AUTH only (no credentials provided)");
                     }
                     else
                     {
-                        NETLIB_LOG(log_level::debug, "SOCKS5 authentication methods: NO_AUTH and USERNAME/PASSWORD");
+                        NETLIB_DEBUG("SOCKS5 authentication methods: NO_AUTH and USERNAME/PASSWORD");
                     }
 
                     io_context_send_negotiate_.wsa_buf.buf = reinterpret_cast<char*>(&ident_req_);
@@ -366,7 +366,7 @@ namespace proxy
 
                     DWORD flags = 0;
 
-                    NETLIB_LOG(log_level::debug, "Sending SOCKS5 identification request ({} bytes)", socks5_ident_req_size);
+                    NETLIB_DEBUG("Sending SOCKS5 identification request ({} bytes)", socks5_ident_req_size);
 
                     if ((::WSASend(
                         tcp_proxy_socket<T>::remote_socket_,
@@ -378,13 +378,13 @@ namespace proxy
                         nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                     {
                         const auto error = WSAGetLastError();
-                        NETLIB_LOG(log_level::error, "Failed to send SOCKS5 identification request: WSA error {}", error);
+                        NETLIB_ERROR("Failed to send SOCKS5 identification request: WSA error {}", error);
                         tcp_proxy_socket<T>::close_client(false, false);
                         return false;
                     }
 
                     current_state_ = socks5_state::login_sent;
-                    NETLIB_LOG(log_level::debug, "SOCKS5 identification request sent, waiting for response");
+                    NETLIB_DEBUG("SOCKS5 identification request sent, waiting for response");
 
                     if ((::WSARecv(
                         tcp_proxy_socket<T>::remote_socket_,
@@ -396,7 +396,7 @@ namespace proxy
                         nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                     {
                         const auto error = WSAGetLastError();
-                        NETLIB_LOG(log_level::error, "Failed to receive SOCKS5 identification response: WSA error {}", error);
+                        NETLIB_ERROR("Failed to receive SOCKS5 identification response: WSA error {}", error);
                         tcp_proxy_socket<T>::close_client(true, false);
                         return false;
                     }
@@ -405,7 +405,7 @@ namespace proxy
                 return false;
             }
 
-            NETLIB_LOG(log_level::debug, "SOCKS5 negotiation skipped - no negotiation context available");
+            NETLIB_DEBUG("SOCKS5 negotiation skipped - no negotiation context available");
             return true;
         }
     };
