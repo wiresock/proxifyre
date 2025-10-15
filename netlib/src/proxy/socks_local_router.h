@@ -1220,6 +1220,10 @@ namespace proxy
 
         /**
          * @brief Logs a single packet to the pcap logger.
+         *
+         * This function logs a single packet to the pcap logger if it is available.
+         *
+         * @param packet The packet to be logged.
          */
         void log_packet_to_pcap(const INTERMEDIATE_BUFFER& packet) {
             if (pcap_logger_) {
@@ -1229,6 +1233,13 @@ namespace proxy
 
         /**
          * @brief Sends a queue of packets to the network adapters.
+         *
+         * This method takes a vector of intermediate_buffer pointers and sends them to the network adapters
+         * using the underlying packet filter. The packets are sent unsorted, and the number of successfully
+         * sent packets is tracked internally.
+         *
+         * @param packet_queue Reference to a vector of intermediate_buffer pointers to be sent.
+         * @return true if the packets were successfully sent to the adapters, false otherwise.
          */
         bool send_packets_to_adapters(std::vector<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr>& packet_queue) const
         {
@@ -1263,7 +1274,23 @@ namespace proxy
         /**
         * @brief Thread procedure for deferred process resolution and packet forwarding.
         *
-        * (unchanged lengthy comment)
+        * This method runs in a dedicated thread and is responsible for processing packets
+        * that could not be immediately associated with a process. It waits for packets to
+        * appear in the process_resolve_buffer_queue_, then attempts to resolve the process
+        * information using an updated process table. Based on the result of the resolution
+        * and packet inspection, packets are either sent to network adapters, sent to the
+        * Microsoft TCP/IP stack, or dropped. The method ensures thread safety and efficient
+        * processing by using local queues and minimizing lock contention.
+        *
+        * The main steps are:
+        * 1. Wait for packets to be queued or for the router to become inactive.
+        * 2. Swap the shared queue with a local queue for processing.
+        * 3. Refresh the process lookup table.
+        * 4. For each packet, attempt to resolve the process and determine the appropriate
+        *    action (pass to adapter, revert to MSTCP, or assert on unexpected cases).
+        * 5. Send processed packets to their respective destinations and clear local queues.
+        *
+        * The thread exits when the router is deactivated and the queue is empty.
         */
         void process_resolve_thread_proc()
         {
