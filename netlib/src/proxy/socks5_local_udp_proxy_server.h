@@ -35,7 +35,7 @@ namespace proxy
          * Alias for the negotiation context type defined by the proxy socket implementation (T).
          * Used to store authentication and session information for SOCKS5 negotiation.
          */
-        using negotiate_context_t = typename T::negotiate_context_t;
+        using negotiate_context_t = T::negotiate_context_t;
 
         /**
          * @brief Address type alias.
@@ -43,7 +43,7 @@ namespace proxy
          * Alias for the address type defined by the proxy socket implementation (T).
          * Represents an IPv4 or IPv6 address, depending on the template parameter.
          */
-        using address_type_t = typename T::address_type_t;
+        using address_type_t = T::address_type_t;
 
         /**
          * @brief Per-I/O context type alias.
@@ -51,7 +51,7 @@ namespace proxy
          * Alias for the per-I/O context type defined by the proxy socket implementation (T).
          * Used for managing asynchronous I/O operations.
          */
-        using per_io_context_t = typename T::per_io_context_t;
+        using per_io_context_t = T::per_io_context_t;
 
         /**
          * @brief Query remote peer function signature.
@@ -108,6 +108,14 @@ namespace proxy
          * Set to true when the server is stopping or has stopped.
          */
         std::atomic_bool end_server_{ true }; // set to true on proxy termination
+
+        /**
+         * @brief Counts the number of IOCP operations currently executing in the lambda.
+         *
+         * Incremented when entering the lambda, decremented when exiting.
+         * Used during shutdown to ensure no operations are in-flight before destroying the object.
+         */
+        std::atomic<int32_t> active_iocp_operations_{ 0 };
 
         /**
          * @brief UDP server socket handle.
@@ -262,9 +270,31 @@ namespace proxy
                     server_socket_,
                     [this](const DWORD num_bytes, OVERLAPPED* povlp, const BOOL status)
                     {
+                        // Increment active operations counter on entry
+                        active_iocp_operations_.fetch_add(1, std::memory_order_acquire);
+                        
+                        // RAII guard to ensure we decrement on all exit paths (including exceptions)
+                        // Non-copyable/non-moveable to prevent double-decrement bugs
+                        struct operation_guard {
+                            std::atomic<int32_t>& counter;
+                            
+                            explicit operation_guard(std::atomic<int32_t>& c) : counter(c) {}
+                            
+                            ~operation_guard() {
+                                counter.fetch_sub(1, std::memory_order_release);
+                            }
+                            
+                            // Delete copy and move to satisfy Rule of 5
+                            operation_guard(const operation_guard&) = delete;
+                            operation_guard(operation_guard&&) = delete;
+                            operation_guard& operator=(const operation_guard&) = delete;
+                            operation_guard& operator=(operation_guard&&) = delete;
+                        } guard{ active_iocp_operations_ };
+
                         auto result = true;
                         auto server_read = false;
 
+                        // Check if server is shutting down
                         if (end_server_)
                             return false;
 
@@ -350,7 +380,7 @@ namespace proxy
                         }
 
                         return result;
-                    }); associate_status == true)
+                   }); associate_status == true)
                 {
                     completion_key_ = io_key;
                     DWORD flags = 0;
@@ -391,13 +421,15 @@ namespace proxy
         /**
          * @brief Stops the SOCKS5 local UDP proxy server and releases all resources.
          *
-         * This method signals the server to stop, joins any running threads,
-         * and clears all active proxy socket sessions. If the server is already stopped,
-         * the method returns immediately.
+         * This method performs a graceful shutdown by:
+         * 1. Setting the end_server_ flag to signal shutdown
+         * 2. Closing the server socket, which causes pending I/O to complete with error
+         * 3. Waiting for all active IOCP operations to complete (tracked by atomic counter)
+         * 4. Joining background threads
+         * 5. Clearing resources
          *
-         * - Sets the end_server_ flag to true to indicate shutdown.
-         * - Joins the proxy server and client cleanup threads if they are running.
-         * - Clears the proxy_sockets_ map, releasing all associated resources.
+         * The IOCP thread pool itself is managed by io_completion_port and will be 
+         * properly shut down when the completion port is destroyed.
          */
         void stop()
         {
@@ -407,8 +439,42 @@ namespace proxy
                 return;
             }
 
+            // Step 1: Signal shutdown - IOCP lambda will check this and exit
             end_server_ = true;
 
+            // Step 2: Close server socket
+            // This causes any pending WSARecvFrom to complete immediately with an error.
+            // When IOCP threads wake up, they'll see end_server_ == true and return false.
+            if (server_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                closesocket(server_socket_);
+                server_socket_ = INVALID_SOCKET;
+            }
+
+            // Step 3: Wait for all active IOCP operations to complete
+            // The socket closure ensures pending operations complete quickly.
+            // The atomic counter ensures we wait until all in-flight operations finish.
+            // Use exponential backoff to avoid busy-waiting
+            using namespace std::chrono_literals;
+            int wait_iterations = 0;
+            constexpr int max_wait_iterations = 100; // Max ~5 seconds total wait
+            
+            while (active_iocp_operations_.load(std::memory_order_acquire) > 0)
+            {
+                if (++wait_iterations > max_wait_iterations)
+                {
+                    // Log warning if we're taking too long
+                    NETLIB_WARNING("Timeout waiting for IOCP operations to complete. Active operations: {}",
+                        active_iocp_operations_.load(std::memory_order_relaxed));
+                    break;
+                }
+                
+                // Exponential backoff: 1ms, 2ms, 4ms, 8ms, ... up to 100ms
+                const auto wait_time = std::min(1ms * (1 << std::min(wait_iterations / 10, 6)), 100ms);
+                std::this_thread::sleep_for(wait_time);
+            }
+
+            // Step 4: Join background threads
             if (proxy_server_.joinable())
             {
                 proxy_server_.join();
@@ -419,10 +485,18 @@ namespace proxy
                 check_clients_thread_.join();
             }
 
+            // Step 5: Clear proxy sockets
+            // Now safe because:
+            // - end_server_ is true, so IOCP lambda won't process new completions
+            // - Socket is closed, so no new I/O can be initiated
+            // - We waited for all active operations to complete
             if (!proxy_sockets_.empty())
             {
                 proxy_sockets_.clear();
             }
+
+            // Note: The IOCP thread pool itself is managed by completion_port_ and will be
+            // properly shut down when io_completion_port's destructor is called.
         }
 
     private:
@@ -500,7 +574,12 @@ namespace proxy
             }
             else
             {
-                sockaddr_in6 service{ address_type_t::af_type, htons(proxy_port_), 0, in6addr_any };
+                sockaddr_in6 service;
+                service.sin6_family = address_type_t::af_type;
+                service.sin6_port = htons(proxy_port_);
+                service.sin6_flowinfo = 0;
+                service.sin6_addr = in6addr_any;
+                service.sin6_scope_id = 0;
 
                 if (const auto status = bind(server_socket_, reinterpret_cast<SOCKADDR*>(&service), sizeof(service));
                     status == SOCKET_ERROR)
@@ -548,6 +627,21 @@ namespace proxy
             if (socks_tcp_socket == INVALID_SOCKET)
             {
                 return INVALID_SOCKET;
+            }
+
+            // Set socket timeouts to prevent indefinite blocking in recv/send calls
+            // This prevents deadlock where IOCP worker holds lock_ while blocked on network I/O
+            constexpr DWORD timeout_ms = 5000; // 5 second timeout
+            if (setsockopt(socks_tcp_socket, SOL_SOCKET, SO_RCVTIMEO, 
+                          reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) == SOCKET_ERROR)
+            {
+                NETLIB_WARNING("Failed to set socket receive timeout: {}", WSAGetLastError());
+            }
+            
+            if (setsockopt(socks_tcp_socket, SOL_SOCKET, SO_SNDTIMEO, 
+                          reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) == SOCKET_ERROR)
+            {
+                NETLIB_WARNING("Failed to set socket send timeout: {}", WSAGetLastError());
             }
 
             if constexpr (address_type_t::af_type == AF_INET)

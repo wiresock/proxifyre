@@ -789,15 +789,22 @@ namespace proxy
                 NETLIB_DEBUG("is_ready_for_removal: Buffer lengths - remote_send: {}, local_send: {}, remote_recv: {}, local_recv: {}",
                     remote_send_buf_.len, local_send_buf_.len, remote_recv_buf_.len, local_recv_buf_.len);
 
-                if ((remote_send_buf_.len == 0 &&
-                    local_send_buf_.len == 0 &&
-                    remote_recv_buf_.len == 0 &&
-                    local_recv_buf_.len == 0))
+                // If both sockets are closed, force-reset all buffer lengths
+                // The connection is dead, so any remaining data cannot be transmitted
+                if (remote_send_buf_.len != 0 || local_send_buf_.len != 0 || 
+                    remote_recv_buf_.len != 0 || local_recv_buf_.len != 0)
                 {
-                    NETLIB_INFO("is_ready_for_removal: Session is ready for removal - all sockets closed and buffers empty");
-                    return true;
+                    NETLIB_WARNING("is_ready_for_removal: Sockets closed with non-empty buffers, forcing buffer reset (data lost: remote_send={}, local_send={}, remote_recv={}, local_recv={})",
+                        remote_send_buf_.len, local_send_buf_.len, remote_recv_buf_.len, local_recv_buf_.len);
+                    
+                    remote_send_buf_.len = 0;
+                    local_send_buf_.len = 0;
+                    remote_recv_buf_.len = 0;
+                    local_recv_buf_.len = 0;
                 }
-                NETLIB_DEBUG("is_ready_for_removal: Sockets closed but buffers not empty, session not ready for removal");
+
+                NETLIB_INFO("is_ready_for_removal: Session is ready for removal - all sockets closed and buffers cleared");
+                return true;
             }
             else
             {
@@ -823,8 +830,11 @@ namespace proxy
                 {
                     NETLIB_DEBUG("is_ready_for_removal: Sockets already closed, performing buffer cleanup");
 
-                    close_client<true>(true, true);
-                    close_client<true>(true, false);
+                    // Force reset all buffers
+                    remote_send_buf_.len = 0;
+                    local_send_buf_.len = 0;
+                    remote_recv_buf_.len = 0;
+                    local_recv_buf_.len = 0;
 
                     NETLIB_DEBUG("is_ready_for_removal: Buffer cleanup completed for abandoned session");
                 }
