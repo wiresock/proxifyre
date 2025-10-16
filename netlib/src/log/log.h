@@ -353,11 +353,11 @@ namespace netlib::log {
      *
      * ## Output Format Examples:
      *
-     * Full verbosity: `[info] 2024-08-10 14:30:25.123 [T A1B2C3] [Logger] [file:line:func] Message`
+     * Full verbosity: `[info] 2024-08-10T14:30:25.123 [T A1B2C3] [Logger] [file:line:func] Message`
      *
      * Minimal: `[info] Message`
      *
-     * Production: `[info] 2024-08-10 14:30:25.123 [Logger] Message`
+     * Production: `[info] 2024-08-10T14:30:25.123 [Logger] Message`
      *
      * @tparam Derived The derived logger type (CRTP pattern).
      *
@@ -491,7 +491,7 @@ namespace netlib::log {
          * ## Output Format:
          * Produces configurable output format based on global verbosity settings:
          * ```
-         * [info] 2024-08-10 14:30:25.123 [T A1B2C3] [MyLogger] [file.cpp:42:function] Message
+         * [info] 2024-08-10T14:30:25.123 [T A1B2C3] [MyLogger] [file.cpp:42:function] Message
          * ```
          *
          * ## Error Handling:
@@ -584,9 +584,9 @@ namespace netlib::log {
          *
          * ## Output Format Examples:
          * ```
-         * [info] 2024-05-10 14:30:25.123 [T A1B2C3] [MyLogger] Processing 150 items
-         * [error] 2024-05-10 14:30:25.124 [T A1B2C3] [MyLogger] [main.cpp:42:process_data] Connection failed
-         * [debug] 2024-05-10 14:30:25.125Z [T A1B2C3] [MyLogger] Debug info (UTC fallback)
+         * [info] 2024-05-10T14:30:25.123 [T A1B2C3] [MyLogger] Processing 150 items
+         * [error] 2024-05-10T14:30:25.124 [T A1B2C3] [MyLogger] [main.cpp:42:process_data] Connection failed
+         * [debug] 2024-05-10T14:30:25.125Z [T A1B2C3] [MyLogger] Debug info (UTC fallback)
          * ```
          *
          * @tparam Args Variadic template parameter pack for format arguments.
@@ -872,7 +872,7 @@ namespace netlib::log {
          * ## Timestamp Handling:
          * - Attempts local time via std::chrono::zoned_time and current_zone()
          * - Falls back to UTC with 'Z' suffix if time zone database unavailable
-         * - Uses millisecond precision for high-resolution timing
+         * - Uses millisecond precision for high-resolution timing in ISO-8601 format
          * - Caches time zone pointer for performance (stable across calls)
          *
          * ## Error Recovery Strategy:
@@ -931,11 +931,11 @@ namespace netlib::log {
                         // Cache the time zone pointer for performance (pointer is stable)
                         static const std::chrono::time_zone* zone = std::chrono::current_zone();
                         std::chrono::zoned_time zt{ zone, tp_s };
-                        out << std::format("{:%F %T}.{:03}", zt, static_cast<int>(ms.count()));
+                        out << std::format("{:%Y-%m-%dT%H:%M:%S}.{:03}", zt, static_cast<int>(ms.count()));
                     }
                     catch (...) {
                         // Fallback: UTC with 'Z' suffix to clearly indicate time zone
-                        out << std::format("{:%F %T}.{:03}Z", tp_s, static_cast<int>(ms.count()));
+                        out << std::format("{:%Y-%m-%dT%H:%M:%S}.{:03}Z", tp_s, static_cast<int>(ms.count()));
                     }
                 }
 
