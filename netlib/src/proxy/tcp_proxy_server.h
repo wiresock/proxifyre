@@ -65,17 +65,17 @@ namespace proxy
          * This type holds information required for session negotiation, such as credentials or
          * target addresses, and is defined by the proxy socket type T.
          */
-        using negotiate_context_t = typename T::negotiate_context_t;
+        using negotiate_context_t = T::negotiate_context_t;
 
         /**
          * @brief Type alias for the address type (e.g., IPv4 or IPv6) used by the proxy socket.
          */
-        using address_type_t = typename T::address_type_t;
+        using address_type_t = T::address_type_t;
 
         /**
          * @brief Type alias for the per-I/O context type used for managing asynchronous operations.
          */
-        using per_io_context_t = typename T::per_io_context_t;
+        using per_io_context_t = T::per_io_context_t;
 
         /**
          * @brief Type alias for the callback function used to query remote peer information.
@@ -156,6 +156,14 @@ namespace proxy
          * @brief Atomic flag indicating whether the server is shutting down or has terminated.
          */
         std::atomic_bool end_server_{ true };
+
+        /**
+         * @brief Counts the number of IOCP operations currently executing in the lambda.
+         *
+         * Incremented when entering the lambda, decremented when exiting.
+         * Used during shutdown to ensure no operations are in-flight before destroying the object.
+         */
+        std::atomic<int32_t> active_iocp_operations_{ 0 };
 
         /**
          * @brief The main listening socket for incoming client connections.
@@ -285,6 +293,28 @@ namespace proxy
                     std::get<1>(sock_array_events_[0]),
                     [this](const DWORD num_bytes, OVERLAPPED* povlp, const BOOL status)
                     {
+                        // Increment active operations counter on entry
+                        active_iocp_operations_.fetch_add(1, std::memory_order_acquire);
+                        
+                        // RAII guard to ensure we decrement on all exit paths (including exceptions)
+                        // Non-copyable/non-moveable to prevent double-decrement bugs
+                        struct operation_guard {
+                            std::atomic<int32_t>& counter;
+                            
+                            explicit operation_guard(std::atomic<int32_t>& c) : counter(c) {}
+                            
+                            ~operation_guard() {
+                                counter.fetch_sub(1, std::memory_order_release);
+                            }
+                            
+                            // Delete copy and move to satisfy Rule of 5
+                            operation_guard(const operation_guard&) = delete;
+                            operation_guard(operation_guard&&) = delete;
+                            operation_guard& operator=(const operation_guard&) = delete;
+                            operation_guard& operator=(operation_guard&&) = delete;
+                        } guard{ active_iocp_operations_ };
+
+                        // Check if server is shutting down
                         if (end_server_)
                             return false;
 
@@ -365,12 +395,15 @@ namespace proxy
         /**
          * @brief Stops the TCP proxy server and cleans up all resources.
          *
-         * This method performs a graceful shutdown of the proxy server. It:
-         * - Sets the end_server_ flag to true to signal all worker threads to terminate.
-         * - Closes the main listening socket and marks it as invalid.
-         * - Signals the event associated with the first socket array entry to wake up any waiting threads.
-         * - Joins (waits for) the proxy server, client cleanup, and remote host connection threads if they are running.
-         * - Clears the arrays of socket events and active proxy sockets to release all associated resources.
+         * This method performs a graceful shutdown of the proxy server by:
+         * 1. Setting the end_server_ flag to signal shutdown
+         * 2. Closing the server socket, which causes pending I/O to complete with error
+         * 3. Waiting for all active IOCP operations to complete (tracked by atomic counter)
+         * 4. Joining background threads
+         * 5. Clearing resources
+         *
+         * The IOCP thread pool itself is managed by io_completion_port and will be 
+         * properly shut down when the completion port is destroyed.
          *
          * If the server is already stopped, this method returns immediately.
          */
@@ -382,8 +415,12 @@ namespace proxy
                 return;
             }
 
+            // Step 1: Signal shutdown - IOCP lambda will check this and exit
             end_server_ = true;
 
+            // Step 2: Close server socket
+            // This causes any pending accept/I/O operations to complete immediately with an error.
+            // When IOCP threads wake up, they'll see end_server_ == true and return false.
             closesocket(server_socket_);
             server_socket_ = INVALID_SOCKET;
 
@@ -392,6 +429,29 @@ namespace proxy
                 ::WSASetEvent(std::get<0>(sock_array_events_[0]));
             }
 
+            // Step 3: Wait for all active IOCP operations to complete
+            // The socket closure ensures pending operations complete quickly.
+            // The atomic counter ensures we wait until all in-flight operations finish.
+            // Use exponential backoff to avoid busy-waiting
+            using namespace std::chrono_literals;
+            int wait_iterations = 0;
+
+            while (active_iocp_operations_.load(std::memory_order_acquire) > 0)
+            {
+                if (constexpr int max_wait_iterations = 100; ++wait_iterations > max_wait_iterations)
+                {
+                    // Log warning if we're taking too long
+                    NETLIB_WARNING("Timeout waiting for IOCP operations to complete. Active operations: {}",
+                        active_iocp_operations_.load(std::memory_order_relaxed));
+                    break;
+                }
+                
+                // Exponential backoff: 1ms, 2ms, 4ms, 8ms, ... up to 100ms
+                const auto wait_time = std::min(1ms * (1 << std::min(wait_iterations / 10, 6)), 100ms);
+                std::this_thread::sleep_for(wait_time);
+            }
+
+            // Step 4: Join background threads
             if (proxy_server_.joinable())
             {
                 proxy_server_.join();
@@ -407,6 +467,11 @@ namespace proxy
                 connect_to_remote_host_thread_.join();
             }
 
+            // Step 5: Clear resources
+            // Now safe because:
+            // - end_server_ is true, so IOCP lambda won't process new completions
+            // - Socket is closed, so no new I/O can be initiated
+            // - We waited for all active operations to complete
             if (!sock_array_events_.empty())
             {
                 sock_array_events_.clear();
@@ -416,6 +481,9 @@ namespace proxy
             {
                 proxy_sockets_.clear();
             }
+
+            // Note: The IOCP thread pool itself is managed by completion_port_ and will be
+            // properly shut down when io_completion_port's destructor is called.
         }
 
         /**
