@@ -240,15 +240,26 @@ namespace proxy
         /**
          * @brief Destructor. Cleans up sockets and releases resources.
          *
-         * Closes the remote UDP socket and the SOCKS5 TCP control socket if they are valid.
-         * Ensures that all associated resources are released when the proxy socket is destroyed.
+         * Explicitly cancels all pending I/O operations on the sockets before closing them.
+         * This ensures that no completion callbacks will be invoked after the socket is destroyed,
+         * preventing use-after-free errors. After canceling I/O, closes the remote UDP socket
+         * and the SOCKS5 TCP control socket if they are valid.
          */
         ~socks5_udp_proxy_socket()
         {
             if (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
             {
+                // Cancel all pending I/O operations on the remote socket before closing
+                // This prevents completion callbacks from being invoked after destruction
+                CancelIoEx(reinterpret_cast<HANDLE>(remote_socket_), nullptr);  // NOLINT(performance-no-int-to-ptr)
                 closesocket(remote_socket_);
                 remote_socket_ = INVALID_SOCKET;
+            }
+            
+            if (socks_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                // Cancel all pending I/O operations on the SOCKS TCP socket before closing
+                CancelIoEx(reinterpret_cast<HANDLE>(socks_socket_), nullptr);  // NOLINT(performance-no-int-to-ptr)
                 closesocket(socks_socket_);
                 socks_socket_ = INVALID_SOCKET;
             }
