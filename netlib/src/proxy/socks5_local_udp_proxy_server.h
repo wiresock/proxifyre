@@ -270,11 +270,8 @@ namespace proxy
                     server_socket_,
                     [this](const DWORD num_bytes, OVERLAPPED* povlp, const BOOL status)
                     {
-                        // Increment active operations counter on entry
-                        active_iocp_operations_.fetch_add(1, std::memory_order_acquire);
-                        
                         // RAII guard to ensure we decrement on all exit paths (including exceptions)
-                        // Non-copyable/non-moveable to prevent double-decrement bugs
+                        // Note: Counter was already incremented BEFORE the I/O operation was posted
                         struct operation_guard {
                             std::atomic<int32_t>& counter;
                             
@@ -364,18 +361,27 @@ namespace proxy
                         {
                             DWORD flags = 0;
 
-                            if ((::WSARecvFrom(
-                                server_socket_,
-                                &server_recv_buf_,
-                                1,
-                                nullptr,
-                                &flags,
-                                reinterpret_cast<sockaddr*>(&recv_from_sa_),
-                                &recv_from_sa_size_,
-                                &server_io_context_,
-                                nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                            // Increment counter BEFORE posting the I/O operation
+                            // This ensures stop() will wait for this operation to complete
+                            if (!end_server_)
                             {
-                                result = false;
+                                active_iocp_operations_.fetch_add(1, std::memory_order_acquire);
+
+                                if ((::WSARecvFrom(
+                                    server_socket_,
+                                    &server_recv_buf_,
+                                    1,
+                                    nullptr,
+                                    &flags,
+                                    reinterpret_cast<sockaddr*>(&recv_from_sa_),
+                                    &recv_from_sa_size_,
+                                    &server_io_context_,
+                                    nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                                {
+                                    // Failed to post I/O, decrement counter
+                                    active_iocp_operations_.fetch_sub(1, std::memory_order_release);
+                                    result = false;
+                                }
                             }
                         }
 
@@ -384,6 +390,9 @@ namespace proxy
                 {
                     completion_key_ = io_key;
                     DWORD flags = 0;
+
+                    // Increment counter BEFORE posting the initial I/O operation
+                    active_iocp_operations_.fetch_add(1, std::memory_order_acquire);
 
                     if ((::WSARecvFrom(
                         server_socket_,
@@ -395,9 +404,11 @@ namespace proxy
                         &recv_from_sa_size_,
                         &server_io_context_,
                         nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
-                    {
+                   {
+                        // Failed to post initial I/O, decrement counter
+                        active_iocp_operations_.fetch_sub(1, std::memory_order_release);
                         closesocket(server_socket_);
-                        end_server_ = false;
+                        end_server_ = true;
                         return false;
                     }
                 }
@@ -408,7 +419,7 @@ namespace proxy
                         closesocket(server_socket_);
                     }
 
-                    end_server_ = false;
+                    end_server_ = true;
                     return false;
                 }
             }
@@ -451,30 +462,44 @@ namespace proxy
                 server_socket_ = INVALID_SOCKET;
             }
 
-            // Step 3: Wait for all active IOCP operations to complete
+            // Step 3: Close all proxy sockets FIRST to cancel their I/O operations
+            // This is CRITICAL: proxy sockets post their own I/O operations that will
+            // call back into this server's lambda, potentially after the server is destroyed.
+            // We must ensure all proxy socket I/O is cancelled before we proceed.
+            {
+                std::lock_guard lock(lock_);
+                if (!proxy_sockets_.empty())
+                {
+                    NETLIB_INFO("Closing {} proxy sockets before waiting for I/O completion", proxy_sockets_.size());
+                    // Closing the map entries will destroy the proxy sockets,
+                    // which will close their sockets and cancel any pending I/O
+                    proxy_sockets_.clear();
+                }
+            }
+
+            // Step 4: Wait for all active IOCP operations to complete
             // The socket closure ensures pending operations complete quickly.
             // The atomic counter ensures we wait until all in-flight operations finish.
             // Use exponential backoff to avoid busy-waiting
             using namespace std::chrono_literals;
             int wait_iterations = 0;
-            constexpr int max_wait_iterations = 100; // Max ~5 seconds total wait
-            
+
             while (active_iocp_operations_.load(std::memory_order_acquire) > 0)
             {
-                if (++wait_iterations > max_wait_iterations)
+                if (constexpr int max_wait_iterations = 100; ++wait_iterations > max_wait_iterations)
                 {
                     // Log warning if we're taking too long
                     NETLIB_WARNING("Timeout waiting for IOCP operations to complete. Active operations: {}",
-                        active_iocp_operations_.load(std::memory_order_relaxed));
+                    active_iocp_operations_.load(std::memory_order_relaxed));
                     break;
                 }
-                
+             
                 // Exponential backoff: 1ms, 2ms, 4ms, 8ms, ... up to 100ms
                 const auto wait_time = std::min(1ms * (1 << std::min(wait_iterations / 10, 6)), 100ms);
                 std::this_thread::sleep_for(wait_time);
             }
 
-            // Step 4: Join background threads
+            // Step 5: Join background threads
             if (proxy_server_.joinable())
             {
                 proxy_server_.join();
@@ -484,19 +509,6 @@ namespace proxy
             {
                 check_clients_thread_.join();
             }
-
-            // Step 5: Clear proxy sockets
-            // Now safe because:
-            // - end_server_ is true, so IOCP lambda won't process new completions
-            // - Socket is closed, so no new I/O can be initiated
-            // - We waited for all active operations to complete
-            if (!proxy_sockets_.empty())
-            {
-                proxy_sockets_.clear();
-            }
-
-            // Note: The IOCP thread pool itself is managed by completion_port_ and will be
-            // properly shut down when io_completion_port's destructor is called.
         }
 
     private:
@@ -777,8 +789,8 @@ namespace proxy
                     return {};
                 }
 
-                if (negotiate_ctx->socks5_username.value().length() > socks5_username_max_length || negotiate_ctx->
-                    socks5_username.value().length() < 1)
+                if (negotiate_ctx->socks5_username.value().length() > socks5_username_max_length || 
+                    negotiate_ctx->socks5_username.value().length() < 1)
                 {
                     NETLIB_INFO(
                         "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but USERNAME exceeds maximum possible length");
@@ -792,20 +804,22 @@ namespace proxy
                     return {};
                 }
 
-                if (negotiate_ctx->socks5_password.value().length() > socks5_username_max_length || negotiate_ctx->
-                    socks5_password.value().length() < 1)
+                if (negotiate_ctx->socks5_password.value().length() > socks5_username_max_length || 
+                    negotiate_ctx->socks5_password.value().length() < 1)
                 {
                     NETLIB_INFO(
                         "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but PASSWORD exceeds maximum possible length");
                     return {};
                 }
 
-                const socks5_username_auth auth_req(negotiate_ctx->socks5_username.value(),
-                    negotiate_ctx->socks5_password.value());
+                const socks5_username_auth auth_req(
+                    negotiate_ctx->socks5_username.value(),
+                    negotiate_ctx->socks5_password.value()
+                );
 
                 result = send(socks_tcp_socket, reinterpret_cast<const char*>(&auth_req),
-                    3 + static_cast<int>(negotiate_ctx->socks5_username.value().length()) + static_cast<int>(
-                        negotiate_ctx->socks5_password.value().length()), 0);
+                    3 + static_cast<int>(negotiate_ctx->socks5_username.value().length()) + 
+                    static_cast<int>(negotiate_ctx->socks5_password.value().length()), 0);
                 if (result == SOCKET_ERROR)
                 {
                     NETLIB_INFO(
