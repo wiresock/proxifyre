@@ -147,6 +147,9 @@ namespace iphelper
         /// Timeout for protected apps cache entries (2 seconds)
         static constexpr std::chrono::seconds protected_apps_cache_timeout{ 2 };
 
+        /// Initial buffer size for TCP/UDP table queries (128KB should handle most systems)
+        static constexpr DWORD initial_buffer_size{ 131072 };
+
         /// Hash table type for TCP sessions
         using tcp_hashtable_t = std::unordered_map<net::ip_session<T>, std::shared_ptr<network_process>>;
         /// Hash table type for UDP endpoints
@@ -204,12 +207,12 @@ namespace iphelper
         std::shared_ptr<network_process> default_process_;
 
         // Buffer management for IP Helper API calls
-        std::unique_ptr<char[]> table_buffer_tcp_{};    ///< Buffer for TCP table queries
-        std::unique_ptr<char[]> table_buffer_udp_{};    ///< Buffer for UDP table queries
-        std::mutex table_buffer_tcp_lock_;              ///< Mutex for TCP buffer access
-        std::mutex table_buffer_udp_lock_;              ///< Mutex for UDP buffer access
-        DWORD table_buffer_size_tcp_{ 0 };              ///< Current TCP buffer size
-        DWORD table_buffer_size_udp_{ 0 };              ///< Current UDP buffer size
+        std::unique_ptr<char[]> table_buffer_tcp_{ std::make_unique<char[]>(initial_buffer_size) };  ///< Buffer for TCP table queries (pre-allocated to 128KB)
+        std::unique_ptr<char[]> table_buffer_udp_{ std::make_unique<char[]>(initial_buffer_size) };  ///< Buffer for UDP table queries (pre-allocated to 128KB)
+        std::mutex table_buffer_tcp_lock_;                                                           ///< Mutex for TCP buffer access
+        std::mutex table_buffer_udp_lock_;                                                           ///< Mutex for UDP buffer access
+        DWORD table_buffer_size_tcp_{ initial_buffer_size };                                         ///< Current TCP buffer size
+        DWORD table_buffer_size_udp_{ initial_buffer_size };                                         ///< Current UDP buffer size
 
     public:
         /**
@@ -403,6 +406,27 @@ namespace iphelper
                 if (std::regex_match(entry.second->name, process))
                     sessions.push_back(entry.first);
             }
+            return sessions;
+        }
+
+        /**
+         * @brief Retrieves all TCP sessions.
+         *
+         * This function returns a vector containing all TCP sessions currently stored in the TCP hashtable.
+         * It reserves memory for the vector to avoid multiple allocations, improving performance.
+         *
+         * @return A vector of net::ip_session<T> objects representing all TCP sessions.
+         */
+        std::vector<net::ip_session<T>> get_all_tcp_sessions() const
+        {
+            std::vector<net::ip_session<T>> sessions;
+            sessions.reserve(tcp_to_app_.size()); // Reserve memory to avoid multiple allocations
+
+            for (const auto& entry : tcp_to_app_)
+            {
+                sessions.push_back(entry.first);
+            }
+
             return sessions;
         }
 
@@ -748,12 +772,12 @@ namespace iphelper
          */
         bool initialize_tcp_table()
         {
-            auto table_size = table_buffer_size_tcp_;
-
             try {
                 tcp_hashtable_t tcp_to_app;
                 {
                     std::unique_lock lock(table_buffer_tcp_lock_);
+
+                    auto table_size = table_buffer_size_tcp_;
 
                     for (;;) {
                         const uint32_t result = ::GetExtendedTcpTable(
@@ -827,12 +851,12 @@ namespace iphelper
          */
         bool initialize_udp_table()
         {
-            auto table_size = table_buffer_size_udp_;
-
             try {
                 udp_hashtable_t udp_to_app;
                 {
                     std::unique_lock lock(table_buffer_udp_lock_);
+
+                    auto table_size = table_buffer_size_udp_;
 
                     for (;;) {
                         const uint32_t result = ::GetExtendedUdpTable(
