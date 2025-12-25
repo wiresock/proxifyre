@@ -1079,15 +1079,40 @@ namespace proxy
 
             if (result)
             {
-                // Initialize I/O contexts with shared_ptr
-                it->second->initialize_io_contexts();
+                try
+                {
+                    // Initialize I/O contexts with shared_ptr
+                    it->second->initialize_io_contexts();
 
-                // Now safe to associate and start
-                it->second->associate_to_completion_port(completion_key_, completion_port_);
-                it->second->start();
+                    // Now safe to associate and start
+                    it->second->associate_to_completion_port(completion_key_, completion_port_);
+                    it->second->start();
 
-                // Set the context pointer to the shared_ptr
-                io_context->proxy_socket_ptr = it->second;
+                    // Set the context pointer to the shared_ptr
+                    io_context->proxy_socket_ptr = it->second;
+                }
+                catch (const std::exception& e)
+                {
+                    NETLIB_DEBUG(
+                        "connect_to_remote_host: Failed to initialize proxy socket for: {}:{} ({})",
+                        remote_address,
+                        udp_port.value(),
+                        e.what());
+                    // Remove from map - the shared_ptr destructor will close the sockets
+                    // that were transferred to T's constructor
+                    proxy_sockets_.erase(it);
+                    return false;
+                }
+                catch (...)
+                {
+                    NETLIB_DEBUG(
+                        "connect_to_remote_host: Failed to initialize proxy socket for: {}:{} (unknown exception)",
+                        remote_address,
+                        udp_port.value());
+                    // Remove from map - the shared_ptr destructor will close the sockets
+                    proxy_sockets_.erase(it);
+                    return false;
+                }
             }
             else
             {

@@ -14,7 +14,7 @@ namespace proxy
      * - iphelper::network_config_info<socks_local_router>: For network configuration monitoring and callbacks.
      * - netlib::log::logger<socks_local_router>: For logging router events and diagnostics.
      */
-    class socks_local_router :
+    class socks_local_router :  // NOLINT(clang-diagnostic-padded)
         public iphelper::network_config_info<socks_local_router>,
         public netlib::log::logger<socks_local_router>
     {
@@ -105,11 +105,6 @@ namespace proxy
         std::unique_ptr<packet_filter> packet_filter_{ nullptr };
 
         /**
-         * @brief Atomic boolean to track the active status of the router.
-         */
-        std::atomic_bool is_active_{ false };
-
-        /**
          * @brief Static filters for packet filtering.
          */
         ndisapi::static_filters static_filters_;
@@ -175,6 +170,11 @@ namespace proxy
          * @see log_packet_to_pcap()
          */
         std::shared_ptr<std::ostream> pcap_log_stream_;
+
+        /**
+        * @brief Atomic boolean to track the active status of the router.
+        */
+        std::atomic_bool is_active_{ false };
 
     public:
         enum supported_protocols : uint8_t
@@ -534,13 +534,36 @@ namespace proxy
 
             // Step 7: Wait for any in-flight callbacks to complete
             // The callback increments notify_ip_interface_ref_ on entry and decrements on exit.
-            // We must spin-wait until it reaches zero before allowing destruction to proceed.
+            // We wait with timeout to prevent indefinite hangs if something goes wrong.
             NETLIB_DEBUG("Waiting for network interface callbacks to complete");
+
+            using namespace std::chrono_literals;
+            constexpr auto max_wait_duration = 5s;  // Maximum time to wait for callbacks
+            constexpr auto initial_sleep = 1ms;
+            constexpr auto max_sleep = 100ms;
+
+            const auto start_time = std::chrono::steady_clock::now();
+            auto current_sleep = initial_sleep;
+
             while (!this->notify_ip_interface_can_unload())
             {
-                std::this_thread::yield();
+                if (const auto elapsed = std::chrono::steady_clock::now() - start_time; elapsed >= max_wait_duration)
+                {
+                    NETLIB_WARNING("Timeout waiting for network interface callbacks to complete after {} seconds. "
+                        "Proceeding with shutdown - potential resource leak or callback still in-flight.",
+                        std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
+                    break;
+                }
+
+                // Exponential backoff to reduce CPU usage while waiting
+                std::this_thread::sleep_for(current_sleep);
+                current_sleep = std::min(current_sleep * 2, max_sleep);
             }
-            NETLIB_DEBUG("All network interface callbacks completed");
+
+            if (this->notify_ip_interface_can_unload())
+            {
+                NETLIB_DEBUG("All network interface callbacks completed");
+            }
 
             NETLIB_INFO("socks_local_router stopped successfully");
 
@@ -596,7 +619,7 @@ namespace proxy
                       .set_action(ndisapi::action_t::pass)
                       .set_dest_address(net::ip_subnet{address, net::ip_address_v4{"255.255.255.255"}})
                       .set_dest_port(std::make_pair(port, port));
-                return filter;
+                return std::move(filter);
             };
 
             const auto tcp_out_filter = create_filter(IPPROTO_TCP, ndisapi::direction_t::out, proxy_endpoint.value().ip,

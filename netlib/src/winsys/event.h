@@ -124,7 +124,9 @@ namespace netlib::winsys
         /// <returns>WAIT_OBJECT_0 if signaled, WAIT_TIMEOUT if timeout, WAIT_FAILED on error</returns>
         [[nodiscard]] DWORD wait(const std::chrono::milliseconds timeout) const noexcept
         {
-            assert(valid() && "Attempting to wait on invalid event handle");
+            if (!valid()) {
+                return WAIT_FAILED;
+            }
 
             // Use uint64_t to avoid any signed/unsigned comparison issues
             constexpr auto max_dword = static_cast<std::uint64_t>(std::numeric_limits<DWORD>::max());

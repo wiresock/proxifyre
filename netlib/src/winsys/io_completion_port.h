@@ -17,7 +17,7 @@ namespace netlib::winsys
     /// </summary>
     // --------------------------------------------------------------------------------
     template <typename T>
-    class thread_pool
+    class thread_pool  // NOLINT(clang-diagnostic-padded)
     {
         friend T; // Allow derived class to access private members
 
@@ -25,10 +25,10 @@ namespace netlib::winsys
         std::vector<std::thread> threads_;
 
     protected:
-        /// <summary>thread pool termination flag</summary>
-        std::atomic_bool active_{ false };
         /// <summary>number of concurrent threads in the pool</summary>
         size_t concurrent_threads_;
+        /// <summary>thread pool termination flag</summary>
+        std::atomic_bool active_{ false };
 
     private:
         // ********************************************************************************
@@ -65,7 +65,6 @@ namespace netlib::winsys
                 }
                 catch (const std::exception& e)
                 {
-#ifdef _DEBUG
                     try
                     {
                         OutputDebugStringA(std::format("thread_pool: exception during stop_thread_pool in destructor: {}\n", e.what()).c_str());
@@ -74,13 +73,10 @@ namespace netlib::winsys
                     {
                         OutputDebugStringA("thread_pool: exception during stop_thread_pool in destructor (format failed)\n");
                     }
-#endif
                 }
                 catch (...)
                 {
-#ifdef _DEBUG
                     OutputDebugStringA("thread_pool: unknown exception during stop_thread_pool in destructor\n");
-#endif
                 }
             }
         }
@@ -92,6 +88,8 @@ namespace netlib::winsys
         /// NOTE: This function must not be called concurrently with stop_thread_pool()
         /// from different threads. External synchronization is required for start/stop.
         /// </summary>
+        /// <exception cref="std::system_error">Thrown if thread creation fails.
+        /// On failure, state is rolled back to allow retry.</exception>
         // ********************************************************************************
         void start_thread_pool()
         {
@@ -110,9 +108,32 @@ namespace netlib::winsys
             // Create twice as many threads as may run concurrently
             // (beneficial for I/O-bound work where threads frequently block)
             const auto worker_count = concurrent_threads_ * 2;
-            for (size_t i = 0; i < worker_count; ++i)
+
+            try
             {
-                threads_.emplace_back(&T::start_thread, static_cast<T*>(this));
+                for (size_t i = 0; i < worker_count; ++i)
+                {
+                    threads_.emplace_back(&T::start_thread, static_cast<T*>(this));
+                }
+            }
+            catch (...)
+            {
+                // Thread creation failed - roll back to consistent state
+                // Signal existing threads to stop
+                active_.store(false, std::memory_order_release);
+
+                // Join any threads that were successfully created
+                for (auto& thread : threads_)
+                {
+                    if (thread.joinable())
+                        thread.join();
+                }
+
+                // Clear the partial thread list
+                threads_.clear();
+
+                // Rethrow to inform caller of failure
+                throw;
             }
         }
 
@@ -223,18 +244,47 @@ namespace netlib::winsys
 
         // ********************************************************************************
         /// <summary>
-        /// Generates a unique completion key, skipping the reserved value 0.
+        /// Generates a unique completion key, skipping the reserved value 0 and avoiding
+        /// collision with existing handlers.
         /// </summary>
         /// <returns>Unique non-zero completion key.</returns>
+        /// <exception cref="std::runtime_error">Thrown if no unique key can be found
+        /// (all keys are in use - extremely unlikely in practice).</exception>
+        /// <remarks>
+        /// On 32-bit systems, key space is limited to ~4 billion values. For extremely
+        /// long-running services with high handler turnover, monitor handler count.
+        /// </remarks>
         // ********************************************************************************
         [[nodiscard]] ULONG_PTR generate_unique_key()
         {
-            ULONG_PTR key;
+            // Track iterations to detect full key space exhaustion
+            size_t attempts = 0;
+
             do
             {
-                key = next_key_.fetch_add(1, std::memory_order_relaxed);
-            } while (key == 0); // Skip reserved key
-            return key;
+                ULONG_PTR key = next_key_.fetch_add(1, std::memory_order_relaxed);
+
+                // Skip reserved key 0
+                if (key == 0)
+                    continue;
+
+                // Check for collision with existing handler
+                {
+                    read_lock lock(handlers_lock_);
+                    if (!handlers_.contains(key))
+                        return key;
+                }
+
+                // Key collision detected - try next key
+                if (constexpr size_t max_attempts = 1000; ++attempts >= max_attempts)
+                {
+                    // If we've tried many times and keep hitting collisions,
+                    // the key space may be nearly exhausted
+                    throw std::runtime_error(
+                        "io_completion_port: unable to generate unique key after " +
+                        std::to_string(max_attempts) + " attempts");
+                }
+            } while (true);
         }
 
         // ********************************************************************************
