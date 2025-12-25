@@ -6,7 +6,7 @@ namespace proxy
     class socks5_udp_proxy_socket;
 
     template <net::ip_address T>
-    struct socks5_udp_per_io_context : WSAOVERLAPPED
+    struct socks5_udp_per_io_context : WSAOVERLAPPED  // NOLINT(clang-diagnostic-padded)
     {
         /**
          * @brief Constructs a per-I/O context for SOCKS5 UDP proxy operations.
@@ -19,9 +19,9 @@ namespace proxy
             std::shared_ptr<socks5_udp_proxy_socket<T>> socket,
             const bool is_local)
             : WSAOVERLAPPED{ 0, 0, {{.Offset = 0, .OffsetHigh = 0}}, nullptr },
-            io_operation(io_operation),
-            proxy_socket_ptr(std::move(socket)),
-            is_local(is_local)
+              proxy_socket_ptr(std::move(socket)),
+              io_operation(io_operation),
+              is_local(is_local)
         {
         }
 
@@ -38,7 +38,7 @@ namespace proxy
          */
         static socks5_udp_per_io_context* allocate_io_context(
             const proxy_io_operation io_operation,
-            std::shared_ptr<socks5_udp_proxy_socket<T>> socket,
+            const std::shared_ptr<socks5_udp_proxy_socket<T>>& socket,
             const bool is_local,
             const uint32_t size = 0)
         {
@@ -79,13 +79,13 @@ namespace proxy
 
             delete context;
         }
-
-        /// The type of proxy I/O operation (read, write, etc).
-        proxy_io_operation io_operation;
+        
         /// Shared pointer to the associated SOCKS5 UDP proxy socket.
         std::shared_ptr<socks5_udp_proxy_socket<T>> proxy_socket_ptr;
         /// Unique pointer to the packet buffer for this I/O operation.
         std::unique_ptr<net_packet_t> wsa_buf{ nullptr };
+        /// The type of proxy I/O operation (read, write, etc).
+        proxy_io_operation io_operation;
         /// True if the operation is for the local socket, false for the remote socket.
         bool is_local;
     };
@@ -108,7 +108,7 @@ namespace proxy
     * @tparam T Address type (e.g., IPv4 or IPv6) used for remote peer addressing.
     */
     template <net::ip_address T>
-    class socks5_udp_proxy_socket final : public netlib::log::logger<socks5_udp_proxy_socket<T>>,
+    class socks5_udp_proxy_socket final : public netlib::log::logger<socks5_udp_proxy_socket<T>>,  // NOLINT(clang-diagnostic-padded)
         public std::enable_shared_from_this<socks5_udp_proxy_socket<T>>
     {
     public:
@@ -167,24 +167,9 @@ namespace proxy
         SOCKADDR_STORAGE local_address_sa_{};
 
         /// <summary>
-        /// Remote peer's UDP port number as assigned by the SOCKS5 proxy.
-        /// </summary>
-        uint16_t remote_peer_port_;
-
-        /// <summary>
-        /// Remote peer's address (IPv4 or IPv6) as assigned by the SOCKS5 proxy.
-        /// </summary>
-        address_type_t remote_peer_address_;
-
-        /// <summary>
         /// Unique pointer to the negotiation context containing authentication and session information.
         /// </summary>
         std::unique_ptr<negotiate_context_t> negotiate_ctx_;
-
-        /// <summary>
-        /// Atomic flag indicating whether the session is ready for removal and cleanup.
-        /// </summary>
-        std::atomic_bool ready_for_removal_{ false };
 
         /// <summary>
         /// Buffer for receiving data from the remote UDP socket (SOCKS5 proxy).
@@ -203,6 +188,21 @@ namespace proxy
         /// Initialized with nullptr, set later via initialize_io_contexts().
         /// </summary>
         per_io_context_t io_context_recv_from_remote_{ proxy_io_operation::relay_io_read, nullptr, false };
+
+        /// <summary>
+        /// Remote peer's address (IPv4 or IPv6) as assigned by the SOCKS5 proxy.
+        /// </summary>
+        address_type_t remote_peer_address_;
+
+        /// <summary>
+        /// Remote peer's UDP port number as assigned by the SOCKS5 proxy.
+        /// </summary>
+        uint16_t remote_peer_port_;
+
+        /// <summary>
+        /// Atomic flag indicating whether the session is ready for removal and cleanup.
+        /// </summary>
+        std::atomic_bool ready_for_removal_{ false };
 
     public:
         /**
@@ -236,9 +236,9 @@ namespace proxy
             local_socket_(local_socket),
             remote_socket_(remote_socket),
             local_address_sa_(local_address_sa),
-            remote_peer_port_(remote_port),
+            negotiate_ctx_(std::move(negotiate_ctx)),
             remote_peer_address_(remote_address),
-            negotiate_ctx_(std::move(negotiate_ctx))
+            remote_peer_port_(remote_port)
         {
         }
 
@@ -283,74 +283,29 @@ namespace proxy
         }
 
         /**
-         * @brief Move constructor for socks5_udp_proxy_socket.
+         * @brief Move constructor (deleted).
          *
-         * Transfers ownership of all resources from another instance to this one.
-         * Moves the logger base, timestamp, packet pool, sockets, addresses, negotiation context,
-         * session state, and I/O buffers. The source object's sockets are set to INVALID_SOCKET
-         * to prevent double closure. Note: atomic members cannot be moved, so their values are
-         * loaded from the source.
+         * Moving socks5_udp_proxy_socket instances is not safe because:
+         * - WSAOVERLAPPED structures cannot be relocated while I/O operations are pending
+         * - Per-I/O contexts contain pointers that would become invalid after a move
+         * - The class is designed to be used via shared_ptr and managed by the proxy server
          *
-         * @param other The socks5_udp_proxy_socket instance to move from.
+         * @param other The socks5_udp_proxy_socket instance to move from (not allowed).
          */
-        socks5_udp_proxy_socket(socks5_udp_proxy_socket&& other) noexcept
-            : logger(std::move(other)), // Initialize the base class
-            timestamp_(other.timestamp_),
-            packet_pool_(std::move(other.packet_pool_)),
-            local_socket_(other.local_socket_),
-            local_address_sa_(other.local_address_sa_),
-            remote_peer_port_(other.remote_peer_port_),
-            remote_peer_address_(std::move(other.remote_peer_address_)),
-            negotiate_ctx_(std::move(other.negotiate_ctx_)),
-            ready_for_removal_(other.ready_for_removal_.load()),  // Load from atomic, don't move
-            from_remote_to_local_buffer_(other.from_remote_to_local_buffer_),
-            remote_recv_buf_(other.remote_recv_buf_),
-            io_context_recv_from_remote_(std::move(other.io_context_recv_from_remote_))
-        {
-            socks_socket_ = other.socks_socket_;
-            other.socks_socket_ = INVALID_SOCKET;
-            remote_socket_ = other.remote_socket_;
-            other.remote_socket_ = INVALID_SOCKET;
-        }
+        socks5_udp_proxy_socket(socks5_udp_proxy_socket&& other) = delete;
 
         /**
-         * @brief Move assignment operator for socks5_udp_proxy_socket.
+         * @brief Move assignment operator (deleted).
          *
-         * Transfers ownership of all resources from another instance to this one.
-         * Moves the logger base, timestamp, packet pool, sockets, addresses, negotiation context,
-         * session state, and I/O buffers. The source object's sockets are set to INVALID_SOCKET
-         * to prevent double closure. Self-assignment is safely handled. Note: atomic members cannot
-         * be moved, so their values are loaded and stored.
+         * Moving socks5_udp_proxy_socket instances is not safe because:
+         * - WSAOVERLAPPED structures cannot be relocated while I/O operations are pending
+         * - Per-I/O contexts contain pointers that would become invalid after a move
+         * - The class is designed to be used via shared_ptr and managed by the proxy server
          *
-         * @param other The socks5_udp_proxy_socket instance to move from.
+         * @param other The socks5_udp_proxy_socket instance to move from (not allowed).
          * @return Reference to this instance.
          */
-        socks5_udp_proxy_socket& operator=(socks5_udp_proxy_socket&& other) noexcept
-        {
-            if (this != &other)
-            {
-                logger::operator=(std::move(other)); // Assign the base class
-
-                timestamp_ = other.timestamp_;
-                packet_pool_ = std::move(other.packet_pool_);
-                local_socket_ = other.local_socket_;
-                local_address_sa_ = other.local_address_sa_;
-                remote_peer_port_ = other.remote_peer_port_;
-                remote_peer_address_ = std::move(other.remote_peer_address_);
-                negotiate_ctx_ = std::move(other.negotiate_ctx_);
-                ready_for_removal_.store(other.ready_for_removal_.load());  // Load and store, don't move
-                from_remote_to_local_buffer_ = other.from_remote_to_local_buffer_;
-                remote_recv_buf_ = other.remote_recv_buf_;
-                io_context_recv_from_remote_ = std::move(other.io_context_recv_from_remote_);
-
-                socks_socket_ = other.socks_socket_;
-                other.socks_socket_ = INVALID_SOCKET;
-                remote_socket_ = other.remote_socket_;
-                other.remote_socket_ = INVALID_SOCKET;
-            }
-            return *this;
-        }
-
+        socks5_udp_proxy_socket& operator=(socks5_udp_proxy_socket&& other) = delete;
 
         /**
          * @brief Deleted copy constructor.
@@ -400,7 +355,7 @@ namespace proxy
          * @return True if the association succeeded, false otherwise.
          */
         bool associate_to_completion_port(const ULONG_PTR completion_key,
-            netlib::winsys::io_completion_port& completion_port) const
+            const netlib::winsys::io_completion_port& completion_port) const
         {
             if (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                 return completion_port.associate_socket(remote_socket_, completion_key);

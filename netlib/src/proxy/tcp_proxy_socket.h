@@ -386,77 +386,29 @@ namespace proxy
         tcp_proxy_socket& operator=(const tcp_proxy_socket& other) = delete;
 
         /**
-         * @brief Move constructor for tcp_proxy_socket.
+         * @brief Move constructor (deleted).
          *
-         * Transfers ownership of all resources and state from another tcp_proxy_socket instance to this one.
-         * This includes socket handles, negotiation context, buffers, I/O contexts, and connection state.
-         * After the move, the source object's socket handles are set to INVALID_SOCKET to prevent double closure.
+         * Moving tcp_proxy_socket instances is not safe because:
+         * - WSAOVERLAPPED structures cannot be relocated while I/O operations are pending
+         * - Per-I/O contexts contain pointers that would become invalid after a move
+         * - The class is designed to be used via shared_ptr and managed by tcp_proxy_server
          *
-         * @param other The tcp_proxy_socket instance to move from.
+         * @param other The tcp_proxy_socket instance to move from (not allowed).
          */
-        tcp_proxy_socket(tcp_proxy_socket&& other) noexcept
-            : logger(std::move(other)), // Initialize the base class
-            local_socket_(other.local_socket_),
-            remote_socket_(other.remote_socket_),
-            negotiate_ctx_(std::move(other.negotiate_ctx_)),
-            from_local_to_remote_buffer_(other.from_local_to_remote_buffer_),
-            from_remote_to_local_buffer_(other.from_remote_to_local_buffer_),
-            local_recv_buf_(other.local_recv_buf_),
-            local_send_buf_(other.local_send_buf_),
-            remote_recv_buf_(other.remote_recv_buf_),
-            remote_send_buf_(other.remote_send_buf_),
-            timestamp_(other.timestamp_),
-            io_context_recv_from_local_(std::move(other.io_context_recv_from_local_)),
-            io_context_recv_from_remote_(std::move(other.io_context_recv_from_remote_)),
-            io_context_send_to_local_(std::move(other.io_context_send_to_local_)),
-            io_context_send_to_remote_(std::move(other.io_context_send_to_remote_)),
-            is_disable_nagle_(other.is_disable_nagle_),
-            connection_status_(other.connection_status_)
-        {
-            other.local_socket_ = INVALID_SOCKET;
-            other.remote_socket_ = INVALID_SOCKET;
-        }
+        tcp_proxy_socket(tcp_proxy_socket&& other) = delete;
 
         /**
-         * @brief Move assignment operator for tcp_proxy_socket.
+         * @brief Move assignment operator (deleted).
          *
-         * Transfers ownership of all resources and state from another tcp_proxy_socket instance to this one,
-         * after releasing any resources currently held by this instance. Ensures thread safety by locking
-         * both instances during the operation. After the move, the source object's socket handles are set
-         * to INVALID_SOCKET to prevent double closure.
+         * Moving tcp_proxy_socket instances is not safe because:
+         * - WSAOVERLAPPED structures cannot be relocated while I/O operations are pending
+         * - Per-I/O contexts contain pointers that would become invalid after a move
+         * - The class is designed to be used via shared_ptr and managed by tcp_proxy_server
          *
-         * @param other The tcp_proxy_socket instance to move from.
+         * @param other The tcp_proxy_socket instance to move from (not allowed).
          * @return Reference to this tcp_proxy_socket instance.
          */
-        tcp_proxy_socket& operator=(tcp_proxy_socket&& other) noexcept
-        {
-            if (this != &other)
-            {
-                std::scoped_lock lock(lock_, other.lock_);
-
-                logger::operator=(std::move(other)); // Assign the base class
-
-                local_socket_ = other.local_socket_;
-                other.local_socket_ = INVALID_SOCKET;
-                remote_socket_ = other.remote_socket_;
-                other.remote_socket_ = INVALID_SOCKET;
-                negotiate_ctx_ = std::move(other.negotiate_ctx_);
-                is_disable_nagle_ = other.is_disable_nagle_;
-                connection_status_ = other.connection_status_;
-                from_local_to_remote_buffer_ = other.from_local_to_remote_buffer_;
-                from_remote_to_local_buffer_ = other.from_remote_to_local_buffer_;
-                local_recv_buf_ = other.local_recv_buf_;
-                local_send_buf_ = other.local_send_buf_;
-                remote_recv_buf_ = other.remote_recv_buf_;
-                remote_send_buf_ = other.remote_send_buf_;
-                timestamp_ = other.timestamp_;
-                io_context_recv_from_local_ = std::move(other.io_context_recv_from_local_);
-                io_context_recv_from_remote_ = std::move(other.io_context_recv_from_remote_);
-                io_context_send_to_local_ = std::move(other.io_context_send_to_local_);
-                io_context_send_to_remote_ = std::move(other.io_context_send_to_remote_);
-            }
-            return *this;
-        }
+        tcp_proxy_socket& operator=(tcp_proxy_socket&& other) = delete;
 
         /**
          * @brief Initializes the per-I/O contexts with shared_ptr to this socket.
@@ -477,7 +429,7 @@ namespace proxy
             catch (const std::bad_weak_ptr&)
             {
                 NETLIB_ERROR("initialize_io_contexts: shared_from_this() failed - object is not managed by shared_ptr");
-                throw std::bad_weak_ptr(); // Re-throw with logging complete
+                throw; // Log error and propagate exception to caller
             }
 
             io_context_recv_from_local_.proxy_socket_ptr = self;

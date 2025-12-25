@@ -612,15 +612,16 @@ namespace proxy
             // These filters are used to decide which packets to pass or drop
             // They are configured to match packets based on their source/destination IP and port numbers
             // and their protocol (TCP or UDP)
-            auto create_filter = [&](const uint8_t protocol, auto direction, auto address, auto port)
+            auto create_filter = [](const uint8_t protocol, const ndisapi::direction_t direction,
+                const net::ip_address_v4& address, const uint16_t port)
             {
                 ndisapi::filter<net::ip_address_v4> filter;
                 filter.set_protocol(protocol)
-                      .set_direction(direction)
-                      .set_action(ndisapi::action_t::pass)
-                      .set_dest_address(net::ip_subnet{address, net::ip_address_v4{"255.255.255.255"}})
-                      .set_dest_port(std::make_pair(port, port));
-                return std::move(filter);
+                    .set_direction(direction)
+                    .set_action(ndisapi::action_t::pass)
+                    .set_dest_address(net::ip_subnet{ address, net::ip_address_v4{"255.255.255.255"} })
+                    .set_dest_port(std::make_pair(port, port));
+                return filter;
             };
 
             const auto tcp_out_filter = create_filter(IPPROTO_TCP, ndisapi::direction_t::out, proxy_endpoint.value().ip,

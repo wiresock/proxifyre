@@ -94,9 +94,12 @@ namespace netlib::winsys
         void start_thread_pool()
         {
             // Only one caller wins the transition false -> true
+            // Use acq_rel for consistency with stop_thread_pool:
+            // - acquire: see any prior state from a previous stop
+            // - release: publish our start to other threads
             if (bool expected = false; !active_.compare_exchange_strong(
                 expected, true,
-                std::memory_order_release,
+                std::memory_order_acq_rel,
                 std::memory_order_acquire))
             {
                 return; // already started
@@ -120,6 +123,7 @@ namespace netlib::winsys
             {
                 // Thread creation failed - roll back to consistent state
                 // Signal threads to stop via the active flag
+                // Use release to ensure threads see consistent state before checking active_
                 active_.store(false, std::memory_order_release);
 
                 // Wake up any threads that may be blocked waiting for work
@@ -249,49 +253,6 @@ namespace netlib::winsys
 
         /// <summary>timeout for GetQueuedCompletionStatus (allows responsive shutdown)</summary>
         static constexpr DWORD shutdown_timeout_ms = 100;
-
-        // ********************************************************************************
-        /// <summary>
-        /// Generates a unique completion key, skipping the reserved value 0 and avoiding
-        /// collision with existing handlers.
-        /// </summary>
-        /// <returns>Unique non-zero completion key.</returns>
-        /// <exception cref="std::runtime_error">Thrown if no unique key can be found
-        /// (all keys are in use - extremely unlikely in practice).</exception>
-        /// <remarks>
-        /// On 32-bit systems, key space is limited to ~4 billion values. For extremely
-        /// long-running services with high handler turnover, monitor handler count.
-        /// </remarks>
-        // ********************************************************************************
-        [[nodiscard]] ULONG_PTR generate_unique_key()
-        {
-            // Track iterations to detect full key space exhaustion
-            constexpr size_t max_attempts = 1000;
-
-            for (size_t attempts = 0; attempts < max_attempts; ++attempts)
-            {
-                ULONG_PTR key = next_key_.fetch_add(1, std::memory_order_relaxed);
-
-                // Skip reserved key 0
-                if (key == 0)
-                    continue;
-
-                // Check for collision with existing handler
-                {
-                    read_lock lock(handlers_lock_);
-                    if (!handlers_.contains(key))
-                        return key;
-                }
-
-                // Key collision detected - try next key
-            }
-
-            // If we've tried many times and keep hitting collisions,
-            // the key space may be nearly exhausted
-            throw std::runtime_error(
-                "io_completion_port: unable to generate unique key after " +
-                std::to_string(max_attempts) + " attempts");
-        }
 
         // ********************************************************************************
         /// <summary>
@@ -428,7 +389,7 @@ namespace netlib::winsys
         ///
         /// NOTE: Callers should check valid() after construction to ensure handle is valid.
         // ********************************************************************************
-        explicit io_completion_port(HANDLE handle, const size_t concurrent_threads = 0)
+        explicit io_completion_port(const HANDLE handle, const size_t concurrent_threads = 0)
             : safe_object_handle(handle)
             , thread_pool(concurrent_threads)
         {
@@ -469,7 +430,6 @@ namespace netlib::winsys
                 }
                 catch (const std::exception& e)
                 {
-#ifdef _DEBUG
                     try
                     {
                         OutputDebugStringA(std::format("~io_completion_port: exception during cleanup: {}\n", e.what()).c_str());
@@ -478,13 +438,10 @@ namespace netlib::winsys
                     {
                         OutputDebugStringA("~io_completion_port: exception during cleanup (format failed)\n");
                     }
-#endif
                 }
                 catch (...)
                 {
-#ifdef _DEBUG
                     OutputDebugStringA("~io_completion_port: unknown exception during cleanup\n");
-#endif
                 }
             }
 
@@ -523,41 +480,82 @@ namespace netlib::winsys
         /// <param name="io_handler">Callback handler for the device-associated I/O.</param>
         /// <returns>Pair of status of the operation and associated I/O completion port key value.</returns>
         ///
-        /// NOTE: This method stores the handler BEFORE associating the device to prevent
-        /// race conditions where a completion arrives before the handler is registered.
-        /// If association fails, the handler is automatically cleaned up.
+        /// THREAD SAFETY:
+        /// - This method is thread-safe with respect to other associate/unregister calls.
+        /// - Key generation and handler insertion are performed atomically under a single
+        ///   write lock to prevent TOCTOU race conditions.
+        /// - The handler is stored BEFORE device association to prevent race conditions
+        ///   where a completion arrives before the handler is registered.
+        /// - If association fails, the handler is automatically cleaned up. This cleanup
+        ///   is safe because no I/O completions can be queued for a device that was never
+        ///   successfully associated with the IOCP.
+        ///
+        /// CALLER REQUIREMENTS:
+        /// - Do not post overlapped I/O operations on file_object until this method returns
+        ///   successfully. Posting I/O before association is undefined behavior.
+        /// - The returned key must be used consistently for the lifetime of the association.
         // ********************************************************************************
         [[nodiscard]] std::pair<bool, ULONG_PTR> associate_device(
-            HANDLE file_object,
+            const HANDLE file_object,
             const std::function<callback_t>& io_handler)
         {
-            // handler can't be null
+            // Handler can't be null
             if (!io_handler)
-                return std::make_pair(false, 0);
+                return { false, 0 };
 
-            // Generate a unique non-zero key with wraparound protection
-            const auto handler_key = generate_unique_key();
+            // Validate file object
+            if (file_object == nullptr || file_object == INVALID_HANDLE_VALUE)
+                return { false, 0 };
 
-            // Store handler BEFORE associating device to prevent race condition
+            ULONG_PTR handler_key = 0;
+
+            // Generate unique key AND insert handler atomically under single write lock.
+            // This eliminates the TOCTOU race between key generation and insertion.
             {
                 write_lock lock(handlers_lock_);
-                handlers_.emplace(handler_key, io_handler);
+
+                constexpr size_t max_attempts = 1000;
+
+                for (size_t attempts = 0; attempts < max_attempts; ++attempts)
+                {
+                    const ULONG_PTR candidate_key = next_key_.fetch_add(1, std::memory_order_relaxed);
+
+                    // Skip reserved key 0
+                    if (candidate_key == 0)
+                        continue;
+
+                    // Check for collision and insert atomically
+                    if (!handlers_.contains(candidate_key))
+                    {
+                        handlers_.emplace(candidate_key, io_handler);
+                        handler_key = candidate_key;
+                        break;
+                    }
+                }
+
+                if (handler_key == 0)
+                {
+                    throw std::runtime_error(
+                        "io_completion_port: unable to generate unique key after " +
+                        std::to_string(max_attempts) + " attempts");
+                }
             }
 
-            // Now associate the device with the IOCP
+            // Associate the device with the IOCP
             if (const auto h = CreateIoCompletionPort(file_object, get(), handler_key, 0);
                 h == get())
             {
-                return std::make_pair(true, handler_key);
+                return { true, handler_key };
             }
 
-            // Association failed; remove the handler we just added
+            // Association failed - cleanup is safe because CreateIoCompletionPort failed,
+            // meaning no I/O completions can ever be queued for this handler_key.
             {
                 write_lock lock(handlers_lock_);
                 handlers_.erase(handler_key);
             }
 
-            return std::make_pair(false, 0);
+            return { false, 0 };
         }
 
         // ********************************************************************************
@@ -569,7 +567,7 @@ namespace netlib::winsys
         /// <param name="key">I/O completion port key value.</param>
         /// <returns>Boolean status of the operation.</returns>
         // ********************************************************************************
-        [[nodiscard]] bool associate_device(HANDLE file_object, const ULONG_PTR key) const
+        [[nodiscard]] bool associate_device(const HANDLE file_object, const ULONG_PTR key) const
         {
             // Only associate if we know about this key
             {

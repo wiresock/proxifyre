@@ -150,9 +150,6 @@
     <ClInclude Include="..\netlib\src\ndisapi\static_filters.h">
       <Filter>Header Files\netlib\ndisapi</Filter>
     </ClInclude>
-    <ClInclude Include="..\netlib\src\iphelper\network_adapter_info.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="..\netlib\src\ndisapi\intermediate_buffer_pool.h">
       <Filter>Header Files\netlib\ndisapi</Filter>
     </ClInclude>
@@ -166,6 +163,9 @@
       <Filter>Header Files\netlib\tools</Filter>
     </ClInclude>
     <ClInclude Include="..\netlib\src\iphelper\owner_module_resolver.h">
+      <Filter>Header Files\netlib\iphelper</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\src\iphelper\network_adapter_info.h">
       <Filter>Header Files\netlib\iphelper</Filter>
     </ClInclude>
   </ItemGroup>
