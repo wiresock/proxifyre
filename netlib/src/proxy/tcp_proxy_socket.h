@@ -52,21 +52,21 @@ namespace proxy
         /**
          * @brief Constructs a per-I/O context for a specific operation and socket.
          * @param io_operation   The type of proxy I/O operation (e.g., read, write).
-         * @param socket         Pointer to the associated tcp_proxy_socket instance.
+         * @param socket         Shared pointer to the associated tcp_proxy_socket instance.
          * @param is_local       True if the operation is for the local socket; false for remote.
          */
-        tcp_per_io_context(const proxy_io_operation io_operation, tcp_proxy_socket<T>* socket, const bool is_local)
+        tcp_per_io_context(const proxy_io_operation io_operation, std::shared_ptr<tcp_proxy_socket<T>> socket, const bool is_local)
             : WSAOVERLAPPED{ 0, 0, {{.Offset = 0, .OffsetHigh = 0}}, nullptr },
             io_operation(io_operation),
-            proxy_socket_ptr(socket),
+            proxy_socket_ptr(std::move(socket)),
             is_local(is_local)
         {
         }
 
-        proxy_io_operation io_operation;      ///< The type of I/O operation (read/write/negotiate/inject).
-        tcp_proxy_socket<T>* proxy_socket_ptr;///< Pointer to the associated proxy socket.
-        WSABUF wsa_buf{ 0, nullptr };           ///< Buffer for the I/O operation.
-        bool is_local;                        ///< True if for local socket, false if for remote.
+        proxy_io_operation io_operation;                           ///< The type of I/O operation (read/write/negotiate/inject).
+        std::shared_ptr<tcp_proxy_socket<T>> proxy_socket_ptr;     ///< Shared pointer to the associated proxy socket.
+        WSABUF wsa_buf{ 0, nullptr };                     ///< Buffer for the I/O operation.
+        bool is_local;                                             ///< True if for local socket, false if for remote.
     };
 
     /**
@@ -102,7 +102,8 @@ namespace proxy
      * Not copyable, but movable.
      */
     template <net::ip_address T>
-    class tcp_proxy_socket : public netlib::log::logger<tcp_proxy_socket<T>>
+    class tcp_proxy_socket : public netlib::log::logger<tcp_proxy_socket<T>>,
+        public std::enable_shared_from_this<tcp_proxy_socket<T>>
     {
         friend tcp_proxy_server<tcp_proxy_socket>;
 
@@ -240,22 +241,22 @@ namespace proxy
         /**
          * @brief Per-I/O context for receiving data from the local client.
          */
-        per_io_context_t io_context_recv_from_local_{ proxy_io_operation::relay_io_read, this, true };
+        per_io_context_t io_context_recv_from_local_{ proxy_io_operation::relay_io_read, nullptr, true };
 
         /**
          * @brief Per-I/O context for receiving data from the remote server.
          */
-        per_io_context_t io_context_recv_from_remote_{ proxy_io_operation::relay_io_read, this, false };
+        per_io_context_t io_context_recv_from_remote_{ proxy_io_operation::relay_io_read, nullptr, false };
 
         /**
          * @brief Per-I/O context for sending data to the local client.
          */
-        per_io_context_t io_context_send_to_local_{ proxy_io_operation::relay_io_write, this, true };
+        per_io_context_t io_context_send_to_local_{ proxy_io_operation::relay_io_write, nullptr, true };
 
         /**
          * @brief Per-I/O context for sending data to the remote server.
          */
-        per_io_context_t io_context_send_to_remote_{ proxy_io_operation::relay_io_write, this, false };
+        per_io_context_t io_context_send_to_remote_{ proxy_io_operation::relay_io_write, nullptr, false };
 
     public:
         /**
@@ -313,8 +314,7 @@ namespace proxy
 
                 // Cancel all pending I/O before closing
                 if (CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr) == FALSE) {
-                    const auto error = GetLastError();
-                    if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
+                    if (const auto error = GetLastError(); error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
                         NETLIB_DEBUG("~tcp_proxy_socket: CancelIoEx(local_socket_) returned error: {}", error);
                     }
                 }
@@ -344,8 +344,7 @@ namespace proxy
 
                 // Cancel all pending I/O before closing
                 if (CancelIoEx(reinterpret_cast<HANDLE>(remote_socket_), nullptr) == FALSE) {
-                    const auto error = GetLastError();
-                    if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
+                    if (const auto error = GetLastError(); error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
                         NETLIB_DEBUG("~tcp_proxy_socket: CancelIoEx(remote_socket_) returned error: {}", error);
                     }
                 }
@@ -460,6 +459,24 @@ namespace proxy
         }
 
         /**
+         * @brief Initializes the per-I/O contexts with shared_ptr to this socket.
+         *
+         * Must be called after the socket is managed by a shared_ptr.
+         * Uses shared_from_this() to obtain a shared_ptr to this instance.
+         *
+         * Virtual method to allow derived classes to initialize their own I/O contexts.
+         */
+        virtual void initialize_io_contexts()
+        {
+            auto self = this->shared_from_this();
+
+            io_context_recv_from_local_.proxy_socket_ptr = self;
+            io_context_recv_from_remote_.proxy_socket_ptr = self;
+            io_context_send_to_local_.proxy_socket_ptr = self;
+            io_context_send_to_remote_.proxy_socket_ptr = self;
+        }
+
+        /**
          * @brief Associates both the local and remote sockets with a Windows I/O completion port.
          *
          * This method registers the local and remote sockets of the proxied session with the provided
@@ -475,7 +492,7 @@ namespace proxy
          * @note Both sockets must be valid (not INVALID_SOCKET) for association to succeed.
          *       If either association fails, the method returns false and the session is not fully established.
          */
-        bool associate_to_completion_port(const ULONG_PTR completion_key, winsys::io_completion_port& completion_port)
+        bool associate_to_completion_port(const ULONG_PTR completion_key, const netlib::winsys::io_completion_port& completion_port)
         {
             NETLIB_DEBUG("associate_to_completion_port: Starting association with completion key {}", completion_key);
 

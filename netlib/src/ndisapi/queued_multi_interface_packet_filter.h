@@ -546,16 +546,16 @@ namespace ndisapi
         /// This event is signaled when there are packets in the adapter queue ready to be read. It is used to
         /// synchronize the packet reading thread.
         /// </remarks>
-        winsys::safe_event packet_event_ =
-            winsys::safe_event(::CreateEvent(nullptr, TRUE, FALSE, nullptr));
+        netlib::winsys::safe_event packet_event_ =
+            netlib::winsys::safe_event(::CreateEvent(nullptr, TRUE, FALSE, nullptr));
 
         /// <summary>adapter list change event</summary>
         /// <remarks>
         /// This event is signaled when the list of network adapters changes. It triggers the adapter_event_thread_
         /// to update the list of network interfaces and their filter states.
         /// </remarks>
-        winsys::safe_event adapter_event_ =
-            winsys::safe_event(::CreateEvent(nullptr, TRUE, FALSE, nullptr));
+        netlib::winsys::safe_event adapter_event_ =
+            netlib::winsys::safe_event(::CreateEvent(nullptr, TRUE, FALSE, nullptr));
 
         /// <summary>thread to monitor adapter list change event</summary>
         /// <remarks>

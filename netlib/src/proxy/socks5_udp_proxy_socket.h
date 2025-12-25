@@ -12,15 +12,16 @@ namespace proxy
          * @brief Constructs a per-I/O context for SOCKS5 UDP proxy operations.
          *
          * @param io_operation The type of proxy I/O operation (read, write, etc).
-         * @param socket Pointer to the associated socks5_udp_proxy_socket instance.
+         * @param socket Shared pointer to the associated socks5_udp_proxy_socket instance.
          * @param is_local True if the operation is for the local socket, false for the remote socket.
          */
-        socks5_udp_per_io_context(const proxy_io_operation io_operation, socks5_udp_proxy_socket<T>* socket,
-                                  const bool is_local)
-            : WSAOVERLAPPED{0, 0, {{.Offset = 0, .OffsetHigh = 0}}, nullptr},
-              io_operation(io_operation),
-              proxy_socket_ptr(socket),
-              is_local(is_local)
+        socks5_udp_per_io_context(const proxy_io_operation io_operation,
+            std::shared_ptr<socks5_udp_proxy_socket<T>> socket,
+            const bool is_local)
+            : WSAOVERLAPPED{ 0, 0, {{.Offset = 0, .OffsetHigh = 0}}, nullptr },
+            io_operation(io_operation),
+            proxy_socket_ptr(std::move(socket)),
+            is_local(is_local)
         {
         }
 
@@ -30,14 +31,16 @@ namespace proxy
          * Optionally allocates a packet buffer of the specified size using the socket's packet pool.
          *
          * @param io_operation The type of proxy I/O operation.
-         * @param socket Pointer to the associated socks5_udp_proxy_socket instance.
+         * @param socket Shared pointer to the associated socks5_udp_proxy_socket instance.
          * @param is_local True if the operation is for the local socket, false for the remote socket.
          * @param size Optional size of the packet buffer to allocate (default: 0, no buffer).
          * @return Pointer to the allocated context, or nullptr on failure.
          */
-        static socks5_udp_per_io_context* allocate_io_context(const proxy_io_operation io_operation,
-                                                              socks5_udp_proxy_socket<T>* socket, const bool is_local,
-                                                              const uint32_t size = 0)
+        static socks5_udp_per_io_context* allocate_io_context(
+            const proxy_io_operation io_operation,
+            std::shared_ptr<socks5_udp_proxy_socket<T>> socket,
+            const bool is_local,
+            const uint32_t size = 0)
         {
             auto* context = new(std::nothrow) socks5_udp_per_io_context(io_operation, socket, is_local);
             if (!context)
@@ -79,8 +82,8 @@ namespace proxy
 
         /// The type of proxy I/O operation (read, write, etc).
         proxy_io_operation io_operation;
-        /// Pointer to the associated SOCKS5 UDP proxy socket.
-        socks5_udp_proxy_socket<T>* proxy_socket_ptr;
+        /// Shared pointer to the associated SOCKS5 UDP proxy socket.
+        std::shared_ptr<socks5_udp_proxy_socket<T>> proxy_socket_ptr;
         /// Unique pointer to the packet buffer for this I/O operation.
         std::unique_ptr<net_packet_t> wsa_buf{ nullptr };
         /// True if the operation is for the local socket, false for the remote socket.
@@ -105,7 +108,8 @@ namespace proxy
     * @tparam T Address type (e.g., IPv4 or IPv6) used for remote peer addressing.
     */
     template <net::ip_address T>
-    class socks5_udp_proxy_socket final : public netlib::log::logger<socks5_udp_proxy_socket<T>>
+    class socks5_udp_proxy_socket final : public netlib::log::logger<socks5_udp_proxy_socket<T>>,
+        public std::enable_shared_from_this<socks5_udp_proxy_socket<T>>
     {
     public:
         /**
@@ -196,8 +200,9 @@ namespace proxy
 
         /// <summary>
         /// Per-I/O context for receiving data from the remote UDP socket.
+        /// Initialized with nullptr, set later via initialize_io_contexts().
         /// </summary>
-        per_io_context_t io_context_recv_from_remote_{ proxy_io_operation::relay_io_read, this, false };
+        per_io_context_t io_context_recv_from_remote_{ proxy_io_operation::relay_io_read, nullptr, false };
 
     public:
         /**
@@ -238,6 +243,18 @@ namespace proxy
         }
 
         /**
+         * @brief Initializes the per-I/O contexts with shared_ptr to this socket.
+         *
+         * Must be called after the socket is managed by a shared_ptr.
+         * Uses shared_from_this() to obtain a shared_ptr to this instance.
+         */
+        void initialize_io_contexts()
+        {
+            auto self = this->shared_from_this();
+            io_context_recv_from_remote_.proxy_socket_ptr = self;
+        }
+
+        /**
          * @brief Destructor. Cleans up sockets and releases resources.
          *
          * Explicitly cancels all pending I/O operations on the sockets before closing them.
@@ -255,7 +272,7 @@ namespace proxy
                 closesocket(remote_socket_);
                 remote_socket_ = INVALID_SOCKET;
             }
-            
+
             if (socks_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
             {
                 // Cancel all pending I/O operations on the SOCKS TCP socket before closing
@@ -383,7 +400,7 @@ namespace proxy
          * @return True if the association succeeded, false otherwise.
          */
         bool associate_to_completion_port(const ULONG_PTR completion_key,
-            winsys::io_completion_port& completion_port) const
+            netlib::winsys::io_completion_port& completion_port) const
         {
             if (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
                 return completion_port.associate_socket(remote_socket_, completion_key);
@@ -495,8 +512,9 @@ namespace proxy
 
                 NETLIB_DEBUG("process_receive_buffer_complete: Allocating I/O context for remote send operation");
 
+                // Use shared_from_this() to get shared_ptr
                 if (auto* io_context_send_to_remote = socks5_udp_per_io_context<T>::allocate_io_context(
-                    proxy_io_operation::relay_io_write, this, false); io_context_send_to_remote)
+                    proxy_io_operation::relay_io_write, this->shared_from_this(), false); io_context_send_to_remote)
                 {
                     NETLIB_DEBUG("process_receive_buffer_complete: I/O context allocated, forwarding data to remote host");
 
@@ -538,8 +556,9 @@ namespace proxy
 
                 NETLIB_DEBUG("process_receive_buffer_complete: Allocating I/O context for local send operation");
 
+                // Use shared_from_this() to get shared_ptr
                 if (auto* io_context_send_to_local = socks5_udp_per_io_context<T>::allocate_io_context(
-                    proxy_io_operation::relay_io_write, this, true, io_size);
+                    proxy_io_operation::relay_io_write, this->shared_from_this(), true, io_size);
                     io_context_send_to_local)
                 {
                     NETLIB_DEBUG("process_receive_buffer_complete: I/O context allocated, preparing data for local send");
@@ -698,7 +717,7 @@ namespace proxy
             NETLIB_DEBUG("inject_to_local: Allocating per-I/O context for local socket injection ({}:{})",
                 remote_peer_address_, remote_peer_port_);
 
-            auto context = new(std::nothrow) per_io_context_t{ type, this, true };
+            auto context = new(std::nothrow) per_io_context_t{ type, this->shared_from_this(), true };
 
             if (context == nullptr)
             {
@@ -801,7 +820,7 @@ namespace proxy
             NETLIB_DEBUG("inject_to_remote: Allocating per-I/O context for remote socket injection ({}:{})",
                 remote_peer_address_, remote_peer_port_);
 
-            auto context = new(std::nothrow) per_io_context_t{ type, this, false };
+            auto context = new(std::nothrow) per_io_context_t{ type, this->shared_from_this(), false };
 
             if (context == nullptr)
             {

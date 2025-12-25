@@ -77,8 +77,12 @@ namespace ndisapi
                                 });
                         }
 
+                        // Check terminate_ more frequently during sleep to allow faster shutdown
                         using namespace std::chrono_literals;
-                        std::this_thread::sleep_for(5s);
+                        for (int i = 0; i < 50 && !terminate_; ++i)
+                        {
+                            std::this_thread::sleep_for(100ms);
+                        }
                     }
                 });
         }
@@ -136,12 +140,22 @@ namespace ndisapi
         /**
          * @brief Destructor. Stops the cleanup thread and releases resources.
          */
-        ~socks5_udp_local_redirect()
+        ~socks5_udp_local_redirect() noexcept
         {
-            terminate_ = true;
-
-            if (cleanup_thread_.joinable())
-                cleanup_thread_.join();
+            try
+            {
+                stop();
+            }
+            catch (const std::exception& e)
+            {
+                // Log but don't throw from destructor
+                NETLIB_ERROR("Exception in ~socks5_udp_local_redirect: {}", e.what());
+            }
+            catch (...)
+            {
+                // Catch any other exceptions to prevent abort
+                NETLIB_ERROR("Unknown exception in ~socks5_udp_local_redirect");
+            }
         }
 
         /**
@@ -551,6 +565,36 @@ namespace ndisapi
             }
 
             return false;
+        }
+
+        /**
+         * @brief Stops the cleanup thread and releases resources.
+         *
+         * This method gracefully terminates the background cleanup thread by setting
+         * the termination flag and waiting for the thread to complete. It's safe to
+         * call this method multiple times - subsequent calls will have no effect if
+         * the thread has already been stopped.
+         *
+         * The method uses memory_order_release for the atomic flag to ensure proper
+         * synchronization of the termination signal with the cleanup thread's loop.
+         *
+         * @note This method blocks until the cleanup thread completes execution.
+         * @note Thread-safe: Can be called concurrently with other methods.
+         * @note Idempotent: Multiple calls are safe and have no additional effect.
+         * @note The destructor automatically calls this method, so explicit calls
+         *       are only needed if early shutdown is required.
+         *
+         * @see ~socks5_udp_local_redirect() for automatic cleanup on destruction.
+         */
+        void stop()
+        {
+            if (bool expected = false; terminate_.compare_exchange_strong(expected, true, std::memory_order_release))
+            {
+                if (cleanup_thread_.joinable())
+                {
+                    cleanup_thread_.join();
+                }
+            }
         }
     };
 }

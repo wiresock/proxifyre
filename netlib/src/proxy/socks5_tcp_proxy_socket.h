@@ -74,6 +74,26 @@ namespace proxy
         }
 
         /**
+         * @brief Initializes the per-I/O contexts with shared_ptr to this socket.
+         *
+         * Overrides the base class method to also initialize SOCKS5-specific negotiation contexts.
+         * Uses shared_from_this() to obtain a shared_ptr to the derived type.
+         */
+        void initialize_io_contexts() override
+        {
+            // Call base class to initialize relay I/O contexts
+            tcp_proxy_socket<T>::initialize_io_contexts();
+
+            // Now initialize our SOCKS5-specific negotiation contexts
+            // We need a shared_ptr to the derived type for these contexts
+            auto self = std::static_pointer_cast<socks5_tcp_proxy_socket>(
+                this->shared_from_this());
+
+            io_context_recv_negotiate_.proxy_socket_ptr = self;
+            io_context_send_negotiate_.proxy_socket_ptr = self;
+        }
+
+        /**
          * @brief Handles completion of a SOCKS5 negotiation receive operation.
          *
          * This method is invoked when a negotiation-related receive operation completes on the remote socket.
@@ -298,8 +318,8 @@ namespace proxy
          * sequence with the SOCKS5 proxy server, including method selection, credential exchange,
          * and connection establishment.
          */
-        per_io_context_t io_context_recv_negotiate_{ proxy_io_operation::negotiate_io_read, this, false };
-        per_io_context_t io_context_send_negotiate_{ proxy_io_operation::negotiate_io_write, this, false };
+        per_io_context_t io_context_recv_negotiate_{ proxy_io_operation::negotiate_io_read, nullptr, false };
+        per_io_context_t io_context_send_negotiate_{ proxy_io_operation::negotiate_io_write, nullptr, false };
 
         socks5_state current_state_{ socks5_state::pre_login };
         socks5_ident_req<2> ident_req_{};

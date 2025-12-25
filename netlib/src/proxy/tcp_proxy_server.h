@@ -65,17 +65,17 @@ namespace proxy
          * This type holds information required for session negotiation, such as credentials or
          * target addresses, and is defined by the proxy socket type T.
          */
-        using negotiate_context_t = T::negotiate_context_t;
+        using negotiate_context_t = typename T::negotiate_context_t;
 
         /**
          * @brief Type alias for the address type (e.g., IPv4 or IPv6) used by the proxy socket.
          */
-        using address_type_t = T::address_type_t;
+        using address_type_t = typename T::address_type_t;
 
         /**
          * @brief Type alias for the per-I/O context type used for managing asynchronous operations.
          */
-        using per_io_context_t = T::per_io_context_t;
+        using per_io_context_t = typename T::per_io_context_t;
 
         /**
          * @brief Type alias for the callback function used to query remote peer information.
@@ -104,7 +104,7 @@ namespace proxy
          *
          * This enables scalable, efficient handling of multiple concurrent I/O operations.
          */
-        winsys::io_completion_port& completion_port_;
+        netlib::winsys::io_completion_port& completion_port_;
 
         /**
          * @brief Callback function to query remote peer information for each new connection.
@@ -138,8 +138,11 @@ namespace proxy
 
         /**
          * @brief Vector of active proxy socket instances, one per client session.
+         *
+         * Uses shared_ptr to enable safe concurrent access from IOCP threads.
+         * The last reference may be held by a pending I/O operation.
          */
-        std::vector<std::unique_ptr<T>> proxy_sockets_;
+        std::vector<std::shared_ptr<T>> proxy_sockets_;
 
         /**
          * @brief Array of tuples tracking events, sockets, and negotiation contexts for pending connections.
@@ -193,7 +196,7 @@ namespace proxy
          *
          * @throws std::runtime_error if the server socket cannot be created or bound.
          */
-        tcp_proxy_server(const uint16_t proxy_port, winsys::io_completion_port& completion_port,
+        tcp_proxy_server(const uint16_t proxy_port, netlib::winsys::io_completion_port& completion_port,
             const std::function<query_remote_peer_t>& query_remote_peer_fn,
             const log_level log_level = log_level::error,
             std::shared_ptr<std::ostream> log_stream = nullptr)
@@ -315,7 +318,7 @@ namespace proxy
                         } guard{ active_iocp_operations_ };
 
                         // Check if server is shutting down
-                        if (end_server_)
+                        if (end_server_.load(std::memory_order_acquire))
                             return false;
 
                         auto io_context = static_cast<per_io_context_t*>(povlp);
@@ -385,9 +388,9 @@ namespace proxy
                 }
             }
 
-            proxy_server_ = std::thread(&tcp_proxy_server<T>::start_proxy_thread, this);
-            check_clients_thread_ = std::thread(&tcp_proxy_server<T>::clear_thread, this);
-            connect_to_remote_host_thread_ = std::thread(&tcp_proxy_server<T>::connect_to_remote_host_thread, this);
+            proxy_server_ = std::thread(&tcp_proxy_server::start_proxy_thread, this);
+            check_clients_thread_ = std::thread(&tcp_proxy_server::clear_thread, this);
+            connect_to_remote_host_thread_ = std::thread(&tcp_proxy_server::connect_to_remote_host_thread, this);
 
             return true;
         }
@@ -427,6 +430,12 @@ namespace proxy
             {
                 std::unique_lock lock(lock_);
                 ::WSASetEvent(std::get<0>(sock_array_events_[0]));
+            }
+
+            // Step 2.5: Unregister the IOCP handler BEFORE waiting
+            if (completion_key_ != 0) {
+                (void)completion_port_.unregister_handler(completion_key_);
+                completion_key_ = 0;
             }
 
             // Step 3: Wait for all active IOCP operations to complete
@@ -924,18 +933,28 @@ namespace proxy
 
                 if (event_index != 0)
                 {
-                    std::lock_guard<std::shared_mutex> lock(lock_);
+                    std::lock_guard lock(lock_);
 
                     WSACloseEvent(wait_events[event_index]);
 
-                    proxy_sockets_.push_back(std::make_unique<T>(
+                    // Create socket as shared_ptr
+                    auto socket = std::make_shared<T>(
                         std::get<1>(sock_array_events_[event_index]),
                         std::get<2>(sock_array_events_[event_index]),
                         std::move(std::get<3>(sock_array_events_[event_index])),
-                        logger::log_level_, logger::log_stream_));
+                        logger::log_level_, logger::log_stream_);
 
-                    proxy_sockets_.back()->associate_to_completion_port(completion_key_, completion_port_);
-                    proxy_sockets_.back()->start();
+                    // Initialize I/O contexts - calls virtual method
+                    socket->initialize_io_contexts();
+
+                    // Associate with completion port
+                    socket->associate_to_completion_port(completion_key_, completion_port_);
+
+                    // Start the socket
+                    socket->start();
+
+                    // Store in vector
+                    proxy_sockets_.push_back(std::move(socket));
 
                     sock_array_events_.erase(sock_array_events_.begin() + event_index);
                 }
