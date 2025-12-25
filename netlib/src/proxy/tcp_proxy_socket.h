@@ -47,26 +47,26 @@ namespace proxy
      * @tparam T Address type (e.g., IPv4 or IPv6).
      */
     template <net::ip_address T>
-    struct tcp_per_io_context : WSAOVERLAPPED
+    struct tcp_per_io_context : WSAOVERLAPPED  // NOLINT(clang-diagnostic-padded)
     {
         /**
          * @brief Constructs a per-I/O context for a specific operation and socket.
          * @param io_operation   The type of proxy I/O operation (e.g., read, write).
-         * @param socket         Pointer to the associated tcp_proxy_socket instance.
+         * @param socket         Shared pointer to the associated tcp_proxy_socket instance.
          * @param is_local       True if the operation is for the local socket; false for remote.
          */
-        tcp_per_io_context(const proxy_io_operation io_operation, tcp_proxy_socket<T>* socket, const bool is_local)
+        tcp_per_io_context(const proxy_io_operation io_operation, std::shared_ptr<tcp_proxy_socket<T>> socket, const bool is_local)
             : WSAOVERLAPPED{ 0, 0, {{.Offset = 0, .OffsetHigh = 0}}, nullptr },
-            io_operation(io_operation),
-            proxy_socket_ptr(socket),
-            is_local(is_local)
+              proxy_socket_ptr(std::move(socket)),
+              io_operation(io_operation),
+              is_local(is_local)
         {
         }
-
-        proxy_io_operation io_operation;      ///< The type of I/O operation (read/write/negotiate/inject).
-        tcp_proxy_socket<T>* proxy_socket_ptr;///< Pointer to the associated proxy socket.
-        WSABUF wsa_buf{ 0, nullptr };           ///< Buffer for the I/O operation.
-        bool is_local;                        ///< True if for local socket, false if for remote.
+       
+        std::shared_ptr<tcp_proxy_socket<T>> proxy_socket_ptr;     ///< Shared pointer to the associated proxy socket.
+        WSABUF wsa_buf{ 0, nullptr };                     ///< Buffer for the I/O operation. 
+        proxy_io_operation io_operation;                           ///< The type of I/O operation (read/write/negotiate/inject).
+        bool is_local;                                             ///< True if for local socket, false if for remote.
     };
 
     /**
@@ -102,7 +102,8 @@ namespace proxy
      * Not copyable, but movable.
      */
     template <net::ip_address T>
-    class tcp_proxy_socket : public netlib::log::logger<tcp_proxy_socket<T>>
+    class tcp_proxy_socket : public netlib::log::logger<tcp_proxy_socket<T>>,  // NOLINT(clang-diagnostic-padded)
+        public std::enable_shared_from_this<tcp_proxy_socket<T>>
     {
         friend tcp_proxy_server<tcp_proxy_socket>;
 
@@ -176,25 +177,11 @@ namespace proxy
         std::unique_ptr<negotiate_context_t> negotiate_ctx_;
 
         /**
-         * @brief Indicates whether Nagle's algorithm is disabled for the remote socket.
-         *
-         * When true, disables Nagle's algorithm (TCP_NODELAY) to reduce latency for small packets.
-         */
-        bool is_disable_nagle_;
-
-        /**
          * @brief Mutex for synchronizing access to I/O operations and state.
          *
          * Ensures thread-safe access to socket state and buffers.
          */
         std::mutex lock_;
-
-        /**
-         * @brief Current connection status for this proxy session.
-         *
-         * Tracks the state of the proxied connection (e.g., connected, established, completed).
-         */
-        connection_status connection_status_{ connection_status::client_connected };
 
         /**
          * @brief Buffer for data relayed from the local client to the remote server.
@@ -210,7 +197,7 @@ namespace proxy
          * @brief WSABUF structure for receiving data from the local client.
          */
         WSABUF local_recv_buf_{
-            static_cast<ULONG>(from_local_to_remote_buffer_.size()), from_local_to_remote_buffer_.data()
+            static_cast<ULONG>(send_receive_buffer_size), from_local_to_remote_buffer_.data()
         };
 
         /**
@@ -222,7 +209,7 @@ namespace proxy
          * @brief WSABUF structure for receiving data from the remote server.
          */
         WSABUF remote_recv_buf_{
-            static_cast<ULONG>(from_remote_to_local_buffer_.size()), from_remote_to_local_buffer_.data()
+            static_cast<ULONG>(send_receive_buffer_size), from_remote_to_local_buffer_.data()
         };
 
         /**
@@ -240,22 +227,36 @@ namespace proxy
         /**
          * @brief Per-I/O context for receiving data from the local client.
          */
-        per_io_context_t io_context_recv_from_local_{ proxy_io_operation::relay_io_read, this, true };
+        per_io_context_t io_context_recv_from_local_{ proxy_io_operation::relay_io_read, nullptr, true };
 
         /**
          * @brief Per-I/O context for receiving data from the remote server.
          */
-        per_io_context_t io_context_recv_from_remote_{ proxy_io_operation::relay_io_read, this, false };
+        per_io_context_t io_context_recv_from_remote_{ proxy_io_operation::relay_io_read, nullptr, false };
 
         /**
          * @brief Per-I/O context for sending data to the local client.
          */
-        per_io_context_t io_context_send_to_local_{ proxy_io_operation::relay_io_write, this, true };
+        per_io_context_t io_context_send_to_local_{ proxy_io_operation::relay_io_write, nullptr, true };
 
         /**
          * @brief Per-I/O context for sending data to the remote server.
          */
-        per_io_context_t io_context_send_to_remote_{ proxy_io_operation::relay_io_write, this, false };
+        per_io_context_t io_context_send_to_remote_{ proxy_io_operation::relay_io_write, nullptr, false };
+
+        /**
+         * @brief Indicates whether Nagle's algorithm is disabled for the remote socket.
+         *
+         * When true, disables Nagle's algorithm (TCP_NODELAY) to reduce latency for small packets.
+         */
+        bool is_disable_nagle_;
+
+        /**
+         * @brief Current connection status for this proxy session.
+         *
+         * Tracks the state of the proxied connection (e.g., connected, established, completed).
+         */
+        connection_status connection_status_{ connection_status::client_connected };
 
     public:
         /**
@@ -295,7 +296,7 @@ namespace proxy
          */
         virtual ~tcp_proxy_socket()
         {
-            std::lock_guard lock(lock_);
+            std::scoped_lock lock(lock_);
 
             NETLIB_DEBUG("~tcp_proxy_socket: Starting destructor cleanup");
 
@@ -313,8 +314,7 @@ namespace proxy
 
                 // Cancel all pending I/O before closing
                 if (CancelIoEx(reinterpret_cast<HANDLE>(local_socket_), nullptr) == FALSE) {
-                    const auto error = GetLastError();
-                    if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
+                    if (const auto error = GetLastError(); error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
                         NETLIB_DEBUG("~tcp_proxy_socket: CancelIoEx(local_socket_) returned error: {}", error);
                     }
                 }
@@ -344,8 +344,7 @@ namespace proxy
 
                 // Cancel all pending I/O before closing
                 if (CancelIoEx(reinterpret_cast<HANDLE>(remote_socket_), nullptr) == FALSE) {
-                    const auto error = GetLastError();
-                    if (error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
+                    if (const auto error = GetLastError(); error != ERROR_NOT_FOUND) {  // ERROR_NOT_FOUND means no pending operations
                         NETLIB_DEBUG("~tcp_proxy_socket: CancelIoEx(remote_socket_) returned error: {}", error);
                     }
                 }
@@ -387,76 +386,59 @@ namespace proxy
         tcp_proxy_socket& operator=(const tcp_proxy_socket& other) = delete;
 
         /**
-         * @brief Move constructor for tcp_proxy_socket.
+         * @brief Move constructor (deleted).
          *
-         * Transfers ownership of all resources and state from another tcp_proxy_socket instance to this one.
-         * This includes socket handles, negotiation context, buffers, I/O contexts, and connection state.
-         * After the move, the source object's socket handles are set to INVALID_SOCKET to prevent double closure.
+         * Moving tcp_proxy_socket instances is not safe because:
+         * - WSAOVERLAPPED structures cannot be relocated while I/O operations are pending
+         * - Per-I/O contexts contain pointers that would become invalid after a move
+         * - The class is designed to be used via shared_ptr and managed by tcp_proxy_server
          *
-         * @param other The tcp_proxy_socket instance to move from.
+         * @param other The tcp_proxy_socket instance to move from (not allowed).
          */
-        tcp_proxy_socket(tcp_proxy_socket&& other) noexcept
-            : logger(std::move(other)), // Initialize the base class
-            local_socket_(other.local_socket_),
-            remote_socket_(other.remote_socket_),
-            negotiate_ctx_(std::move(other.negotiate_ctx_)),
-            is_disable_nagle_(other.is_disable_nagle_),
-            connection_status_(other.connection_status_),
-            from_local_to_remote_buffer_(other.from_local_to_remote_buffer_),
-            from_remote_to_local_buffer_(other.from_remote_to_local_buffer_),
-            local_recv_buf_(other.local_recv_buf_),
-            local_send_buf_(other.local_send_buf_),
-            remote_recv_buf_(other.remote_recv_buf_),
-            remote_send_buf_(other.remote_send_buf_),
-            timestamp_(other.timestamp_),
-            io_context_recv_from_local_(std::move(other.io_context_recv_from_local_)),
-            io_context_recv_from_remote_(std::move(other.io_context_recv_from_remote_)),
-            io_context_send_to_local_(std::move(other.io_context_send_to_local_)),
-            io_context_send_to_remote_(std::move(other.io_context_send_to_remote_))
-        {
-            other.local_socket_ = INVALID_SOCKET;
-            other.remote_socket_ = INVALID_SOCKET;
-        }
+        tcp_proxy_socket(tcp_proxy_socket&& other) = delete;
 
         /**
-         * @brief Move assignment operator for tcp_proxy_socket.
+         * @brief Move assignment operator (deleted).
          *
-         * Transfers ownership of all resources and state from another tcp_proxy_socket instance to this one,
-         * after releasing any resources currently held by this instance. Ensures thread safety by locking
-         * both instances during the operation. After the move, the source object's socket handles are set
-         * to INVALID_SOCKET to prevent double closure.
+         * Moving tcp_proxy_socket instances is not safe because:
+         * - WSAOVERLAPPED structures cannot be relocated while I/O operations are pending
+         * - Per-I/O contexts contain pointers that would become invalid after a move
+         * - The class is designed to be used via shared_ptr and managed by tcp_proxy_server
          *
-         * @param other The tcp_proxy_socket instance to move from.
+         * @param other The tcp_proxy_socket instance to move from (not allowed).
          * @return Reference to this tcp_proxy_socket instance.
          */
-        tcp_proxy_socket& operator=(tcp_proxy_socket&& other) noexcept
+        tcp_proxy_socket& operator=(tcp_proxy_socket&& other) = delete;
+
+        /**
+         * @brief Initializes the per-I/O contexts with shared_ptr to this socket.
+         *
+         * Must be called after the socket is managed by a shared_ptr.
+         * Uses shared_from_this() to obtain a shared_ptr to this instance.
+         *
+         * Virtual method to allow derived classes to initialize their own I/O contexts.
+         */
+        virtual void initialize_io_contexts() noexcept(false)
         {
-            if (this != &other)
+            std::shared_ptr<tcp_proxy_socket<T>> self;
+
+            try
             {
-                std::scoped_lock lock(lock_, other.lock_);
-
-                logger::operator=(std::move(other)); // Assign the base class
-
-                local_socket_ = other.local_socket_;
-                other.local_socket_ = INVALID_SOCKET;
-                remote_socket_ = other.remote_socket_;
-                other.remote_socket_ = INVALID_SOCKET;
-                negotiate_ctx_ = std::move(other.negotiate_ctx_);
-                is_disable_nagle_ = other.is_disable_nagle_;
-                connection_status_ = other.connection_status_;
-                from_local_to_remote_buffer_ = other.from_local_to_remote_buffer_;
-                from_remote_to_local_buffer_ = other.from_remote_to_local_buffer_;
-                local_recv_buf_ = other.local_recv_buf_;
-                local_send_buf_ = other.local_send_buf_;
-                remote_recv_buf_ = other.remote_recv_buf_;
-                remote_send_buf_ = other.remote_send_buf_;
-                timestamp_ = other.timestamp_;
-                io_context_recv_from_local_ = std::move(other.io_context_recv_from_local_);
-                io_context_recv_from_remote_ = std::move(other.io_context_recv_from_remote_);
-                io_context_send_to_local_ = std::move(other.io_context_send_to_local_);
-                io_context_send_to_remote_ = std::move(other.io_context_send_to_remote_);
+                self = this->shared_from_this();
             }
-            return *this;
+            catch (const std::bad_weak_ptr&)
+            {
+                NETLIB_ERROR("initialize_io_contexts: shared_from_this() failed - object is not managed by shared_ptr");
+                throw; // Log error and propagate exception to caller
+            }
+
+            io_context_recv_from_local_.proxy_socket_ptr = self;
+            io_context_recv_from_remote_.proxy_socket_ptr = self;
+            io_context_send_to_local_.proxy_socket_ptr = self;
+            io_context_send_to_remote_.proxy_socket_ptr = self;
+
+            NETLIB_DEBUG("initialize_io_contexts: Successfully initialized I/O contexts (use_count: {})",
+                self.use_count());
         }
 
         /**
@@ -475,7 +457,7 @@ namespace proxy
          * @note Both sockets must be valid (not INVALID_SOCKET) for association to succeed.
          *       If either association fails, the method returns false and the session is not fully established.
          */
-        bool associate_to_completion_port(const ULONG_PTR completion_key, winsys::io_completion_port& completion_port)
+        bool associate_to_completion_port(const ULONG_PTR completion_key, const netlib::winsys::io_completion_port& completion_port)
         {
             NETLIB_DEBUG("associate_to_completion_port: Starting association with completion key {}", completion_key);
 
@@ -775,7 +757,7 @@ namespace proxy
         {
             using namespace std::chrono_literals;
 
-            std::lock_guard lock(lock_);
+            std::scoped_lock lock(lock_);
 
             NETLIB_DEBUG("is_ready_for_removal: Checking session readiness for removal");
 
@@ -990,7 +972,7 @@ namespace proxy
          */
         virtual void process_receive_negotiate_complete(const uint32_t io_size, per_io_context_t* io_context)
         {
-            std::lock_guard lock(lock_);
+            std::scoped_lock lock(lock_);
             timestamp_ = std::chrono::steady_clock::now();
         }
 
@@ -1006,7 +988,7 @@ namespace proxy
          */
         virtual void process_send_negotiate_complete(const uint32_t io_size, per_io_context_t* io_context)
         {
-            std::lock_guard lock(lock_);
+            std::scoped_lock lock(lock_);
             timestamp_ = std::chrono::steady_clock::now();
         }
 
@@ -1034,7 +1016,7 @@ namespace proxy
          */
         virtual void process_receive_buffer_complete(const uint32_t io_size, per_io_context_t* io_context)
         {
-            std::lock_guard lock(lock_);
+            std::scoped_lock lock(lock_);
 
             timestamp_ = std::chrono::steady_clock::now();
 
@@ -1305,7 +1287,7 @@ namespace proxy
          */
         virtual void process_send_buffer_complete(const uint32_t io_size, per_io_context_t* io_context)
         {
-            std::lock_guard lock(lock_);
+            std::scoped_lock lock(lock_);
 
             timestamp_ = std::chrono::steady_clock::now();
 

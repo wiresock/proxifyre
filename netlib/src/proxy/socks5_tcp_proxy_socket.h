@@ -14,7 +14,7 @@ namespace proxy
      * @tparam T Address type (e.g., IPv4 or IPv6).
      */
     template <net::ip_address T>
-    class socks5_tcp_proxy_socket final : public tcp_proxy_socket<T>
+    class socks5_tcp_proxy_socket final : public tcp_proxy_socket<T>  // NOLINT(clang-diagnostic-padded)
     {
         /**
         * @enum socks5_state
@@ -71,6 +71,40 @@ namespace proxy
             : tcp_proxy_socket<T>(local_socket, remote_socket, std::move(negotiate_ctx), log_level,
                 std::move(log_stream))
         {
+        }
+
+        /**
+         * @brief Initializes the per-I/O contexts with shared_ptr to this socket.
+         *
+         * Overrides the base class method to also initialize SOCKS5-specific negotiation contexts.
+         * Uses shared_from_this() to obtain a shared_ptr to the derived type.
+         *
+         * @throws std::runtime_error if the dynamic_pointer_cast fails, indicating type mismatch.
+         */
+        void initialize_io_contexts() override
+        {
+            // Call base class to initialize relay I/O contexts
+            tcp_proxy_socket<T>::initialize_io_contexts();
+
+            // Now initialize our SOCKS5-specific negotiation contexts
+            // Use dynamic_pointer_cast for type-safe down-casting with runtime verification
+            auto base_ptr = this->shared_from_this();
+            auto self = std::dynamic_pointer_cast<socks5_tcp_proxy_socket>(base_ptr);
+
+            if (!self)
+            {
+                // This should never happen if the class hierarchy is correct and the object
+                // was created as socks5_tcp_proxy_socket, but we check defensively
+                NETLIB_ERROR("initialize_io_contexts: dynamic_pointer_cast to socks5_tcp_proxy_socket failed - type mismatch");
+                throw std::runtime_error(
+                    "socks5_tcp_proxy_socket::initialize_io_contexts(): dynamic_pointer_cast failed. "
+                    "Object is not of type socks5_tcp_proxy_socket or RTTI is disabled.");
+            }
+
+            io_context_recv_negotiate_.proxy_socket_ptr = self;
+            io_context_send_negotiate_.proxy_socket_ptr = self;
+
+            NETLIB_DEBUG("initialize_io_contexts: SOCKS5 negotiation contexts initialized successfully");
         }
 
         /**
@@ -298,8 +332,8 @@ namespace proxy
          * sequence with the SOCKS5 proxy server, including method selection, credential exchange,
          * and connection establishment.
          */
-        per_io_context_t io_context_recv_negotiate_{ proxy_io_operation::negotiate_io_read, this, false };
-        per_io_context_t io_context_send_negotiate_{ proxy_io_operation::negotiate_io_write, this, false };
+        per_io_context_t io_context_recv_negotiate_{ proxy_io_operation::negotiate_io_read, nullptr, false };
+        per_io_context_t io_context_send_negotiate_{ proxy_io_operation::negotiate_io_write, nullptr, false };
 
         socks5_state current_state_{ socks5_state::pre_login };
         socks5_ident_req<2> ident_req_{};

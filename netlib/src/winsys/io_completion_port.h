@@ -1,108 +1,220 @@
 #pragma once
 
-namespace winsys
+namespace netlib::winsys
 {
     // --------------------------------------------------------------------------------
     /// <summary>
-    /// represents a thread pool for the derived CRTP classes
-    /// \tparam T CRTP derived class should provide start_thread and stop_thread routines
+    /// Represents a thread pool for the derived CRTP classes.
+    /// \tparam T CRTP derived class should provide start_thread() and stop_thread() routines.
+    ///
+    /// CONCURRENCY CONTRACT:
+    /// - Do NOT call start_thread_pool() and stop_thread_pool() concurrently from
+    ///   different threads. External synchronization is required for start/stop.
+    /// - Concurrent calls to start_thread_pool() are safe in the sense that only
+    ///   one caller will actually start the pool; the rest will be no-ops.
+    /// - Concurrent calls to stop_thread_pool() are safe; only the first will
+    ///   perform shutdown, subsequent calls are no-ops.
     /// </summary>
     // --------------------------------------------------------------------------------
     template <typename T>
-    class thread_pool
+    class thread_pool  // NOLINT(clang-diagnostic-padded)
     {
+        friend T; // Allow derived class to access private members
+
         /// <summary>working threads container</summary>
         std::vector<std::thread> threads_;
 
     protected:
-        /// <summary>thread pool termination flag</summary>
-        std::atomic_bool active_{false};
         /// <summary>number of concurrent threads in the pool</summary>
-        uint32_t concurrent_threads_;
+        size_t concurrent_threads_;
+        /// <summary>thread pool termination flag</summary>
+        std::atomic_bool active_{ false };
+
+    private:
+        // ********************************************************************************
+        /// <summary>
+        /// Initializes thread_pool with specified number of concurrent threads.
+        /// </summary>
+        /// <param name="concurrent_threads">Number of concurrent threads in the pool
+        /// (0 means std::thread::hardware_concurrency()).</param>
+        // ********************************************************************************
+        explicit thread_pool(const size_t concurrent_threads = 0) noexcept
+            : concurrent_threads_{ (concurrent_threads == 0)
+                                       ? std::thread::hardware_concurrency()
+                                       : concurrent_threads }
+        {
+        }
 
     public:
-        thread_pool(const thread_pool& other) = delete;
+        // Delete copy and move operations (moving a pool whose threads capture `this` is unsafe)
+        thread_pool(const thread_pool&) = delete;  // NOLINT(bugprone-crtp-constructor-accessibility)
+        thread_pool& operator=(const thread_pool&) = delete;
+        thread_pool(thread_pool&&) = delete;  // NOLINT(bugprone-crtp-constructor-accessibility)
+        thread_pool& operator=(thread_pool&&) = delete;
 
-        thread_pool(thread_pool&& other) noexcept
-            : threads_(std::move(other.threads_)),
-              active_(other.active_.load()),
-              concurrent_threads_(other.concurrent_threads_)
+        ~thread_pool()
         {
-        }
-
-        thread_pool& operator=(const thread_pool& other) = delete;
-
-        thread_pool& operator=(thread_pool&& other) noexcept
-        {
-            if (this == &other)
-                return *this;
-            threads_ = std::move(other.threads_);
-            active_ = other.active_.load();
-            concurrent_threads_ = other.concurrent_threads_;
-            return *this;
-        }
-
-        ~thread_pool() = default;
-
-        // ********************************************************************************
-        /// <summary>
-        /// initializes thread_pool with specified number of concurrent threads
-        /// </summary>
-        /// <param name="concurrent_threads">number of concurrent threads in the pool</param>
-        /// <returns></returns>
-        // ********************************************************************************
-        explicit thread_pool(const uint32_t concurrent_threads = 0) noexcept:
-            concurrent_threads_{(concurrent_threads == 0) ? std::thread::hardware_concurrency() : concurrent_threads}
-        {
-        }
-
-        // ********************************************************************************
-        /// <summary>
-        /// starts threads in the pool if not already started
-        /// </summary>
-        // ********************************************************************************
-        void start_thread_pool()
-        {
-            if (active_ == true)
-                return;
-
-            active_ = true;
-
-            // Create twice as many threads as may run concurrently
-            for (size_t i = 0; i < concurrent_threads_ * 2; ++i)
+            // RAII: best-effort stop; swallow any exceptions, but log in debug.
+            if (active_.load(std::memory_order_acquire))
             {
-                threads_.push_back(std::thread(&T::start_thread, static_cast<T*>(this)));
+                try
+                {
+                    // See concurrency contract in class documentation:
+                    // this destructor must not race with external start/stop.
+                    stop_thread_pool();
+                }
+                catch (const std::exception& e)
+                {
+                    try
+                    {
+                        OutputDebugStringA(std::format("thread_pool: exception during stop_thread_pool in destructor: {}\n", e.what()).c_str());
+                    }
+                    catch (...)
+                    {
+                        OutputDebugStringA("thread_pool: exception during stop_thread_pool in destructor (format failed)\n");
+                    }
+                }
+                catch (...)
+                {
+                    OutputDebugStringA("thread_pool: unknown exception during stop_thread_pool in destructor\n");
+                }
             }
         }
 
         // ********************************************************************************
         /// <summary>
-        /// stops threads in the pool using CRTP derived class stop_thread method
+        /// Starts threads in the pool if not already started.
+        ///
+        /// NOTE: This function must not be called concurrently with stop_thread_pool()
+        /// from different threads. External synchronization is required for start/stop.
+        /// </summary>
+        /// <exception cref="std::system_error">Thrown if thread creation fails.
+        /// On failure, state is rolled back to allow retry.</exception>
+        // ********************************************************************************
+        void start_thread_pool()
+        {
+            // Only one caller wins the transition false -> true
+            // Use acq_rel for consistency with stop_thread_pool:
+            // - acquire: see any prior state from a previous stop
+            // - release: publish our start to other threads
+            if (bool expected = false; !active_.compare_exchange_strong(
+                expected, true,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire))
+            {
+                return; // already started
+            }
+
+            // Reserve space to avoid reallocations during push_back
+            threads_.reserve(concurrent_threads_ * 2);
+
+            // Create twice as many threads as may run concurrently
+            // (beneficial for I/O-bound work where threads frequently block)
+            const auto worker_count = concurrent_threads_ * 2;
+
+            try
+            {
+                for (size_t i = 0; i < worker_count; ++i)
+                {
+                    threads_.emplace_back(&T::start_thread, static_cast<T*>(this));
+                }
+            }
+            catch (...)
+            {
+                // Thread creation failed - roll back to consistent state
+                // Signal threads to stop via the active flag
+                // Use release to ensure threads see consistent state before checking active_
+                active_.store(false, std::memory_order_release);
+
+                // Wake up any threads that may be blocked waiting for work
+                // (mirrors stop_thread_pool() behavior to avoid deadlock on join)
+                const auto created_count = threads_.size();
+                for (size_t i = 0; i < created_count; ++i)
+                {
+                    static_cast<T*>(this)->stop_thread();
+                }
+
+                // Join any threads that were successfully created
+                for (auto& thread : threads_)
+                {
+                    if (thread.joinable())
+                        thread.join();
+                }
+
+                // Clear the partial thread list
+                threads_.clear();
+
+                // Rethrow to inform caller of failure
+                throw;
+            }
+        }
+
+        // ********************************************************************************
+        /// <summary>
+        /// Stops threads in the pool using CRTP derived class stop_thread() method.
+        ///
+        /// NOTE: This function must not be called concurrently with start_thread_pool()
+        /// from different threads. External synchronization is required for start/stop.
         /// </summary>
         // ********************************************************************************
         void stop_thread_pool()
         {
-            if (active_ == false)
+            // Only first caller that sees true does the stop work
+            if (!active_.exchange(false, std::memory_order_acq_rel))
                 return;
 
-            active_ = false;
+            const auto thread_count = threads_.size();
 
-            for (size_t i = 0; i < threads_.size(); ++i)
+            // Signal each thread individually to ensure all threads are woken
+            for (size_t i = 0; i < thread_count; ++i)
             {
                 static_cast<T&>(*this).stop_thread();
             }
 
-            for (auto&& thread : threads_)
+            // Wait for all threads to complete
+            for (auto& thread : threads_)
             {
                 if (thread.joinable())
                     thread.join();
             }
+
+            // Clear the thread vector after all joined
+            threads_.clear();
+        }
+
+        // ********************************************************************************
+        /// <summary>
+        /// Returns the number of concurrent threads in the pool.
+        /// </summary>
+        // ********************************************************************************
+        [[nodiscard]] size_t get_concurrent_threads() const noexcept
+        {
+            return concurrent_threads_;
+        }
+
+        // ********************************************************************************
+        /// <summary>
+        /// Returns the total number of worker threads (typically 2x concurrent).
+        /// </summary>
+        // ********************************************************************************
+        [[nodiscard]] size_t get_worker_threads() const noexcept
+        {
+            return concurrent_threads_ * 2;
         }
     };
 
     // --------------------------------------------------------------------------------
     /// <summary>
-    /// Windows I/O completion port wrapper with internal thread pool
+    /// Windows I/O completion port wrapper with internal thread pool.
+    ///
+    /// CONCURRENCY CONTRACT:
+    /// - Follows the same start/stop constraints as thread_pool (see thread_pool docs).
+    /// - Handler registration/unregistration is thread-safe.
+    ///
+    /// USAGE NOTES:
+    /// - After construction, callers should check valid() to ensure IOCP was created successfully.
+    /// - On 32-bit systems, completion keys may theoretically wrap around after ~4 billion associations.
+    ///   For long-running services, consider monitoring handler count and restarting if needed.
     /// </summary>
     // --------------------------------------------------------------------------------
     class io_completion_port final : public safe_object_handle, public thread_pool<io_completion_port>
@@ -116,217 +228,358 @@ namespace winsys
     public:
         // ********************************************************************************
         /// <summary>
-        /// type of completion key callback
+        /// Type of completion key callback.
+        /// Signature: bool(DWORD num_bytes, OVERLAPPED* overlapped, BOOL ok).
         /// </summary>
-        /// <param name="DWORD"></param>
-        /// <param name="OVERLAPPED*"></param>
-        /// <returns>boolean status of operation</returns>
         // ********************************************************************************
         using callback_t = bool(DWORD, OVERLAPPED*, BOOL);
 
         io_completion_port(const io_completion_port& other) = delete;
-
-        io_completion_port(io_completion_port&& other) noexcept // NOLINT(bugprone-exception-escape)
-            : safe_object_handle(std::move(static_cast<safe_object_handle&>(other))),
-              thread_pool<io_completion_port>(std::move(static_cast<thread_pool<io_completion_port>&>(other)))
-
-        {
-            write_lock rhs_lk(other.handlers_lock_);
-            handlers_ = std::move(other.handlers_);
-            handlers_keys_ = std::move(other.handlers_keys_);
-        }
-
         io_completion_port& operator=(const io_completion_port& other) = delete;
 
-        io_completion_port& operator=(io_completion_port&& other) noexcept // NOLINT(bugprone-exception-escape)
-        {
-            if (this == &other)
-                return *this;
-
-            write_lock lhs_lk(handlers_lock_, std::defer_lock);
-            write_lock rhs_lk(other.handlers_lock_, std::defer_lock);
-            std::lock(lhs_lk, rhs_lk);
-
-            safe_object_handle::operator =(std::move(static_cast<safe_object_handle&>(other)));
-            thread_pool<io_completion_port>::operator
-                =(std::move(static_cast<thread_pool<io_completion_port>&>(other)));
-            handlers_ = std::move(other.handlers_);
-            handlers_keys_ = std::move(other.handlers_keys_);
-            return *this;
-        }
+        // Moving a live IOCP with a thread pool that captures `this` is dangerous; forbid it
+        io_completion_port(io_completion_port&&) = delete;
+        io_completion_port& operator=(io_completion_port&&) = delete;
 
     private:
         /// <summary>synchronization lock for handlers below (accessed concurrently)</summary>
-        mutex_type handlers_lock_;
-        /// <summary>callback handlers storage</summary>
-        std::vector<std::unique_ptr<std::function<callback_t>>> handlers_;
-        /// <summary>callback keys (convertible to pointers in the storage above)</summary>
-        std::set<ULONG_PTR> handlers_keys_;
+        mutable mutex_type handlers_lock_;
+
+        /// <summary>callback handlers storage keyed by IOCP completion key</summary>
+        std::unordered_map<ULONG_PTR, std::function<callback_t>> handlers_;
+
+        /// <summary>monotonically increasing key generator (0 reserved for internal wake-up)</summary>
+        std::atomic<ULONG_PTR> next_key_{ 1 };
+
+        /// <summary>timeout for GetQueuedCompletionStatus (allows responsive shutdown)</summary>
+        static constexpr DWORD shutdown_timeout_ms = 100;
 
         // ********************************************************************************
         /// <summary>
-        /// working thread routine (calls stored functions by the I/O completion key)
+        /// Working thread routine (calls stored functions by the I/O completion key).
         /// </summary>
         // ********************************************************************************
         void start_thread() const
         {
-            DWORD num_bytes;
-            ULONG_PTR completion_key;
-            OVERLAPPED* overlapped_ptr;
-
-            do
+            while (active_.load(std::memory_order_acquire))
             {
+                DWORD       num_bytes = 0;
+                ULONG_PTR   completion_key = 0;
+                OVERLAPPED* overlapped_ptr = nullptr;
+
                 const auto ok =
-                    GetQueuedCompletionStatus(get(), &num_bytes, &completion_key, &overlapped_ptr, INFINITE);
+                    GetQueuedCompletionStatus(get(), &num_bytes, &completion_key, &overlapped_ptr, shutdown_timeout_ms);
 
-                if (!active_)
-                    return;
+                // Check after the wait as well, to exit promptly once stopped
+                if (!active_.load(std::memory_order_acquire))
+                    break;
 
-                if (completion_key)
+                if (!ok)
                 {
-                    if (const auto* const handler = reinterpret_cast<std::function<callback_t>*>(completion_key); *
-                        handler) // NOLINT(performance-no-int-to-ptr)
+                    const auto err = GetLastError();
+
+                    // Genuine timeout: no completion to dispatch
+                    if (err == WAIT_TIMEOUT &&
+                        overlapped_ptr == nullptr &&
+                        completion_key == 0 &&
+                        num_bytes == 0)
                     {
-                        (*handler)(num_bytes, overlapped_ptr, ok);
+                        continue;
+                    }
+
+                    // Non-timeout error with no overlapped -> IOCP issue, can't dispatch
+                    if (overlapped_ptr == nullptr)
+                    {
+#ifdef _DEBUG
+                        try
+                        {
+                            OutputDebugStringA(std::format("GetQueuedCompletionStatus failed: {}\n", err).c_str());
+                        }
+                        catch (...)
+                        {
+                            OutputDebugStringA("GetQueuedCompletionStatus failed (format error)\n");
+                        }
+#endif
+                        continue;
+                    }
+
+                    // Otherwise (overlapped_ptr != nullptr), fall through and dispatch
+                    // with ok == FALSE so handler can inspect GetLastError() if needed.
+                }
+
+                // Key == 0 is used as a wake-up / stop signal; do not dispatch a handler
+                if (completion_key == 0)
+                    continue;
+
+                std::function<callback_t> handler;
+
+                {
+                    read_lock lock(handlers_lock_);
+                    const auto it = handlers_.find(completion_key);
+                    if (it != handlers_.end())
+                    {
+                        // Copy handler under lock to use it safely outside
+                        handler = it->second;
                     }
                 }
+
+                if (handler)
+                {
+                    try
+                    {
+                        handler(num_bytes, overlapped_ptr, ok);
+                    }
+                    catch (const std::exception& e)
+                    {
+#ifdef _DEBUG
+                        try
+                        {
+                            OutputDebugStringA(std::format("IOCP handler exception: {}\n", e.what()).c_str());
+                        }
+                        catch (...)
+                        {
+                            OutputDebugStringA("IOCP handler exception (format failed)\n");
+                        }
+#endif
+                    }
+                    catch (...)
+                    {
+#ifdef _DEBUG
+                        OutputDebugStringA("IOCP handler threw unknown exception\n");
+#endif
+                    }
+                }
+                // else: handler was unregistered; ignore
             }
-            while (active_);
         }
 
         // ********************************************************************************
         /// <summary>
-        /// signals threads in the thread pool to check for exit
+        /// Signals threads in the thread pool to check for exit.
         /// </summary>
         // ********************************************************************************
         void stop_thread() const noexcept
         {
             OVERLAPPED overlapped{};
-            PostQueuedCompletionStatus(get(), 0, 0, &overlapped);
+            // Post a completion with key == 0 to wake one worker
+            // Failure is logged but doesn't throw - shutdown continues best-effort
+            if (!PostQueuedCompletionStatus(get(), 0, 0, &overlapped))
+            {
+#ifdef _DEBUG
+                try
+                {
+                    OutputDebugStringA(std::format("PostQueuedCompletionStatus failed in stop_thread: {}\n", GetLastError()).c_str());
+                }
+                catch (...)
+                {
+                    OutputDebugStringA("PostQueuedCompletionStatus failed in stop_thread (format error)\n");
+                }
+#endif
+            }
         }
 
     public:
         // ********************************************************************************
         /// <summary>
-        /// constructs io_completion_port object from the existing HANDLE
+        /// Constructs io_completion_port object from the existing HANDLE.
         /// </summary>
-        /// <param name="handle">existing I/O completion port handle</param>
-        /// <param name="concurrent_threads">number of concurrent threads for I/O completion port (zero means as many threads as cores)</param>
-        /// <returns></returns>
+        /// <param name="handle">Existing I/O completion port handle.</param>
+        /// <param name="concurrent_threads">Number of concurrent threads
+        /// (0 means std::thread::hardware_concurrency()).</param>
+        ///
+        /// NOTE: Callers should check valid() after construction to ensure handle is valid.
         // ********************************************************************************
-        explicit io_completion_port(HANDLE handle, const uint32_t concurrent_threads = 0) :
-            safe_object_handle(handle),
-            thread_pool<io_completion_port>(concurrent_threads)
+        explicit io_completion_port(const HANDLE handle, const size_t concurrent_threads = 0)
+            : safe_object_handle(handle)
+            , thread_pool(concurrent_threads)
         {
         }
 
         // ********************************************************************************
         /// <summary>
-        /// constructs a new I/O completion port
+        /// Constructs a new I/O completion port.
         /// </summary>
-        /// <param name="concurrent_threads">number of concurrent threads for I/O completion port</param>
-        /// <returns></returns>
+        /// <param name="concurrent_threads">Number of concurrent threads for I/O completion port.</param>
+        ///
+        /// NOTE: Callers MUST check valid() after construction to ensure the IOCP was created successfully.
+        ///       If CreateIoCompletionPort fails, the object will be constructed with an invalid handle.
         // ********************************************************************************
-        explicit io_completion_port(const uint32_t concurrent_threads = 0):
-            io_completion_port(
+        explicit io_completion_port(const size_t concurrent_threads = 0)
+            : io_completion_port(
                 CreateIoCompletionPort(
                     INVALID_HANDLE_VALUE,
                     nullptr,
                     0,
                     static_cast<DWORD>(concurrent_threads)),
-                concurrent_threads
-            )
+                concurrent_threads)
         {
         }
 
         // ********************************************************************************
         /// <summary>
-        /// destructor terminates the internal thread pool
+        /// Destructor terminates the internal thread pool and cleans up handlers.
         /// </summary>
-        /// <returns></returns>
         // ********************************************************************************
         ~io_completion_port()
         {
-            if (active_ == false)
-                return;
-
-            try
+            if (active_.load(std::memory_order_acquire))
             {
-                stop_thread_pool();
+                try
+                {
+                    stop_thread_pool();
+                }
+                catch (const std::exception& e)
+                {
+                    try
+                    {
+                        OutputDebugStringA(std::format("~io_completion_port: exception during cleanup: {}\n", e.what()).c_str());
+                    }
+                    catch (...)
+                    {
+                        OutputDebugStringA("~io_completion_port: exception during cleanup (format failed)\n");
+                    }
+                }
+                catch (...)
+                {
+                    OutputDebugStringA("~io_completion_port: unknown exception during cleanup\n");
+                }
             }
-            catch (...)
+
+            // Clear handlers after threads are stopped to prevent resource leaks
             {
+                write_lock lock(handlers_lock_);
+                handlers_.clear();
             }
         }
 
         // ********************************************************************************
         /// <summary>
-        /// returns number of concurrent threads for I/O completion port
+        /// Returns number of concurrent threads for I/O completion port.
         /// </summary>
-        /// <returns>number of concurrent threads for I/O completion port</returns>
         // ********************************************************************************
-        uint32_t get_concurrent_threads_num() const noexcept { return concurrent_threads_; }
-
-        // ********************************************************************************
-        /// <summary>
-        /// returns number of concurrent threads in the internal thread pool
-        /// </summary>
-        /// <returns>number of concurrent threads in the internal thread pool</returns>
-        // ********************************************************************************
-        uint32_t get_working_threads_num() const noexcept { return concurrent_threads_ * 2; }
-
-        // ********************************************************************************
-        /// <summary>
-        /// associates the device with I/O completion port
-        /// </summary>
-        /// <param name="file_object">device file object</param>
-        /// <param name="io_handler">callback handler for the device associated I/O</param>
-        /// <returns>pair of status of the operation and associated I/O completion port key value</returns>
-        // ********************************************************************************
-        std::pair<bool, ULONG_PTR> associate_device(HANDLE file_object, const std::function<callback_t>& io_handler)
+        [[nodiscard]] size_t get_concurrent_threads_num() const noexcept
         {
-            // handler can't be null
+            return get_concurrent_threads();
+        }
+
+        // ********************************************************************************
+        /// <summary>
+        /// Returns number of worker threads in the internal thread pool.
+        /// </summary>
+        // ********************************************************************************
+        [[nodiscard]] size_t get_working_threads_num() const noexcept
+        {
+            return get_worker_threads();
+        }
+
+        // ********************************************************************************
+        /// <summary>
+        /// Associates the device with I/O completion port.
+        /// </summary>
+        /// <param name="file_object">Device file object.</param>
+        /// <param name="io_handler">Callback handler for the device-associated I/O.</param>
+        /// <returns>Pair of status of the operation and associated I/O completion port key value.</returns>
+        ///
+        /// THREAD SAFETY:
+        /// - This method is thread-safe with respect to other associate/unregister calls.
+        /// - Key generation and handler insertion are performed atomically under a single
+        ///   write lock to prevent TOCTOU race conditions.
+        /// - The handler is stored BEFORE device association to prevent race conditions
+        ///   where a completion arrives before the handler is registered.
+        /// - If association fails, the handler is automatically cleaned up. This cleanup
+        ///   is safe because no I/O completions can be queued for a device that was never
+        ///   successfully associated with the IOCP.
+        ///
+        /// CALLER REQUIREMENTS:
+        /// - Do not post overlapped I/O operations on file_object until this method returns
+        ///   successfully. Posting I/O before association is undefined behavior.
+        /// - The returned key must be used consistently for the lifetime of the association.
+        // ********************************************************************************
+        [[nodiscard]] std::pair<bool, ULONG_PTR> associate_device(
+            const HANDLE file_object,
+            const std::function<callback_t>& io_handler)
+        {
+            // Handler can't be null
             if (!io_handler)
-                return std::make_pair(false, 0);
+                return { false, 0 };
 
-            // Create storage for the callback and use pointer to that storage as an I/O completion port key
-            auto handler_ptr = std::make_unique<std::function<callback_t>>(io_handler);
-            auto handler_key = reinterpret_cast<ULONG_PTR>(handler_ptr.get());
+            // Validate file object
+            if (file_object == nullptr || file_object == INVALID_HANDLE_VALUE)
+                return { false, 0 };
 
-            const auto h = CreateIoCompletionPort(file_object, get(), handler_key, 0);
+            ULONG_PTR handler_key = 0;
 
-            if (h == get())
+            // Generate unique key AND insert handler atomically under single write lock.
+            // This eliminates the TOCTOU race between key generation and insertion.
             {
+                write_lock lock(handlers_lock_);
+
+                constexpr size_t max_attempts = 1000;
+
+                for (size_t attempts = 0; attempts < max_attempts; ++attempts)
                 {
-                    // Store the key and pointer for the handler
-                    std::lock_guard lock(handlers_lock_);
-                    handlers_keys_.insert(handler_key);
-                    handlers_.push_back(std::move(handler_ptr));
+                    const ULONG_PTR candidate_key = next_key_.fetch_add(1, std::memory_order_relaxed);
+
+                    // Skip reserved key 0
+                    if (candidate_key == 0)
+                        continue;
+
+                    // Check for collision and insert atomically
+                    if (!handlers_.contains(candidate_key))
+                    {
+                        handlers_.emplace(candidate_key, io_handler);
+                        handler_key = candidate_key;
+                        break;
+                    }
                 }
 
-                return std::make_pair(true, handler_key);
+                if (handler_key == 0)
+                {
+                    throw std::runtime_error(
+                        "io_completion_port: unable to generate unique key after " +
+                        std::to_string(max_attempts) + " attempts");
+                }
             }
-            return std::make_pair(false, 0);
+
+            // Associate the device with the IOCP
+            if (const auto h = CreateIoCompletionPort(file_object, get(), handler_key, 0);
+                h == get())
+            {
+                return { true, handler_key };
+            }
+
+            // Association failed - cleanup is safe because CreateIoCompletionPort failed,
+            // meaning no I/O completions can ever be queued for this handler_key.
+            {
+                write_lock lock(handlers_lock_);
+                handlers_.erase(handler_key);
+            }
+
+            return { false, 0 };
         }
 
         // ********************************************************************************
         /// <summary>
-        /// associates the device with I/O completion port for the existing key (and thus for the existing stored callback handler)
+        /// Associates the device with I/O completion port for the existing key
+        /// (and thus for the existing stored callback handler).
         /// </summary>
-        /// <param name="file_object">device file object</param>
-        /// <param name="key">I/O completion port key value</param>
-        /// <returns>boolean status of the operation</returns>
+        /// <param name="file_object">Device file object.</param>
+        /// <param name="key">I/O completion port key value.</param>
+        /// <returns>Boolean status of the operation.</returns>
         // ********************************************************************************
-        bool associate_device(HANDLE file_object, const ULONG_PTR key)
+        [[nodiscard]] bool associate_device(const HANDLE file_object, const ULONG_PTR key) const
         {
-            std::shared_lock lock(handlers_lock_);
-
-            if (const auto it = handlers_keys_.find(key); it != handlers_keys_.end())
+            // Only associate if we know about this key
             {
-                if (const auto h = CreateIoCompletionPort(file_object, get(), key, 0); h == get())
-                {
-                    return true;
-                }
+                read_lock lock(handlers_lock_);
+                if (!handlers_.contains(key))
+                    return false;
+            }
+
+            if (const auto h = CreateIoCompletionPort(file_object, get(), key, 0);
+                h == get())
+            {
+                return true;
             }
 
             return false;
@@ -334,28 +587,64 @@ namespace winsys
 
         // ********************************************************************************
         /// <summary>
-        /// associates the socket with I/O completion port
+        /// Associates the socket with I/O completion port.
         /// </summary>
-        /// <param name="socket">socket to associate</param>
-        /// <param name="io_handler">callback handler to process socket I/O operation</param>
-        /// <returns>pair of status of the operation and associated I/O completion port key value</returns>
+        /// <param name="socket">Socket to associate.</param>
+        /// <param name="io_handler">Callback handler to process socket I/O operation.</param>
+        /// <returns>Pair of status of the operation and associated I/O completion port key value.</returns>
         // ********************************************************************************
-        std::pair<bool, ULONG_PTR> associate_socket(const SOCKET socket, const std::function<callback_t>& io_handler)
+        [[nodiscard]] std::pair<bool, ULONG_PTR> associate_socket(
+            const SOCKET socket,
+            const std::function<callback_t>& io_handler)
         {
             return associate_device(reinterpret_cast<HANDLE>(socket), io_handler); // NOLINT(performance-no-int-to-ptr)
         }
 
         // ********************************************************************************
         /// <summary>
-        /// associates the socket with I/O completion port with the existing key (and thus stored callback)
+        /// Associates the socket with I/O completion port with the existing key
+        /// (and thus stored callback).
         /// </summary>
-        /// <param name="socket">socket to associate</param>
-        /// <param name="key">key I/O completion port key value</param>
-        /// <returns>boolean status of the operation</returns>
+        /// <param name="socket">Socket to associate.</param>
+        /// <param name="key">I/O completion port key value.</param>
+        /// <returns>Boolean status of the operation.</returns>
         // ********************************************************************************
-        bool associate_socket(const SOCKET socket, const ULONG_PTR key)
+        [[nodiscard]] bool associate_socket(const SOCKET socket, const ULONG_PTR key) const
         {
             return associate_device(reinterpret_cast<HANDLE>(socket), key); // NOLINT(performance-no-int-to-ptr)
+        }
+
+        // ********************************************************************************
+        /// <summary>
+        /// Unregisters a handler associated with the given completion key.
+        /// This prevents future IOCP completions from invoking the handler.
+        /// In-flight callbacks may still run once if they already copied the handler.
+        /// </summary>
+        /// <param name="key">I/O completion port key value to unregister.</param>
+        /// <returns>true if the handler was found and removed, false otherwise.</returns>
+        // ********************************************************************************
+        [[nodiscard]] bool unregister_handler(const ULONG_PTR key)
+        {
+            write_lock lock(handlers_lock_);
+            const auto it = handlers_.find(key);
+            if (it == handlers_.end())
+                return false;
+
+            handlers_.erase(it);
+            return true;
+        }
+
+        // ********************************************************************************
+        /// <summary>
+        /// Checks if a handler is currently registered for the given key.
+        /// </summary>
+        /// <param name="key">I/O completion port key value to check.</param>
+        /// <returns>true if the handler is registered and active, false otherwise.</returns>
+        // ********************************************************************************
+        [[nodiscard]] bool is_handler_registered(const ULONG_PTR key) const
+        {
+            read_lock lock(handlers_lock_);
+            return handlers_.contains(key);
         }
     };
 }
