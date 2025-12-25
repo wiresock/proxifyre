@@ -119,8 +119,16 @@ namespace netlib::winsys
             catch (...)
             {
                 // Thread creation failed - roll back to consistent state
-                // Signal existing threads to stop
+                // Signal threads to stop via the active flag
                 active_.store(false, std::memory_order_release);
+
+                // Wake up any threads that may be blocked waiting for work
+                // (mirrors stop_thread_pool() behavior to avoid deadlock on join)
+                const auto created_count = threads_.size();
+                for (size_t i = 0; i < created_count; ++i)
+                {
+                    static_cast<T*>(this)->stop_thread();
+                }
 
                 // Join any threads that were successfully created
                 for (auto& thread : threads_)
@@ -258,9 +266,9 @@ namespace netlib::winsys
         [[nodiscard]] ULONG_PTR generate_unique_key()
         {
             // Track iterations to detect full key space exhaustion
-            size_t attempts = 0;
+            constexpr size_t max_attempts = 1000;
 
-            do
+            for (size_t attempts = 0; attempts < max_attempts; ++attempts)
             {
                 ULONG_PTR key = next_key_.fetch_add(1, std::memory_order_relaxed);
 
@@ -276,15 +284,13 @@ namespace netlib::winsys
                 }
 
                 // Key collision detected - try next key
-                if (constexpr size_t max_attempts = 1000; ++attempts >= max_attempts)
-                {
-                    // If we've tried many times and keep hitting collisions,
-                    // the key space may be nearly exhausted
-                    throw std::runtime_error(
-                        "io_completion_port: unable to generate unique key after " +
-                        std::to_string(max_attempts) + " attempts");
-                }
-            } while (true);
+            }
+
+            // If we've tried many times and keep hitting collisions,
+            // the key space may be nearly exhausted
+            throw std::runtime_error(
+                "io_completion_port: unable to generate unique key after " +
+                std::to_string(max_attempts) + " attempts");
         }
 
         // ********************************************************************************

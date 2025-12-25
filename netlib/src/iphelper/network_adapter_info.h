@@ -926,6 +926,7 @@ namespace iphelper
             net_row->IsRouter = TRUE;
             net_row->IsUnreachable = TRUE;
 
+            // Clear previous error state so GetLastError() reflects only this operation's result
             SetLastError(ERROR_SUCCESS);
 
             if (const auto error_code = CreateIpNetEntry2(net_row.get());

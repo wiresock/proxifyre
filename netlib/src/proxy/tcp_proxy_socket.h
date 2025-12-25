@@ -466,7 +466,7 @@ namespace proxy
          *
          * Virtual method to allow derived classes to initialize their own I/O contexts.
          */
-        virtual void initialize_io_contexts()
+        virtual void initialize_io_contexts() noexcept(false)
         {
             std::shared_ptr<tcp_proxy_socket<T>> self;
 

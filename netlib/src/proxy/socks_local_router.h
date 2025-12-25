@@ -518,8 +518,9 @@ namespace proxy
             }
 
             // Step 5: Stop the IOCP thread pool
-            // At this point, all handlers have been unregistered, so no new
-            // completions will invoke callbacks that access destroyed objects
+            // At this point, all handlers registered by the proxy servers have been
+            // unregistered by their respective stop() methods, so no new completions
+            // will invoke callbacks that access destroyed objects.
             NETLIB_DEBUG("Stopping IOCP thread pool");
             io_port_.stop_thread_pool();
 

@@ -124,23 +124,31 @@ namespace netlib::winsys
         /// <returns>WAIT_OBJECT_0 if signaled, WAIT_TIMEOUT if timeout, WAIT_FAILED on error</returns>
         [[nodiscard]] DWORD wait(const std::chrono::milliseconds timeout) const noexcept
         {
-            if (!valid()) {
+            if (!valid())
+            {
                 return WAIT_FAILED;
             }
 
-            // Use uint64_t to avoid any signed/unsigned comparison issues
-            constexpr auto max_dword = static_cast<std::uint64_t>(std::numeric_limits<DWORD>::max());
             const auto count = timeout.count();
 
             // Non-positive timeout becomes immediate poll
             if (count <= 0)
+            {
                 return WaitForSingleObject(get(), 0);
+            }
 
-            // Large timeout becomes infinite wait (INFINITE == DWORD_MAX)
-            if (const auto count_unsigned = static_cast<std::uint64_t>(count); count_unsigned >= max_dword)
+            // At this point, count is guaranteed positive (> 0), so safe to compare with DWORD max.
+            // If count exceeds what DWORD can represent, use infinite wait.
+            // Note: INFINITE == DWORD_MAX (0xFFFFFFFF), so values >= INFINITE become infinite wait.
+            constexpr auto max_timeout = static_cast<std::chrono::milliseconds::rep>(
+                std::numeric_limits<DWORD>::max());
+
+            if (count >= max_timeout)
+            {
                 return WaitForSingleObject(get(), INFINITE);
+            }
 
-            // Normal case
+            // Normal case: count is in range (0, DWORD_MAX), safe to cast
             return WaitForSingleObject(get(), static_cast<DWORD>(count));
         }
 
