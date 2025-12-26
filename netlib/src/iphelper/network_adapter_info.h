@@ -175,7 +175,7 @@ namespace iphelper
     /// <summary>
     /// Stores IP address and hardware (MAC) address to represent network gateway information
     /// </summary>
-    struct ip_gateway_info : ip_address_info
+    struct ip_gateway_info : ip_address_info  // NOLINT(clang-diagnostic-padded)
     {
         /// <summary>
         /// Constructs ip_gateway_info from sockaddr and net::mac_address
@@ -283,7 +283,7 @@ namespace iphelper
     /// <summary>
     /// Network adapter information class
     /// </summary>
-    class network_adapter_info
+    class network_adapter_info // NOLINT(clang-diagnostic-padded)
     {
         static constexpr std::string_view adapter_connection_name =
             R"(SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}\)";
@@ -305,10 +305,10 @@ namespace iphelper
             friendly_name_(address->FriendlyName),
             physical_address_(address->PhysicalAddress),
             mtu_(static_cast<uint16_t>(address->Mtu)),
-            if_type_(address->IfType),
             transmit_link_speed_(address->TransmitLinkSpeed),
             receive_link_speed_(address->ReceiveLinkSpeed),
             luid_(address->Luid),
+            if_type_(address->IfType),
             media_type_(if_table->Table[index].MediaType),
             physical_medium_type_(if_table->Table[index].PhysicalMediumType)
         {
@@ -632,7 +632,7 @@ namespace iphelper
             std::vector<ip_address_info> difference;
 
             std::ranges::copy_if(unicast_address_list_, std::back_inserter(difference),
-                [this, rhs](const ip_address_info& address) {
+                [&rhs](const ip_address_info& address) {
                     return std::ranges::find(rhs.unicast_address_list_, address) == rhs.unicast_address_list_.end();
                 });
 
@@ -702,14 +702,14 @@ namespace iphelper
 
             SetLastError(ERROR_SUCCESS);
 
-            const auto error_code = CreateUnicastIpAddressEntry(address_row.get());
+            if (const auto error_code = CreateUnicastIpAddressEntry(address_row.get());
+                NO_ERROR != error_code && error_code != ERROR_OBJECT_ALREADY_EXISTS)
+            {
+                SetLastError(error_code);
+                address_row.reset();  // Release the unique_ptr
+            }
 
-            if (NO_ERROR == error_code || error_code == ERROR_OBJECT_ALREADY_EXISTS)
-                return address_row;
-
-            SetLastError(error_code);
-
-            return nullptr;
+            return address_row;  // Single return point - enables NRVO
         }
 
         /// <summary>
@@ -739,14 +739,14 @@ namespace iphelper
 
             SetLastError(ERROR_SUCCESS);
 
-            const auto error_code = CreateUnicastIpAddressEntry(address_row.get());
+            if (const auto error_code = CreateUnicastIpAddressEntry(address_row.get());
+                NO_ERROR != error_code && error_code != ERROR_OBJECT_ALREADY_EXISTS)
+            {
+                SetLastError(error_code);
+                address_row.reset();  // Release the unique_ptr
+            }
 
-            if (error_code == NO_ERROR || error_code == ERROR_OBJECT_ALREADY_EXISTS)
-                return address_row;
-
-            SetLastError(error_code);
-
-            return nullptr;
+            return address_row;  // Single return point - enables NRVO
         }
 
         /// <summary>
@@ -761,7 +761,8 @@ namespace iphelper
 
             const auto error_code = DeleteUnicastIpAddressEntry(address.get());
 
-            SetLastError(error_code);
+            if (NO_ERROR != error_code)
+                SetLastError(error_code);
 
             return NO_ERROR == error_code;
         }
@@ -790,14 +791,14 @@ namespace iphelper
 
             SetLastError(ERROR_SUCCESS);
 
-            const auto error_code = CreateIpForwardEntry2(forward_row.get());
+            if (const auto error_code = CreateIpForwardEntry2(forward_row.get());
+                NO_ERROR != error_code && error_code != ERROR_OBJECT_ALREADY_EXISTS)
+            {
+                SetLastError(error_code);
+                forward_row.reset();
+            }
 
-            if (error_code == NO_ERROR || error_code == ERROR_OBJECT_ALREADY_EXISTS)
-                return forward_row;
-
-            SetLastError(error_code);
-
-            return nullptr;
+            return forward_row;
         }
 
         /// <summary>
@@ -824,14 +825,14 @@ namespace iphelper
 
             SetLastError(ERROR_SUCCESS);
 
-            const auto error_code = CreateIpForwardEntry2(forward_row.get());
+            if (const auto error_code = CreateIpForwardEntry2(forward_row.get());
+                NO_ERROR != error_code && error_code != ERROR_OBJECT_ALREADY_EXISTS)
+            {
+                SetLastError(error_code);
+                forward_row.reset();
+            }
 
-            if (error_code == NO_ERROR || error_code == ERROR_OBJECT_ALREADY_EXISTS)
-                return forward_row;
-
-            SetLastError(error_code);
-
-            return nullptr;
+            return forward_row;
         }
 
         /// <summary>
@@ -858,14 +859,14 @@ namespace iphelper
 
             SetLastError(ERROR_SUCCESS);
 
-            const auto error_code = CreateIpForwardEntry2(forward_row.get());
+            if (const auto error_code = CreateIpForwardEntry2(forward_row.get());
+                NO_ERROR != error_code && error_code != ERROR_OBJECT_ALREADY_EXISTS)
+            {
+                SetLastError(error_code);
+                forward_row.reset();
+            }
 
-            if (error_code == NO_ERROR || error_code == ERROR_OBJECT_ALREADY_EXISTS)
-                return forward_row;
-
-            SetLastError(error_code);
-
-            return nullptr;
+            return forward_row;
         }
 
         /// <summary>
@@ -892,14 +893,85 @@ namespace iphelper
 
             SetLastError(ERROR_SUCCESS);
 
-            const auto error_code = CreateIpForwardEntry2(forward_row.get());
+            if (const auto error_code = CreateIpForwardEntry2(forward_row.get());
+                NO_ERROR != error_code && error_code != ERROR_OBJECT_ALREADY_EXISTS)
+            {
+                SetLastError(error_code);
+                forward_row.reset();
+            }
 
-            if (error_code == NO_ERROR || error_code == ERROR_OBJECT_ALREADY_EXISTS)
-                return forward_row;
+            return forward_row;
+        }
 
-            SetLastError(error_code);
+        /// <summary>
+        /// Adds IPv4 NDP entry for the network interface
+        /// </summary>
+        /// <param name="address">IPv4 address</param>
+        /// <param name="hw_address">hardware address</param>
+        /// <returns>unique pointer to MIB_IPNET_ROW2</returns>
+        [[nodiscard]] std::unique_ptr<MIB_IPNET_ROW2> add_ndp_entry(const net::ip_address_v4& address,
+            const net::mac_address& hw_address) const
+        {
+            auto net_row = std::make_unique<MIB_IPNET_ROW2>();
+            RtlSecureZeroMemory(net_row.get(), sizeof(MIB_IPNET_ROW2));
 
-            return nullptr;
+            net_row->Address.si_family = AF_INET;
+            net_row->Address.Ipv4.sin_family = AF_INET;
+            net_row->Address.Ipv4.sin_addr = address;
+            net_row->InterfaceIndex = if_index_;
+            net_row->InterfaceLuid = luid_;
+            memmove(net_row->PhysicalAddress, hw_address.data.data(), ETH_ALEN);
+            net_row->PhysicalAddressLength = ETH_ALEN;
+            net_row->State = NlnsPermanent;
+            net_row->IsRouter = TRUE;
+            net_row->IsUnreachable = TRUE;
+
+            // Clear previous error state so GetLastError() reflects only this operation's result
+            SetLastError(ERROR_SUCCESS);
+
+            if (const auto error_code = CreateIpNetEntry2(net_row.get());
+                NO_ERROR != error_code && error_code != ERROR_OBJECT_ALREADY_EXISTS)
+            {
+                SetLastError(error_code);
+                net_row.reset();
+            }
+
+            return net_row;
+        }
+
+        /// <summary>
+        /// Adds IPv6 NDP entry for the network interface
+        /// </summary>
+        /// <param name="address">IPv6 address</param>
+        /// <param name="hw_address">hardware address</param>
+        /// <returns>unique pointer to MIB_IPNET_ROW2</returns>
+        [[nodiscard]] std::unique_ptr<MIB_IPNET_ROW2> add_ndp_entry(const net::ip_address_v6& address,
+            const net::mac_address& hw_address) const
+        {
+            auto net_row = std::make_unique<MIB_IPNET_ROW2>();
+            RtlSecureZeroMemory(net_row.get(), sizeof(MIB_IPNET_ROW2));
+
+            net_row->Address.si_family = AF_INET6;
+            net_row->Address.Ipv6.sin6_family = AF_INET6;
+            net_row->Address.Ipv6.sin6_addr = address;
+            net_row->InterfaceIndex = ipv6_if_index_;
+            net_row->InterfaceLuid = luid_;
+            memmove(net_row->PhysicalAddress, hw_address.data.data(), ETH_ALEN);
+            net_row->PhysicalAddressLength = ETH_ALEN;
+            net_row->State = NlnsPermanent;
+            net_row->IsRouter = TRUE;
+            net_row->IsUnreachable = TRUE;
+
+            SetLastError(ERROR_SUCCESS);
+
+            if (const auto error_code = CreateIpNetEntry2(net_row.get());
+                NO_ERROR != error_code && error_code != ERROR_OBJECT_ALREADY_EXISTS)
+            {
+                SetLastError(error_code);
+                net_row.reset();
+            }
+
+            return net_row;
         }
 
         /// <summary>
@@ -959,31 +1031,35 @@ namespace iphelper
             std::vector<std::unique_ptr<MIB_IPFORWARD_ROW2>> return_value;
 
             std::ranges::for_each(ips, [this, &return_value](auto&& v)
-            {
-                if (auto subnet_v6_ptr = std::get_if<net::ip_subnet<net::ip_address_v6>>(&v); subnet_v6_ptr)
                 {
-                    auto forward_row = std::make_unique<MIB_IPFORWARD_ROW2>();
-                    InitializeIpForwardEntry(forward_row.get());
+                    if (auto subnet_v6_ptr = std::get_if<net::ip_subnet<net::ip_address_v6>>(&v); subnet_v6_ptr)
+                    {
+                        auto forward_row = std::make_unique<MIB_IPFORWARD_ROW2>();
+                        InitializeIpForwardEntry(forward_row.get());
 
-                    forward_row->InterfaceIndex = ipv6_if_index_;
-                    forward_row->InterfaceLuid = luid_;
-                    forward_row->DestinationPrefix.Prefix.si_family = AF_INET6;
-                    forward_row->DestinationPrefix.Prefix.Ipv6.sin6_family = AF_INET6;
-                    forward_row->DestinationPrefix.Prefix.Ipv6.sin6_addr = subnet_v6_ptr->get_address();
-                    forward_row->DestinationPrefix.PrefixLength = subnet_v6_ptr->get_prefix();
-                    forward_row->NextHop.si_family = AF_INET6;
-                    forward_row->NextHop.Ipv6.sin6_family = AF_INET6;
-                    forward_row->NextHop.Ipv6.sin6_addr = net::ip_address_v6{};
-                    forward_row->SitePrefixLength = 0;
-                    forward_row->Metric = 0;
-                    forward_row->Protocol = MIB_IPPROTO_NT_STATIC;
-                    forward_row->Origin = NlroManual;
+                        forward_row->InterfaceIndex = ipv6_if_index_;
+                        forward_row->InterfaceLuid = luid_;
+                        forward_row->DestinationPrefix.Prefix.si_family = AF_INET6;
+                        forward_row->DestinationPrefix.Prefix.Ipv6.sin6_family = AF_INET6;
+                        forward_row->DestinationPrefix.Prefix.Ipv6.sin6_addr = subnet_v6_ptr->get_address();
+                        forward_row->DestinationPrefix.PrefixLength = subnet_v6_ptr->get_prefix();
+                        forward_row->NextHop.si_family = AF_INET6;
+                        forward_row->NextHop.Ipv6.sin6_family = AF_INET6;
+                        forward_row->NextHop.Ipv6.sin6_addr = net::ip_address_v6{};
+                        forward_row->SitePrefixLength = 0;
+                        forward_row->Metric = 0;
+                        forward_row->Protocol = MIB_IPPROTO_NT_STATIC;
+                        forward_row->Origin = NlroManual;
 
-                    if (const auto status = CreateIpForwardEntry2(forward_row.get()); status == NO_ERROR || status ==
-                        ERROR_OBJECT_ALREADY_EXISTS)
-                        return_value.push_back(std::move(forward_row));
-                }
-            });
+                        SetLastError(ERROR_SUCCESS);
+
+                        if (const auto error_code = CreateIpForwardEntry2(forward_row.get()); error_code == NO_ERROR
+                            || error_code == ERROR_OBJECT_ALREADY_EXISTS)
+                            return_value.push_back(std::move(forward_row));
+                        else
+                            SetLastError(error_code);
+                    }
+                });
 
             return return_value;
         }
@@ -1078,7 +1154,7 @@ namespace iphelper
                     if (table->Table[i].InterfaceLuid == luid_)
                     {
                         error_code = DeleteUnicastIpAddressEntry(&table->Table[i]);
-                        if (NO_ERROR == error_code)
+                        if (NO_ERROR != error_code)
                             SetLastError(error_code);
                     }
                 }
@@ -1122,7 +1198,7 @@ namespace iphelper
                         table->Table[i].Address.Ipv4.sin_addr) == address)
                     {
                         error_code = DeleteUnicastIpAddressEntry(&table->Table[i]);
-                        if (NO_ERROR == error_code)
+                        if (NO_ERROR != error_code)
                             SetLastError(error_code);
                     }
                 }
@@ -1137,10 +1213,10 @@ namespace iphelper
         }
 
         /// <summary>
-         /// Removes specified IPv6 address from the network interface
-         /// </summary>
-         /// <param name="address">IPv6 address to remove</param>
-         /// <returns>true if successful, false otherwise</returns>
+        /// Removes specified IPv6 address from the network interface
+        /// </summary>
+        /// <param name="address">IPv6 address to remove</param>
+        /// <returns>true if successful, false otherwise</returns>
         [[nodiscard]] bool delete_unicast_address(const net::ip_address_v6& address) const
         {
             PMIB_UNICASTIPADDRESS_TABLE table = nullptr;
@@ -1157,7 +1233,7 @@ namespace iphelper
                         table->Table[i].Address.Ipv6.sin6_addr) == address)
                     {
                         error_code = DeleteUnicastIpAddressEntry(&table->Table[i]);
-                        if (NO_ERROR == error_code)
+                        if (NO_ERROR != error_code)
                             SetLastError(error_code);
                     }
                 }
@@ -1169,76 +1245,6 @@ namespace iphelper
             SetLastError(error_code);
 
             return false;
-        }
-
-        /// <summary>
-        /// Adds IPv4 NDP entry for the network interface
-        /// </summary>
-        /// <param name="address">IPv4 address</param>
-        /// <param name="hw_address">hardware address</param>
-        /// <returns>unique pointer to MIB_IPNET_ROW2</returns>
-        [[nodiscard]] std::unique_ptr<MIB_IPNET_ROW2> add_ndp_entry(const net::ip_address_v4& address,
-            const net::mac_address& hw_address) const
-        {
-            auto net_row = std::make_unique<MIB_IPNET_ROW2>();
-            RtlSecureZeroMemory(net_row.get(), sizeof(MIB_IPNET_ROW2));
-
-            net_row->Address.si_family = AF_INET;
-            net_row->Address.Ipv4.sin_family = AF_INET;
-            net_row->Address.Ipv4.sin_addr = address;
-            net_row->InterfaceIndex = if_index_;
-            net_row->InterfaceLuid = luid_;
-            memmove(net_row->PhysicalAddress, hw_address.data.data(), ETH_ALEN);
-            net_row->PhysicalAddressLength = ETH_ALEN;
-            net_row->State = NlnsPermanent;
-            net_row->IsRouter = TRUE;
-            net_row->IsUnreachable = TRUE;
-
-            SetLastError(ERROR_SUCCESS);
-
-            const auto error_code = CreateIpNetEntry2(net_row.get());
-
-            if (NO_ERROR == error_code)
-                return net_row;
-
-            SetLastError(error_code);
-
-            return nullptr;
-        }
-
-        /// <summary>
-        /// Adds IPv6 NDP entry for the network interface
-        /// </summary>
-        /// <param name="address">IPv6 address</param>
-        /// <param name="hw_address">hardware address</param>
-        /// <returns>unique pointer to MIB_IPNET_ROW2</returns>
-        [[nodiscard]] std::unique_ptr<MIB_IPNET_ROW2> add_ndp_entry(const net::ip_address_v6& address,
-            const net::mac_address& hw_address) const
-        {
-            auto net_row = std::make_unique<MIB_IPNET_ROW2>();
-            RtlSecureZeroMemory(net_row.get(), sizeof(MIB_IPNET_ROW2));
-
-            net_row->Address.si_family = AF_INET6;
-            net_row->Address.Ipv6.sin6_family = AF_INET6;
-            net_row->Address.Ipv6.sin6_addr = address;
-            net_row->InterfaceIndex = ipv6_if_index_;
-            net_row->InterfaceLuid = luid_;
-            memmove(net_row->PhysicalAddress, hw_address.data.data(), ETH_ALEN);
-            net_row->PhysicalAddressLength = ETH_ALEN;
-            net_row->State = NlnsPermanent;
-            net_row->IsRouter = TRUE;
-            net_row->IsUnreachable = TRUE;
-
-            SetLastError(ERROR_SUCCESS);
-
-            const auto error_code = CreateIpNetEntry2(net_row.get());
-
-            if (NO_ERROR == error_code)
-                return net_row;
-
-            SetLastError(error_code);
-
-            return nullptr;
         }
 
         /// <summary>
@@ -1347,11 +1353,6 @@ namespace iphelper
         /// </summary>
         uint16_t mtu_;
         /// <summary>
-        /// The interface type as defined by the Internet Assigned Names Authority (IANA).
-        /// Possible values for the interface type are listed in the Ipifcons.h header file. 
-        /// </summary>
-        unsigned if_type_;
-        /// <summary>
         /// The current speed in bits per second of the transmit link for the adapter.
         /// </summary>
         ULONG64 transmit_link_speed_;
@@ -1363,6 +1364,11 @@ namespace iphelper
         /// The interface LUID for the adapter address. 
         /// </summary>
         IF_LUID luid_;
+        /// <summary>
+        /// The interface type as defined by the Internet Assigned Names Authority (IANA).
+        /// Possible values for the interface type are listed in the Ipifcons.h header file. 
+        /// </summary>
+        unsigned if_type_;
         /// <summary>
         /// The NDIS media type for the interface. This member can be one of the values from the NDIS_MEDIUM
         /// enumeration type defined in the Ntddndis.h header file.
@@ -1422,7 +1428,15 @@ namespace iphelper
             {
                 do
                 {
-                    auto ip_address_info = std::make_unique<unsigned char[]>(dw_size);
+                    // Use nothrow allocation to prevent exceptions in callback context
+                    std::unique_ptr<unsigned char[]> ip_address_info(new (std::nothrow) unsigned char[dw_size]);
+
+                    if (!ip_address_info)
+                    {
+                        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                        FreeMibTable(mib_table);
+                        return ret_val;
+                    }
 
                     error_code = GetAdaptersAddresses(AF_UNSPEC,
                         GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
@@ -1515,7 +1529,15 @@ namespace iphelper
             {
                 do
                 {
-                    auto ip_address_info = std::make_unique<unsigned char[]>(dw_size);
+                    // Use nothrow allocation to prevent exceptions in callback context
+                    std::unique_ptr<unsigned char[]> ip_address_info(new (std::nothrow) unsigned char[dw_size]);
+
+                    if (!ip_address_info)
+                    {
+                        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                        FreeMibTable(mib_table);
+                        return {};
+                    }
 
                     error_code = GetAdaptersAddresses(AF_UNSPEC,
                         GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
@@ -1606,7 +1628,15 @@ namespace iphelper
             {
                 do
                 {
-                    auto ip_address_info = std::make_unique<unsigned char[]>(dw_size);
+                    // Use nothrow allocation to prevent exceptions in callback context
+                    std::unique_ptr<unsigned char[]> ip_address_info(new (std::nothrow) unsigned char[dw_size]);
+
+                    if (!ip_address_info)
+                    {
+                        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                        FreeMibTable(mib_table);
+                        return {};
+                    }
 
                     error_code = GetAdaptersAddresses(AF_UNSPEC,
                         GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
@@ -1698,7 +1728,15 @@ namespace iphelper
             {
                 do
                 {
-                    auto ip_address_info = std::make_unique<unsigned char[]>(dw_size);
+                    // Use nothrow allocation to prevent exceptions in callback context
+                    std::unique_ptr<unsigned char[]> ip_address_info(new (std::nothrow) unsigned char[dw_size]);
+
+                    if (!ip_address_info)
+                    {
+                        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                        FreeMibTable(mib_table);
+                        return {};
+                    }
 
                     error_code = GetAdaptersAddresses(AF_UNSPEC,
                         GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
@@ -1768,7 +1806,7 @@ namespace iphelper
     /// </summary>
     /// <typeparam name="T">CRTP class</typeparam>
     template <typename T>
-    class network_config_info
+    class network_config_info  // NOLINT(clang-diagnostic-padded)
     {
         /// <summary>
         /// Lock type
@@ -1786,14 +1824,16 @@ namespace iphelper
         /// NotifyIpInterfaceChange handle value
         /// </summary>
         HANDLE notify_ip_interface_change_{ nullptr };
-        /// <summary>
-        /// Tracks callback enters/leaves
-        /// </summary>
-        std::atomic_uint32_t notify_ip_interface_ref_{ 0 };
+        
         /// <summary>
         /// Synchronization lock
         /// </summary>
         mutex_type lock_;
+        
+        /// <summary>
+        /// Tracks callback enters/leaves
+        /// </summary>
+        std::atomic_uint32_t notify_ip_interface_ref_{ 0 };
 
         /// <summary>
         /// Default constructor
@@ -1846,7 +1886,7 @@ public:
         /// <summary>
         /// Destructor cancels NotifyIpInterfaceChange
         /// </summary>
-        ~network_config_info()
+        virtual ~network_config_info()
         {
             if (notify_ip_interface_change_)
                 cancel_notify_ip_interface_change();
@@ -1857,33 +1897,48 @@ public:
         /// </summary>
         /// <param name="ip_address">IPv4 address</param>
         /// <returns>optional network_adapter_info</returns>
-        static std::optional<network_adapter_info> get_best_interface(const net::ip_address_v4& ip_address)
+        static std::optional<network_adapter_info> get_best_interface(const net::ip_address_v4& ip_address) noexcept
         {
-            unsigned long best_if_index = 0;
-            sockaddr_in socket_address{};
-
-            socket_address.sin_family = AF_INET;
-            socket_address.sin_addr = ip_address;
-
-            SetLastError(ERROR_SUCCESS);
-
-            auto adapters = network_adapter_info::get_external_network_connections();
-
-            const auto last_error_code = GetLastError();
-
-            if (const auto error_code = GetBestInterfaceEx(reinterpret_cast<sockaddr*>(&socket_address), &best_if_index)
-                ; NO_ERROR == error_code)
+            try
             {
-                for (auto& adapter : adapters)
+                unsigned long best_if_index = 0;
+                sockaddr_in socket_address{};
+
+                socket_address.sin_family = AF_INET;
+                socket_address.sin_addr = ip_address;
+
+                SetLastError(ERROR_SUCCESS);
+
+                auto adapters = network_adapter_info::get_external_network_connections();
+
+                const auto last_error_code = GetLastError();
+
+                if (const auto error_code = GetBestInterfaceEx(reinterpret_cast<sockaddr*>(&socket_address), &best_if_index)
+                    ; NO_ERROR == error_code)
                 {
-                    if (adapter.get_if_index() == best_if_index)
-                        return adapter;
+                    for (auto& adapter : adapters)
+                    {
+                        if (adapter.get_if_index() == best_if_index)
+                            return adapter;
+                    }
+                    SetLastError(last_error_code);
                 }
-                SetLastError(last_error_code);
+                else
+                {
+                    SetLastError(error_code);
+                }
             }
-            else
+            catch (const std::bad_alloc&)
             {
-                SetLastError(error_code);
+                ::SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            }
+            catch (const std::exception&)
+            {
+                ::SetLastError(ERROR_INTERNAL_ERROR);
+            }
+            catch (...)
+            {
+                ::SetLastError(ERROR_UNHANDLED_EXCEPTION);
             }
 
             return {};
@@ -1894,31 +1949,48 @@ public:
         /// </summary>
         /// <param name="ip_address">IPv6 address</param>
         /// <returns>optional network_adapter_info</returns>
-        static std::optional<network_adapter_info> get_best_interface(const net::ip_address_v6& ip_address)
+        static std::optional<network_adapter_info> get_best_interface(const net::ip_address_v6& ip_address) noexcept
         {
-            unsigned long best_if_index = 0;
-            sockaddr_in6 socket_address{};
-
-            socket_address.sin6_family = AF_INET6;
-            socket_address.sin6_addr = ip_address;
-
-            auto adapters = network_adapter_info::get_external_network_connections();
-
-            const auto last_error_code = GetLastError();
-
-            if (const auto error_code = GetBestInterfaceEx(reinterpret_cast<sockaddr*>(&socket_address), &best_if_index)
-                ; NO_ERROR == error_code)
+            try
             {
-                for (auto& adapter : adapters)
+                unsigned long best_if_index = 0;
+                sockaddr_in6 socket_address{};
+
+                socket_address.sin6_family = AF_INET6;
+                socket_address.sin6_addr = ip_address;
+
+                SetLastError(ERROR_SUCCESS);
+
+                auto adapters = network_adapter_info::get_external_network_connections();
+
+                const auto last_error_code = GetLastError();
+
+                if (const auto error_code = GetBestInterfaceEx(reinterpret_cast<sockaddr*>(&socket_address), &best_if_index)
+                    ; NO_ERROR == error_code)
                 {
-                    if (adapter.get_if_index() == best_if_index)
-                        return adapter;
+                    for (auto& adapter : adapters)
+                    {
+                        if (adapter.get_if_index() == best_if_index)
+                            return adapter;
+                    }
+                    SetLastError(last_error_code);
                 }
-                SetLastError(last_error_code);
+                else
+                {
+                    SetLastError(error_code);
+                }
             }
-            else
+            catch (const std::bad_alloc&)
             {
-                SetLastError(error_code);
+                ::SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            }
+            catch (const std::exception&)
+            {
+                ::SetLastError(ERROR_INTERNAL_ERROR);
+            }
+            catch (...)
+            {
+                ::SetLastError(ERROR_UNHANDLED_EXCEPTION);
             }
 
             return {};
@@ -1931,30 +2003,26 @@ public:
         /// <returns>vector of network_adapter_info objects</returns>
         static std::vector<network_adapter_info> get_routable_interfaces(const net::ip_address_v4& ip_address)
         {
-            auto is_valid_route = [&ip_address](auto adapter)
+            auto is_invalid_route = [&ip_address](const auto& adapter)
                 {
                     SOCKADDR_INET dest_address, best_route_address{};
-                    // ReSharper disable once CppAssignedValueIsNeverUsed
                     dest_address.si_family = AF_INET;
                     dest_address.Ipv4.sin_family = AF_INET;
                     dest_address.Ipv4.sin_addr = ip_address;
                     MIB_IPFORWARD_ROW2 forward_row{};
 
-                    if (auto error_code = GetBestRoute2(nullptr, adapter.get_if_index(), nullptr, &dest_address, 0,
+                    if (const auto error_code = GetBestRoute2(nullptr, adapter.get_if_index(), nullptr, &dest_address, 0,
                         &forward_row, &best_route_address); NO_ERROR != error_code)
                     {
                         ::SetLastError(error_code);
-                        return true; // NOTE: shouldn't be this called is_invalid_route() instead?
+                        return true;  // Invalid route - should be removed
                     }
-                    return false;
+                    return false;  // Valid route - keep it
                 };
 
             auto adapters = network_adapter_info::get_external_network_connections();
 
-            adapters.erase(std::remove_if(adapters.begin(), adapters.end(), [&is_valid_route](auto a)
-                {
-                    return is_valid_route(a);
-                }), adapters.end());
+            std::erase_if(adapters, is_invalid_route);  // C++20 erase_if
 
             return adapters;
         }
@@ -1966,30 +2034,26 @@ public:
         /// <returns>vector of network_adapter_info objects</returns>
         static std::vector<network_adapter_info> get_routable_interfaces(const net::ip_address_v6& ip_address)
         {
-            auto is_valid_route = [&ip_address](auto adapter)
+            auto is_invalid_route = [&ip_address](const auto& adapter)
                 {
                     SOCKADDR_INET dest_address, best_route_address{};
-                    // ReSharper disable once CppAssignedValueIsNeverUsed
                     dest_address.si_family = AF_INET6;
                     dest_address.Ipv6.sin6_family = AF_INET6;
                     dest_address.Ipv6.sin6_addr = ip_address;
                     MIB_IPFORWARD_ROW2 forward_row{};
 
-                    if (auto error_code = GetBestRoute2(nullptr, adapter.get_if_index(), nullptr, &dest_address, 0,
+                    if (const auto error_code = GetBestRoute2(nullptr, adapter.get_if_index(), nullptr, &dest_address, 0,
                         &forward_row, &best_route_address); NO_ERROR != error_code)
                     {
                         ::SetLastError(error_code);
-                        return true; // NOTE: shouldn't be this called is_invalid_route() instead?
+                        return true;  // Invalid route - should be removed
                     }
-                    return false;
+                    return false;  // Valid route - keep it
                 };
 
             auto adapters = network_adapter_info::get_external_network_connections();
 
-            adapters.erase(std::remove_if(adapters.begin(), adapters.end(), [&is_valid_route](auto a)
-                {
-                    return is_valid_route(a);
-                }), adapters.end());
+            std::erase_if(adapters, is_invalid_route);  // C++20 erase_if
 
             return adapters;
         }
@@ -2024,8 +2088,10 @@ public:
         {
             SetLastError(ERROR_SUCCESS);
 
-            const auto error_code = CancelMibChangeNotify2(notify_ip_interface_change_);
+            if (notify_ip_interface_change_ == nullptr)
+                return true;
 
+            const auto error_code = CancelMibChangeNotify2(notify_ip_interface_change_);
             notify_ip_interface_change_ = nullptr;
 
             if (NO_ERROR == error_code)
@@ -2044,15 +2110,39 @@ public:
         /// <param name="notification_type">type of notification</param>
         /// <returns></returns>
         static void __stdcall ip_interface_changed_callback(void* caller_context, PMIB_IPINTERFACE_ROW row,
-            MIB_NOTIFICATION_TYPE notification_type)
+            MIB_NOTIFICATION_TYPE notification_type) noexcept
         {
-            if (auto* const base_pointer = static_cast<network_config_info<T>*>(caller_context); base_pointer)
+            try
             {
-                // Cast from base to derived class safely
-                auto* const this_pointer = static_cast<T*>(base_pointer);
-                this_pointer->notify_ip_interface_ref_.fetch_add(1);
-                this_pointer->ip_interface_changed_callback(row, notification_type);
-                this_pointer->notify_ip_interface_ref_.fetch_sub(1);
+                if (auto* const base_pointer = static_cast<network_config_info<T>*>(caller_context); base_pointer)
+                {
+                    auto* const this_pointer = static_cast<T*>(base_pointer);
+
+                    // RAII guard to ensure ref count is always decremented
+                    struct ref_guard {
+                        std::atomic_uint32_t* ref_ptr;
+                        explicit ref_guard(std::atomic_uint32_t* p) noexcept : ref_ptr(p) { ref_ptr->fetch_add(1); }
+                        ~ref_guard() noexcept { ref_ptr->fetch_sub(1); }
+                        ref_guard(const ref_guard&) = delete;
+                        ref_guard& operator=(const ref_guard&) = delete;
+                        ref_guard(ref_guard&&) = delete;
+                        ref_guard& operator=(ref_guard&&) = delete;
+                    } guard{ &this_pointer->notify_ip_interface_ref_ };
+
+                    this_pointer->ip_interface_changed_callback(row, notification_type);
+                }
+            }
+            catch (const std::bad_alloc&)
+            {
+                ::SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            }
+            catch (const std::exception&)
+            {
+                ::SetLastError(ERROR_INTERNAL_ERROR);
+            }
+            catch (...)
+            {
+                ::SetLastError(ERROR_UNHANDLED_EXCEPTION);
             }
         }
 

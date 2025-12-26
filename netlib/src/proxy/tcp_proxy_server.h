@@ -46,7 +46,7 @@ namespace proxy
      * - Thread safety is ensured via shared_mutex and atomic flags.
      */
     template <typename T>
-    class tcp_proxy_server : public netlib::log::logger<tcp_proxy_server<T>>
+    class tcp_proxy_server : public netlib::log::logger<tcp_proxy_server<T>>  // NOLINT(clang-diagnostic-padded)
     {
     public:
         /**
@@ -95,16 +95,11 @@ namespace proxy
         constexpr static size_t connections_array_size = 64;
 
         /**
-         * @brief The TCP port number on which the proxy server listens for incoming connections.
-         */
-        uint16_t proxy_port_;
-
-        /**
          * @brief Reference to the I/O completion port used for asynchronous socket operations.
          *
          * This enables scalable, efficient handling of multiple concurrent I/O operations.
          */
-        winsys::io_completion_port& completion_port_;
+        netlib::winsys::io_completion_port& completion_port_;
 
         /**
          * @brief Callback function to query remote peer information for each new connection.
@@ -138,8 +133,11 @@ namespace proxy
 
         /**
          * @brief Vector of active proxy socket instances, one per client session.
+         *
+         * Uses shared_ptr to enable safe concurrent access from IOCP threads.
+         * The last reference may be held by a pending I/O operation.
          */
-        std::vector<std::unique_ptr<T>> proxy_sockets_;
+        std::vector<std::shared_ptr<T>> proxy_sockets_;
 
         /**
          * @brief Array of tuples tracking events, sockets, and negotiation contexts for pending connections.
@@ -153,9 +151,14 @@ namespace proxy
         std::vector<std::tuple<WSAEVENT, SOCKET, SOCKET, std::unique_ptr<negotiate_context_t>>> sock_array_events_;
 
         /**
-         * @brief Atomic flag indicating whether the server is shutting down or has terminated.
+         * @brief The main listening socket for incoming client connections.
          */
-        std::atomic_bool end_server_{ true };
+        SOCKET server_socket_{ INVALID_SOCKET };
+
+        /**
+         * @brief Completion key associated with the I/O completion port for this server.
+         */
+        ULONG_PTR completion_key_{ 0 };
 
         /**
          * @brief Counts the number of IOCP operations currently executing in the lambda.
@@ -166,14 +169,14 @@ namespace proxy
         std::atomic<int32_t> active_iocp_operations_{ 0 };
 
         /**
-         * @brief The main listening socket for incoming client connections.
+         * @brief The TCP port number on which the proxy server listens for incoming connections.
          */
-        SOCKET server_socket_{ INVALID_SOCKET };
+        uint16_t proxy_port_;
 
         /**
-         * @brief Completion key associated with the I/O completion port for this server.
-         */
-        ULONG_PTR completion_key_{ 0 };
+        * @brief Atomic flag indicating whether the server is shutting down or has terminated.
+        */
+        std::atomic_bool end_server_{ true };
 
     public:
         /**
@@ -193,7 +196,7 @@ namespace proxy
          *
          * @throws std::runtime_error if the server socket cannot be created or bound.
          */
-        tcp_proxy_server(const uint16_t proxy_port, winsys::io_completion_port& completion_port,
+        tcp_proxy_server(const uint16_t proxy_port, netlib::winsys::io_completion_port& completion_port,
             const std::function<query_remote_peer_t>& query_remote_peer_fn,
             const log_level log_level = log_level::error,
             std::shared_ptr<std::ostream> log_stream = nullptr)
@@ -315,7 +318,7 @@ namespace proxy
                         } guard{ active_iocp_operations_ };
 
                         // Check if server is shutting down
-                        if (end_server_)
+                        if (end_server_.load(std::memory_order_acquire))
                             return false;
 
                         auto io_context = static_cast<per_io_context_t*>(povlp);
@@ -385,9 +388,9 @@ namespace proxy
                 }
             }
 
-            proxy_server_ = std::thread(&tcp_proxy_server<T>::start_proxy_thread, this);
-            check_clients_thread_ = std::thread(&tcp_proxy_server<T>::clear_thread, this);
-            connect_to_remote_host_thread_ = std::thread(&tcp_proxy_server<T>::connect_to_remote_host_thread, this);
+            proxy_server_ = std::thread(&tcp_proxy_server::start_proxy_thread, this);
+            check_clients_thread_ = std::thread(&tcp_proxy_server::clear_thread, this);
+            connect_to_remote_host_thread_ = std::thread(&tcp_proxy_server::connect_to_remote_host_thread, this);
 
             return true;
         }
@@ -427,6 +430,12 @@ namespace proxy
             {
                 std::unique_lock lock(lock_);
                 ::WSASetEvent(std::get<0>(sock_array_events_[0]));
+            }
+
+            // Step 2.5: Unregister the IOCP handler BEFORE waiting
+            if (completion_key_ != 0) {
+                (void)completion_port_.unregister_handler(completion_key_);
+                completion_key_ = 0;
             }
 
             // Step 3: Wait for all active IOCP operations to complete
@@ -745,7 +754,7 @@ namespace proxy
             // The client_service structure specifies the address family,
             // IP address, and port of the server to be connected to.
             {
-                std::lock_guard lock(lock_);
+                std::scoped_lock lock(lock_);
 
                 if (sock_array_events_.size() >= connections_array_size - 1)
                 {
@@ -924,20 +933,76 @@ namespace proxy
 
                 if (event_index != 0)
                 {
-                    std::lock_guard<std::shared_mutex> lock(lock_);
+                    std::scoped_lock lock(lock_);
 
                     WSACloseEvent(wait_events[event_index]);
 
-                    proxy_sockets_.push_back(std::make_unique<T>(
-                        std::get<1>(sock_array_events_[event_index]),
-                        std::get<2>(sock_array_events_[event_index]),
-                        std::move(std::get<3>(sock_array_events_[event_index])),
-                        logger::log_level_, logger::log_stream_));
+                    // Extract socket handles before creating the shared_ptr
+                    // so we can clean them up if initialization fails
+                    auto local_socket = std::get<1>(sock_array_events_[event_index]);
+                    auto remote_socket = std::get<2>(sock_array_events_[event_index]);
+                    auto negotiate_ctx = std::move(std::get<3>(sock_array_events_[event_index]));
 
-                    proxy_sockets_.back()->associate_to_completion_port(completion_key_, completion_port_);
-                    proxy_sockets_.back()->start();
-
+                    // Remove from tracking array first - we own the resources now
                     sock_array_events_.erase(sock_array_events_.begin() + event_index);
+
+                    try
+                    {
+                        // Create socket as shared_ptr
+                        auto socket = std::make_shared<T>(
+                            local_socket,
+                            remote_socket,
+                            std::move(negotiate_ctx),
+                            logger::log_level_, logger::log_stream_);
+
+                        // Initialize I/O contexts - can throw std::bad_weak_ptr or std::runtime_error
+                        socket->initialize_io_contexts();
+
+                        // Associate with completion port
+                        socket->associate_to_completion_port(completion_key_, completion_port_);
+
+                        // Start the socket
+                        socket->start();
+
+                        // Store in vector - socket is now fully initialized
+                        proxy_sockets_.push_back(std::move(socket));
+                    }
+                    catch (const std::exception& e)
+                    {
+                        // Initialization failed - clean up sockets manually since they weren't
+                        // transferred to a successfully initialized proxy socket
+                        NETLIB_ERROR("connect_to_remote_host_thread: Failed to initialize proxy socket: {}", e.what());
+
+                        if (local_socket != INVALID_SOCKET)
+                        {
+                            shutdown(local_socket, SD_BOTH);
+                            closesocket(local_socket);
+                        }
+
+                        if (remote_socket != INVALID_SOCKET)
+                        {
+                            shutdown(remote_socket, SD_BOTH);
+                            closesocket(remote_socket);
+                        }
+                        // Continue processing other connections
+                    }
+                    catch (...)
+                    {
+                        NETLIB_ERROR("connect_to_remote_host_thread: Unknown exception during proxy socket initialization");
+
+                        if (local_socket != INVALID_SOCKET)
+                        {
+                            shutdown(local_socket, SD_BOTH);
+                            closesocket(local_socket);
+                        }
+
+                        if (remote_socket != INVALID_SOCKET)
+                        {
+                            shutdown(remote_socket, SD_BOTH);
+                            closesocket(remote_socket);
+                        }
+                        // Continue processing other connections
+                    }
                 }
                 else
                 {
@@ -985,7 +1050,7 @@ namespace proxy
             while (end_server_ == false)
             {
                 {
-                    std::lock_guard lock(lock_);
+                    std::scoped_lock lock(lock_);
 
                     proxy_sockets_.erase(std::remove_if(proxy_sockets_.begin(), proxy_sockets_.end(), [](auto&& a)
                         {

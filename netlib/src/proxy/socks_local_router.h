@@ -16,7 +16,7 @@ namespace proxy
      * - iphelper::network_config_info<socks_local_router>: For network configuration monitoring and callbacks.
      * - netlib::log::logger<socks_local_router>: For logging router events and diagnostics.
      */
-    class socks_local_router :
+    class socks_local_router :  // NOLINT(clang-diagnostic-padded)
         public iphelper::network_config_info<socks_local_router>,
         public netlib::log::logger<socks_local_router>
     {
@@ -64,7 +64,7 @@ namespace proxy
         /**
          * @brief I/O completion port for asynchronous operations.
          */
-        winsys::io_completion_port io_port_;
+        netlib::winsys::io_completion_port io_port_;
 
         /**
          * @brief Optional pcap stream logger for packet capture logging.
@@ -105,11 +105,6 @@ namespace proxy
          * @brief Unique pointer to the packet filter object.
          */
         std::unique_ptr<packet_filter> packet_filter_{ nullptr };
-
-        /**
-         * @brief Atomic boolean to track the active status of the router.
-         */
-        std::atomic_bool is_active_{ false };
 
         /**
          * @brief Static filters for packet filtering.
@@ -178,10 +173,11 @@ namespace proxy
          */
         std::shared_ptr<std::ostream> pcap_log_stream_;
 
-        // -------------------- NEW: Optional redirect decider --------------------
-        // When provided, this callback decides whether a given flow for a process
-        // should be redirected (true) or passed through (false). If not set, the
-        // legacy behavior is preserved (allow redirect if process is associated).
+        /**
+        * @brief Atomic boolean to track the active status of the router.
+        */
+        std::atomic_bool is_active_{ false };
+
 	public:
 	    using redirect_decider_t = std::function<bool(const std::wstring&, const sockaddr*, int)>;
 
@@ -318,9 +314,27 @@ namespace proxy
          * Destructor for the socks_local_router class.
          * It ensures the router stops properly when an instance of the class is destroyed.
          */
-        ~socks_local_router()
+        ~socks_local_router() override
         {
+            try
+            {
+                if (is_active_.load(std::memory_order_acquire))
+                {
+                    NETLIB_DEBUG("Destructor calling stop()");
             stop();
+        }
+            }
+            catch (const std::exception& e)
+            {
+                // Log but don't throw from destructor
+                // Throwing from destructor causes std::terminate/abort
+                NETLIB_ERROR("Exception in ~socks_local_router::stop(): {}", e.what());
+            }
+            catch (...)
+            {
+                // Catch any other exceptions to prevent abort
+                NETLIB_ERROR("Unknown exception in ~socks_local_router::stop()");
+            }
         }
 
         /**
@@ -467,45 +481,108 @@ namespace proxy
             if (auto expected = true; !is_active_.compare_exchange_strong(expected, false))
                 return false;
 
-            // Stop the filter (presumably some sort of network filter)
+            // Step 1: Stop the packet filter FIRST
+            // This prevents new packets from being processed and queued
+            NETLIB_DEBUG("Stopping packet filter");
             packet_filter_->stop_filter();
 
+            // Step 2: Signal and join the process resolve thread
+            // This ensures no more packets are being queued for processing
+            NETLIB_DEBUG("Stopping process resolve thread");
             process_resolve_buffer_queue_cv_.notify_all();
 
             if (process_resolve_thread_.joinable())
                 process_resolve_thread_.join();
 
+            // Step 3: Stop all redirect objects FIRST to stop their cleanup threads
+            // CRITICAL: Stop redirects before stopping proxies to ensure cleanup threads finish
+            NETLIB_DEBUG("Stopping redirect objects");
+
+            if (tcp_redirect_)
             {
-                // Lock shared resources before accessing them
-                std::shared_lock lock(lock_);
-
-                // Stop all proxies
-                for (auto& [tcp, udp] : proxy_servers_)
-                {
-                    // Stop TCP proxy
-                    if (tcp)
-                        tcp->stop();
-
-                    // Stop UDP proxy
-                    if (udp)
-                        udp->stop();
-                }
-
-                // Stop the thread pool associated with the I/O completion port
-                io_port_.stop_thread_pool();
+                tcp_redirect_->stop();  // This should join the cleanup thread
             }
 
+            if (udp_redirect_)
+                {
+                udp_redirect_->stop();  // This should join the cleanup thread
+            }
+
+            // Step 4: Stop all proxy servers WITHOUT holding lock_
+            // CRITICAL: We must NOT hold lock_ while calling stop() or during destruction
+            // because the cleanup threads inside the proxies need to acquire the same lock
+
+            NETLIB_DEBUG("Stopping {} IPv4 proxy pairs", proxy_servers_.size());
+
+            // Stop all IPv4 proxies without holding lock_
+            for (size_t i = 0; i < proxy_servers_.size(); ++i)
+            {
+                if (proxy_servers_[i].first)
+                {
+                    NETLIB_DEBUG("Stopping IPv4 TCP proxy #{} on port {}", i, proxy_servers_[i].first->proxy_port());
+                    proxy_servers_[i].first->stop();
+                }
+
+                if (proxy_servers_[i].second)
+                {
+                    NETLIB_DEBUG("Stopping IPv4 UDP proxy #{} on port {}", i, proxy_servers_[i].second->proxy_port());
+                    proxy_servers_[i].second->stop();
+            }
+            }
+
+            // Step 5: Stop the IOCP thread pool
+            // At this point, all handlers registered by the proxy servers have been
+            // unregistered by their respective stop() methods, so no new completions
+            // will invoke callbacks that access destroyed objects.
+            NETLIB_DEBUG("Stopping IOCP thread pool");
+            io_port_.stop_thread_pool();
+
+            // Step 6: Cancel IP interface change notifications
             // Attempt to cancel notification of IP interface changes
             if (!this->cancel_notify_ip_interface_change())
             {
                 // Log an error if cancelling notification of IP interface changes failed
-                NETLIB_LOG(
-                    log_level::error, "cancel_notify_ip_interface_change has failed, lasterror: {}",
+                NETLIB_ERROR("cancel_notify_ip_interface_change has failed, lasterror: {}",
                     GetLastError());
             }
 
+            // Step 7: Wait for any in-flight callbacks to complete
+            // The callback increments notify_ip_interface_ref_ on entry and decrements on exit.
+            // We wait with timeout to prevent indefinite hangs if something goes wrong.
+            NETLIB_DEBUG("Waiting for network interface callbacks to complete");
+
+            using namespace std::chrono_literals;
+            constexpr auto max_wait_duration = 5s;  // Maximum time to wait for callbacks
+            constexpr auto initial_sleep = 1ms;
+            constexpr auto max_sleep = 100ms;
+
+            const auto start_time = std::chrono::steady_clock::now();
+            auto current_sleep = initial_sleep;
+
+            while (!this->notify_ip_interface_can_unload())
+            {
+                if (const auto elapsed = std::chrono::steady_clock::now() - start_time; elapsed >= max_wait_duration)
+                {
+                    NETLIB_WARNING("Timeout waiting for network interface callbacks to complete after {} seconds. "
+                        "Proceeding with shutdown - potential resource leak or callback still in-flight.",
+                        std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
+                    break;
+                }
+
+                // Exponential backoff to reduce CPU usage while waiting
+                std::this_thread::sleep_for(current_sleep);
+                current_sleep = std::min(current_sleep * 2, max_sleep);
+            }
+
+            if (this->notify_ip_interface_can_unload())
+            {
+                NETLIB_DEBUG("All network interface callbacks completed");
+            }
+
+            NETLIB_INFO("socks_local_router stopped successfully");
+
             // Return the current active status (which should now be false)
-            return is_active_;
+            return !is_active_;
         }
 
         /**
@@ -548,13 +625,14 @@ namespace proxy
             // These filters are used to decide which packets to pass or drop
             // They are configured to match packets based on their source/destination IP and port numbers
             // and their protocol (TCP or UDP)
-            auto create_filter = [&](const uint8_t protocol, auto direction, auto address, auto port)
+            auto create_filter = [](const uint8_t protocol, const ndisapi::direction_t direction,
+                const net::ip_address_v4& address, const uint16_t port)
             {
                 ndisapi::filter<net::ip_address_v4> filter;
                 filter.set_protocol(protocol)
                       .set_direction(direction)
                       .set_action(ndisapi::action_t::pass)
-                      .set_dest_address(net::ip_subnet{address, net::ip_address_v4{"255.255.255.255"}})
+                    .set_dest_address(net::ip_subnet{ address, net::ip_address_v4{"255.255.255.255"} })
                       .set_dest_port(std::make_pair(port, port));
                 return filter;
             };

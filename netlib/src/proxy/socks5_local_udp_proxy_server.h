@@ -35,7 +35,7 @@ namespace proxy
          * Alias for the negotiation context type defined by the proxy socket implementation (T).
          * Used to store authentication and session information for SOCKS5 negotiation.
          */
-        using negotiate_context_t = T::negotiate_context_t;
+        using negotiate_context_t = typename T::negotiate_context_t;
 
         /**
          * @brief Address type alias.
@@ -43,7 +43,7 @@ namespace proxy
          * Alias for the address type defined by the proxy socket implementation (T).
          * Represents an IPv4 or IPv6 address, depending on the template parameter.
          */
-        using address_type_t = T::address_type_t;
+        using address_type_t = typename T::address_type_t;
 
         /**
          * @brief Per-I/O context type alias.
@@ -51,7 +51,7 @@ namespace proxy
          * Alias for the per-I/O context type defined by the proxy socket implementation (T).
          * Used for managing asynchronous I/O operations.
          */
-        using per_io_context_t = T::per_io_context_t;
+        using per_io_context_t = typename T::per_io_context_t;
 
         /**
          * @brief Query remote peer function signature.
@@ -98,9 +98,11 @@ namespace proxy
         /**
          * @brief Map of active proxy sockets indexed by local UDP port.
          *
+         * Uses shared_ptr to enable safe concurrent access from IOCP threads.
          * Each entry represents a client session managed by the proxy server.
+         * The last reference may be held by a pending I/O operation.
          */
-        std::map<uint16_t, std::unique_ptr<T>> proxy_sockets_;
+        std::map<uint16_t, std::shared_ptr<T>> proxy_sockets_;
 
         /**
          * @brief Indicates whether the server is terminating.
@@ -162,7 +164,7 @@ namespace proxy
         /**
          * @brief Reference to the I/O completion port used for asynchronous operations.
          */
-        winsys::io_completion_port& completion_port_;
+        netlib::winsys::io_completion_port& completion_port_;
 
         /**
          * @brief Completion key associated with the server socket in the I/O completion port.
@@ -189,7 +191,7 @@ namespace proxy
          *
          * @throws std::runtime_error if the server socket cannot be created or bound.
          */
-        socks5_local_udp_proxy_server(const uint16_t proxy_port, winsys::io_completion_port& completion_port,
+        socks5_local_udp_proxy_server(const uint16_t proxy_port, netlib::winsys::io_completion_port& completion_port,
             const std::function<query_remote_peer_t>& query_remote_peer_fn,
             const log_level log_level = log_level::error,
             std::shared_ptr<std::ostream> log_stream = nullptr)
@@ -460,6 +462,12 @@ namespace proxy
             {
                 closesocket(server_socket_);
                 server_socket_ = INVALID_SOCKET;
+            }
+
+            // Step 2.5: Unregister the IOCP handler BEFORE waiting
+            if (completion_key_ != 0) {
+                (void)completion_port_.unregister_handler(completion_key_);
+                completion_key_ = 0;
             }
 
             // Step 3: Close all proxy sockets FIRST to cancel their I/O operations
@@ -936,7 +944,8 @@ namespace proxy
             // Lookup an existing proxy socket
             if (auto it = proxy_sockets_.find(local_peer_port); it != proxy_sockets_.end())
             {
-                io_context->proxy_socket_ptr = it->second.get();
+                // Set to shared_ptr instead of raw pointer
+                io_context->proxy_socket_ptr = it->second;
                 return true;
             }
 
@@ -1062,7 +1071,7 @@ namespace proxy
             }
 
             auto [it, result] = proxy_sockets_.emplace(local_peer_port,
-                std::make_unique<T>(
+                std::make_shared<T>(
                     socks5_tcp_socket, packet_pool_, server_socket_,
                     recv_from_sa_, remote_socket, remote_address,
                     udp_port.value(), std::move(negotiate_ctx),
@@ -1070,9 +1079,40 @@ namespace proxy
 
             if (result)
             {
-                io_context->proxy_socket_ptr = it->second.get();
-                io_context->proxy_socket_ptr->associate_to_completion_port(completion_key_, completion_port_);
-                io_context->proxy_socket_ptr->start();
+                try
+                {
+                    // Initialize I/O contexts with shared_ptr
+                    it->second->initialize_io_contexts();
+
+                    // Now safe to associate and start
+                    it->second->associate_to_completion_port(completion_key_, completion_port_);
+                    it->second->start();
+
+                    // Set the context pointer to the shared_ptr
+                    io_context->proxy_socket_ptr = it->second;
+                }
+                catch (const std::exception& e)
+                {
+                    NETLIB_DEBUG(
+                        "connect_to_remote_host: Failed to initialize proxy socket for: {}:{} ({})",
+                        remote_address,
+                        udp_port.value(),
+                        e.what());
+                    // Remove from map - the shared_ptr destructor will close the sockets
+                    // that were transferred to T's constructor
+                    proxy_sockets_.erase(it);
+                    return false;
+                }
+                catch (...)
+                {
+                    NETLIB_DEBUG(
+                        "connect_to_remote_host: Failed to initialize proxy socket for: {}:{} (unknown exception)",
+                        remote_address,
+                        udp_port.value());
+                    // Remove from map - the shared_ptr destructor will close the sockets
+                    proxy_sockets_.erase(it);
+                    return false;
+                }
             }
             else
             {
