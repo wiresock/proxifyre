@@ -910,6 +910,47 @@ namespace proxy
         }
 
         /**
+         * @brief Checks if an IPv4 address is a private/LAN address.
+         *
+         * This function checks if the given IP address belongs to any of the following ranges:
+         * - 10.0.0.0/8 (Class A private network)
+         * - 172.16.0.0/12 (Class B private network)
+         * - 192.168.0.0/16 (Class C private network)
+         * - 127.0.0.0/8 (Loopback)
+         * - 169.254.0.0/16 (Link-local)
+         *
+         * @param ip_addr The IP address to check (in network byte order, i.e., as stored in ip_header->ip_dst)
+         * @return true if the address is a private/LAN address, false otherwise
+         */
+        static bool is_private_ip(const uint32_t ip_addr)
+        {
+            // Convert from network byte order to host byte order
+            const uint32_t ip = ntohl(ip_addr);
+            
+            // 10.0.0.0/8
+            if ((ip & 0xFF000000) == 0x0A000000)
+                return true;
+            
+            // 172.16.0.0/12
+            if ((ip & 0xFFF00000) == 0xAC100000)
+                return true;
+            
+            // 192.168.0.0/16
+            if ((ip & 0xFFFF0000) == 0xC0A80000)
+                return true;
+            
+            // 127.0.0.0/8 (loopback)
+            if ((ip & 0xFF000000) == 0x7F000000)
+                return true;
+            
+            // 169.254.0.0/16 (link-local)
+            if ((ip & 0xFFFF0000) == 0xA9FE0000)
+                return true;
+            
+            return false;
+        }
+
+        /**
          * @brief Matches an application name pattern against the process details with exclusion support.
          *
          * This function performs a two-stage matching process:
@@ -1120,6 +1161,16 @@ namespace proxy
             if (process->excluded || process->bypass_udp)
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
 
+            // Check if destination IP is a private/LAN address - bypass proxy for LAN traffic
+            if (is_private_ip(ip_header->ip_dst.s_addr))
+            {
+                NETLIB_LOG(log_level::debug,
+                    "Bypassing proxy for LAN UDP traffic: {} : {} -> {} : {}",
+                    net::ip_address_v4(ip_header->ip_src), ntohs(udp_header->th_sport),
+                    net::ip_address_v4(ip_header->ip_dst), ntohs(udp_header->th_dport));
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+            }
+
             if (const auto port = process->udp_proxy_port ? process->udp_proxy_port : get_proxy_port_udp(process); port.has_value())
             {
                 if (udp_redirect_->is_new_endpoint(buffer))
@@ -1212,6 +1263,16 @@ namespace proxy
 
             if (process->excluded || process->bypass_tcp)
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+
+            // Check if destination IP is a private/LAN address - bypass proxy for LAN traffic
+            if (is_private_ip(ip_header->ip_dst.s_addr))
+            {
+                NETLIB_LOG(log_level::debug,
+                    "Bypassing proxy for LAN TCP traffic: {} : {} -> {} : {}",
+                    net::ip_address_v4(ip_header->ip_src), ntohs(tcp_header->th_sport),
+                    net::ip_address_v4(ip_header->ip_dst), ntohs(tcp_header->th_dport));
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+            }
 
             if (const auto port = process->tcp_proxy_port ? process->tcp_proxy_port : get_proxy_port_tcp(process); port.has_value())
             {
