@@ -235,10 +235,18 @@ namespace Socksifier
 
         /// <summary>
         /// Enables LAN traffic bypass.
-        /// When enabled, traffic to/from local network ranges (10.x.x.x, 172.16-31.x.x,
-        /// 192.168.x.x, 224.0.0.x, 169.254.x.x) will pass through without being proxied.
+        /// When enabled, traffic to/from local network ranges will pass through without being proxied.
         /// </summary>
-        /// <remarks>This must be called before Start() to take effect.</remarks>
+        /// <remarks>
+        /// This must be called before Start() to take effect.
+        /// 
+        /// Bypassed ranges:
+        /// - 10.0.0.0/8 (Private Class A)
+        /// - 172.16.0.0/12 (Private Class B: 172.16.x.x - 172.31.x.x)
+        /// - 192.168.0.0/16 (Private Class C)
+        /// - 224.0.0.0/4 (Multicast: 224.x.x.x - 239.x.x.x)
+        /// - 169.254.0.0/16 (Link-local / APIPA)
+        /// </remarks>
         void SetBypassLan();
 
         /// <summary>

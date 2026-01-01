@@ -1509,21 +1509,28 @@ namespace proxy
         }
         
         /**
-         * @brief Builds and adds IPv4 pass-through filters for common local network ranges.
-         *
-         * The function generates inbound and outbound filters that allow traffic
-         * for a predefined set of local and special-purpose IPv4 subnets and adds
-         * them to the static filters list.
-         */
+        * @brief Builds and adds IPv4 pass-through filters for common local network ranges.
+        *
+        * The function generates inbound and outbound filters that allow traffic
+        * for a predefined set of local and special-purpose IPv4 subnets and adds
+        * them to the static filters list.
+        *
+        * Bypassed ranges:
+        * - 10.0.0.0/8      (Private Class A)
+        * - 172.16.0.0/12   (Private Class B)
+        * - 192.168.0.0/16  (Private Class C)
+        * - 224.0.0.0/4     (Multicast)
+        * - 169.254.0.0/16  (Link-local / APIPA)
+        */
         void add_lan_passover_filters_v4()
         {
             // List of local IPv4 address ranges (address + subnet mask)
             static constexpr std::array<std::pair<const char*, const char*>, 5> local_ranges{ {
-                {"10.0.0.0",    "255.0.0.0"},
-                {"172.16.0.0",  "255.240.0.0"},
-                {"192.168.0.0", "255.255.0.0"},
-                {"224.0.0.0",   "255.255.255.0"},
-                {"169.254.0.0", "255.255.0.0"}
+                {"10.0.0.0",    "255.0.0.0"},      // 10.0.0.0/8 - Private Class A
+                {"172.16.0.0",  "255.240.0.0"},    // 172.16.0.0/12 - Private Class B
+                {"192.168.0.0", "255.255.0.0"},    // 192.168.0.0/16 - Private Class C
+                {"224.0.0.0",   "240.0.0.0"},      // 224.0.0.0/4 - Multicast (224.0.0.0 - 239.255.255.255)
+                {"169.254.0.0", "255.255.0.0"}     // 169.254.0.0/16 - Link-local (APIPA)
             } };
 
             // Helper to construct an IPv4 subnet object from string literals
