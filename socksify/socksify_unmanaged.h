@@ -21,7 +21,7 @@ namespace proxy
  * It wraps the core proxy logic and exposes thread-safe methods for integration
  * with managed and unmanaged code.
  */
-class socksify_unmanaged
+class socksify_unmanaged  // NOLINT(clang-diagnostic-padded)
 {
     /**
      * @brief Constructs a socksify_unmanaged instance with the specified log level.
@@ -61,6 +61,19 @@ public:
     [[nodiscard]] bool stop() const;
 
     /**
+     * @brief Enables bypass of the SOCKS proxy for local/LAN traffic.
+     *
+     * When enabled, connections destined for local network addresses are routed
+     * directly (bypassing the SOCKS proxy), while non-LAN traffic continues to be
+     * processed by the configured SOCKS5 proxies.
+     *
+     * @note This option must be configured before calling start() to take effect.
+     *       Changing this after the gateway has been started will not affect the
+     *       currently running instance.
+     */
+    void set_bypass_lan() const;
+
+    /**
      * @brief Adds a SOCKS5 proxy to the gateway.
      * @param endpoint The proxy endpoint in "IP:Port" format.
      * @param protocol The supported protocol(s) for the proxy.
@@ -86,7 +99,7 @@ public:
     [[nodiscard]] bool associate_process_name_to_proxy(
         const std::wstring& process_name,
         LONG_PTR proxy_id) const;
-    bool exclude_process_name(const std::wstring& process_name) const;
+    [[nodiscard]] bool exclude_process_name(const std::wstring& process_name) const;
 
     /**
      * @brief Sets the maximum number of log entries to keep.
@@ -132,13 +145,12 @@ private:
      */
     void print_log(log_level_mx level, const std::string& message) const;
 
-    log_level_mx log_level_{ log_level_mx::error }; ///< The current log level.
     std::string address_; ///< The address for the proxy (if applicable).
     std::unique_ptr<proxy::socks_local_router> proxy_; ///< The core proxy router instance.
     std::unique_ptr<mutex_impl> lock_; ///< Mutex for thread safety.
-
     /// <summary>
     /// Optional output file stream for logging pcap data.
     /// </summary>
     std::optional<std::ofstream> pcap_log_file_;
+    log_level_mx log_level_{ log_level_mx::error }; ///< The current log level.
 };

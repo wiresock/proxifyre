@@ -4,6 +4,8 @@ ProxiFyre elevates the foundational capabilities of the Windows Packet Filter's 
 
 As of **v2.1.1**, ProxiFyre also supports **process exclusions**, allowing you to specify which applications should *bypass* the proxy while others remain proxied. Additionally, performance has been improved through intelligent caching of process matching.
 
+As of **v2.2.0**, ProxiFyre supports **LAN bypass**, allowing local network traffic to pass through without being proxied.
+
 ---
 
 ## Configuration
@@ -16,6 +18,7 @@ The application uses a configuration file named `app-config.json`. This JSON fil
 - **password**: A string that specifies the password for the proxy (optional).
 - **supportedProtocols**: An array of strings specifying the supported protocols (e.g., `"TCP"`, `"UDP"`).
 - **excludes** *(new in v2.1.1)*: An array of application names or paths to exclude from proxy routing.
+- **bypassLan** *(new in v2.2.0)*: A boolean to bypass proxy for local network traffic (default: `false`).
 
 ---
 
@@ -61,7 +64,36 @@ Example:
     "C:\\Program Files\\LocalApp\\NotProxiedApp.exe"
   ]
 }
-````
+```
+
+---
+
+### bypassLan (new in v2.2.0)
+
+When set to `true`, traffic to/from local network ranges will pass through without being proxied. This is useful for accessing local network resources (printers, NAS, local servers) while proxying internet traffic.
+
+**Bypassed ranges:**
+- `10.0.0.0/8` – Private Class A
+- `172.16.0.0/12` – Private Class B (172.16.x.x – 172.31.x.x)
+- `192.168.0.0/16` – Private Class C
+- `224.0.0.0/4` – Multicast (224.x.x.x – 239.x.x.x)
+- `169.254.0.0/16` – Link-local (APIPA)
+
+Example:
+
+```json
+{
+  "logLevel": "Info",
+  "bypassLan": true,
+  "proxies": [
+    {
+      "appNames": ["chrome", "firefox"],
+      "socks5ProxyEndpoint": "127.0.0.1:1080",
+      "supportedProtocols": ["TCP", "UDP"]
+    }
+  ]
+}
+```
 
 ---
 
@@ -76,6 +108,7 @@ If the SOCKS5 proxy does not support authorization, you can skip the `username` 
 ```json
 {
  "logLevel": "Error",
+ "bypassLan": true,
  "proxies": [
    {
      "appNames": ["chrome", "C:\\Program Files\\WindowsApps\\ROBLOXCORPORATION.ROBLOX"],
