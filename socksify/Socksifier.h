@@ -234,6 +234,14 @@ namespace Socksifier
         bool Stop();
 
         /// <summary>
+        /// Enables LAN traffic bypass.
+        /// When enabled, traffic to/from local network ranges (10.x.x.x, 172.16-31.x.x,
+        /// 192.168.x.x, 224.0.0.x, 169.254.x.x) will pass through without being proxied.
+        /// </summary>
+        /// <remarks>This must be called before Start() to take effect.</remarks>
+        void SetBypassLan();
+
+        /// <summary>
         /// Adds a SOCKS5 proxy to the gateway.
         /// </summary>
         /// <param name="endpoint">The proxy endpoint (IP:Port).</param>

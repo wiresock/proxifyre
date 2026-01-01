@@ -247,7 +247,7 @@ namespace proxy
                         if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
                         {
                             {
-                                std::lock_guard lock(process_resolve_buffer_mutex_);
+                                std::scoped_lock lock(process_resolve_buffer_mutex_);
                                 process_resolve_buffer_queue_.push(std::move(allocated_buffer));
                             }
                             process_resolve_buffer_queue_cv_.notify_one();
@@ -270,7 +270,7 @@ namespace proxy
                         if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
                         {
                             {
-                                std::lock_guard lock(process_resolve_buffer_mutex_);
+                                std::scoped_lock lock(process_resolve_buffer_mutex_);
                                 process_resolve_buffer_queue_.push(std::move(allocated_buffer));
                             }
                             process_resolve_buffer_queue_cv_.notify_one();
@@ -573,6 +573,19 @@ namespace proxy
         }
 
         /**
+         * @brief Enables LAN traffic bypass by adding pass-through filters.
+         *
+         * When called, traffic to/from local network ranges (10.x.x.x, 172.16.x.x-172.31.x.x,
+         * 192.168.x.x, 224.0.0.x, 169.254.x.x) will pass through without being proxied.
+         *
+         * @note This must be called before start() to take effect.
+         */
+        void set_bypass_lan() noexcept
+        {
+            add_lan_passover_filters_v4();
+        }
+
+        /**
          * Checks whether the associated driver is loaded or not.
          * @return boolean representing the load status of the driver (true if loaded, false if not).
          */
@@ -659,7 +672,7 @@ namespace proxy
                                                       std::tuple<net::ip_address_v4, uint16_t, std::unique_ptr<
                                                                      s5_tcp_proxy_server::negotiate_context_t>>
                                                       {
-                                                          std::lock_guard lock(tcp_mapper_lock_);
+                                                          std::scoped_lock lock(tcp_mapper_lock_);
 
                                                           if (const auto it = tcp_mapper_.find(port); it != tcp_mapper_.
                                                               end())
@@ -696,7 +709,7 @@ namespace proxy
                                                       std::tuple<net::ip_address_v4, uint16_t, std::unique_ptr<
                                                                      s5_udp_proxy_server::negotiate_context_t>>
                                                       {
-                                                          std::lock_guard lock(udp_mapper_lock_);
+                                                          std::scoped_lock lock(udp_mapper_lock_);
 
                                                           if (const auto it = udp_mapper_.find(port); it != udp_mapper_.
                                                               end())
@@ -752,7 +765,7 @@ namespace proxy
                 }
 
                 // Lock the mutex to safely add the proxy servers to the shared data structure
-                std::lock_guard lock(lock_);
+                std::scoped_lock lock(lock_);
 
                 proxy_servers_.emplace_back(
                     std::move(socks_tcp_proxy_server), std::move(socks_udp_proxy_server));
@@ -778,7 +791,7 @@ namespace proxy
         {
             // The lock_guard object acquires the lock in a safe manner,
             // ensuring it gets released even if an exception is thrown.
-            std::lock_guard lock(lock_);
+            std::scoped_lock lock(lock_);
 
             // Check if the provided proxy ID is within the range of available proxies
             if (proxy_id >= proxy_servers_.size())
@@ -813,7 +826,7 @@ namespace proxy
         bool exclude_process_name(const std::wstring& excluded_entry) noexcept
         {
             // The lock_guard makes this function thread-safe against other operations using `lock_`.
-            std::lock_guard lock(lock_);
+            std::scoped_lock lock(lock_);
 
             try
             {
@@ -1124,7 +1137,7 @@ namespace proxy
             {
                 if (udp_redirect_->is_new_endpoint(buffer))
                 {
-                    std::lock_guard lock(udp_mapper_lock_);
+                    std::scoped_lock lock(udp_mapper_lock_);
                     udp_mapper_.insert(ntohs(udp_header->th_sport));
 
                     NETLIB_LOG(log_level::info,
@@ -1218,7 +1231,7 @@ namespace proxy
                 // If this is a SYN packet (connection initiation), map the source port to the destination endpoint
                 if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
                 {
-                    std::lock_guard lock(tcp_mapper_lock_);
+                    std::scoped_lock lock(tcp_mapper_lock_);
                     tcp_mapper_[ntohs(tcp_header->th_sport)] =
                         net::ip_endpoint(net::ip_address_v4(ip_header->ip_dst),
                             ntohs(tcp_header->th_dport));
@@ -1493,6 +1506,55 @@ namespace proxy
                 std::unique_lock lock(adapters_to_filter_lock_);
                 adapters_to_filter_ = std::move(adapters_to_filter);
             }
+        }
+        
+        /**
+         * @brief Builds and adds IPv4 pass-through filters for common local network ranges.
+         *
+         * The function generates inbound and outbound filters that allow traffic
+         * for a predefined set of local and special-purpose IPv4 subnets and adds
+         * them to the static filters list.
+         */
+        void add_lan_passover_filters_v4()
+        {
+            // List of local IPv4 address ranges (address + subnet mask)
+            static constexpr std::array<std::pair<const char*, const char*>, 5> local_ranges{ {
+                {"10.0.0.0",    "255.0.0.0"},
+                {"172.16.0.0",  "255.240.0.0"},
+                {"192.168.0.0", "255.255.0.0"},
+                {"224.0.0.0",   "255.255.255.0"},
+                {"169.254.0.0", "255.255.0.0"}
+            } };
+
+            // Helper to construct an IPv4 subnet object from string literals
+            const auto to_subnet = [](const char* address, const char* mask) {
+                return net::ip_subnet{
+                    net::ip_address_v4{address},
+                    net::ip_address_v4{mask}
+                };
+                };
+
+            for (const auto& [address, mask] : local_ranges) {
+                const auto subnet = to_subnet(address, mask);
+
+                // Allow inbound traffic originating from the local subnet
+                ndisapi::filter<net::ip_address_v4> in_filter;
+                in_filter
+                    .set_direction(ndisapi::direction_t::in)
+                    .set_action(ndisapi::action_t::pass)
+                    .set_source_address(subnet);
+                static_filters_.add_filter_front(in_filter);
+
+                // Allow outbound traffic destined to the local subnet
+                ndisapi::filter<net::ip_address_v4> out_filter;
+                out_filter
+                    .set_direction(ndisapi::direction_t::out)
+                    .set_action(ndisapi::action_t::pass)
+                    .set_dest_address(subnet);
+                static_filters_.add_filter_front(out_filter);
+            }
+
+            NETLIB_LOG(log_level::info, "LAN bypass enabled - local network traffic will not be proxied");
         }
     };
 }

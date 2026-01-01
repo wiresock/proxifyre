@@ -68,6 +68,14 @@ namespace ProxiFyre
             _socksify.LogLimit = 100;
             _socksify.LogEventInterval = 1000;
 
+            // Configure LAN bypass if enabled
+            if (serviceSettings.BypassLan)
+            {
+                _socksify.SetBypassLan();
+                if (_logLevel >= LogLevel.Info)
+                    LoggerInstance.Info("LAN bypass enabled - local network traffic will not be proxied.");
+            }
+
             foreach (var appSettings in serviceSettings.Proxies)
             {
                 // Add the defined SOCKS5 proxies
@@ -166,11 +174,13 @@ namespace ProxiFyre
             /// <param name="logLevel">The log level as a string.</param>
             /// <param name="proxies">The list of proxy application settings.</param>
             /// <param name="excludedList">The list of process names or paths to exclude from proxying.</param>
-            public ProxiFyreSettings(string logLevel, List<AppSettings> proxies, List<string> excludedList = null)
+            /// <param name="bypassLan">Whether to bypass LAN traffic.</param>
+            public ProxiFyreSettings(string logLevel, List<AppSettings> proxies, List<string> excludedList = null, bool bypassLan = false)
             {
                 LogLevel = logLevel;
                 Proxies = proxies;
                 ExcludedList = excludedList ?? new List<string>();
+                BypassLan = bypassLan;
             }
 
             /// <summary>
@@ -188,6 +198,12 @@ namespace ProxiFyre
             /// </summary>
             [JsonProperty("excludes", NullValueHandling = NullValueHandling.Ignore)]
             public List<string> ExcludedList { get; }
+
+            /// <summary>
+            /// Gets a value indicating whether LAN traffic should bypass the proxy.
+            /// </summary>
+            [JsonProperty("bypassLan", NullValueHandling = NullValueHandling.Ignore)]
+            public bool BypassLan { get; }
         }
 
         /// <summary>
