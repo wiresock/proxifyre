@@ -61,7 +61,15 @@ public:
     [[nodiscard]] bool stop() const;
 
     /**
-     * @brief Enables LAN traffic bypass.
+     * @brief Enables bypass of the SOCKS proxy for local/LAN traffic.
+     *
+     * When enabled, connections destined for local network addresses are routed
+     * directly (bypassing the SOCKS proxy), while non-LAN traffic continues to be
+     * processed by the configured SOCKS5 proxies.
+     *
+     * @note This option must be configured before calling start() to take effect.
+     *       Changing this after the gateway has been started will not affect the
+     *       currently running instance.
      */
     void set_bypass_lan() const;
 
