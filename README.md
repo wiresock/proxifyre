@@ -1,6 +1,10 @@
-# ProxiFyre: SOCKS5 Proxifier for Windows
+# ProxiFyre: SOCKS5 Proxifier for Windows with UDP Support
 
-ProxiFyre elevates the foundational capabilities of the Windows Packet Filter's [socksify](https://github.com/wiresock/ndisapi/tree/master/examples/cpp/socksify) demo, introducing robust enhancements. Not only does it seamlessly integrate support for UDP, but it also empowers users with the flexibility of managing multiple proxy instances. Streamlining its configuration process, ProxiFyre dynamically sources its settings from an `app-config.json` file, ensuring a more intuitive and user-friendly experience. Furthermore, with adaptability in mind, ProxiFyre can be effortlessly configured to run as a Windows Service, providing continuous operation without the need for manual intervention.
+**ProxiFyre** enables applications without native proxy support to transparently route both TCP and UDP traffic through a SOCKS5 proxy, enabling advanced use cases such as **QUIC over SOCKS**—a capability not supported by modern web browsers.
+
+Built on top of the Windows Packet Filter `socksify` demo, ProxiFyre significantly extends its foundational functionality with production-ready enhancements. In addition to full UDP support, ProxiFyre allows users to manage **multiple SOCKS5 proxy instances** simultaneously.
+
+Configuration is streamlined through a single `app-config.json` file, making setup intuitive and reproducible. For long-running or unattended use cases, ProxiFyre can also be configured to run as a **Windows Service**, ensuring continuous operation without manual intervention.
 
 As of **v2.1.1**, ProxiFyre also supports **process exclusions**, allowing you to specify which applications should *bypass* the proxy while others remain proxied. Additionally, performance has been improved through intelligent caching of process matching.
 
