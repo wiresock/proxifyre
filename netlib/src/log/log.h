@@ -966,6 +966,13 @@ namespace netlib::log {
                 // Always add the message
                 if (!first_component) out << ' ';
                 out << message << '\n';
+                out.emit();
+                try {
+                    stream.flush();  // Stream buffer -> OS/console (may throw)
+                }
+                catch (...) {
+                    // Ignore flush errors - logging should not crash the application
+                }
             }
             catch (...) {
                 // Ultimate fallback for any formatting errors
@@ -974,6 +981,13 @@ namespace netlib::log {
                     << compact_thread_id();
                 out << std::dec << std::setfill(' ') << "] [" << derived_name() << "] "
                     << message << '\n';
+                out.emit();
+                try {
+                    stream.flush();
+                }
+                catch (...) {
+                    // Silently ignore - nothing more we can do
+                }
             }
         }
 
