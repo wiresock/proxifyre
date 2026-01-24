@@ -926,7 +926,6 @@ namespace iphelper
             net_row->IsRouter = TRUE;
             net_row->IsUnreachable = TRUE;
 
-            // Clear previous error state so GetLastError() reflects only this operation's result
             SetLastError(ERROR_SUCCESS);
 
             if (const auto error_code = CreateIpNetEntry2(net_row.get());
@@ -1278,6 +1277,10 @@ namespace iphelper
             {
                 std::ranges::for_each(gateway_address_list_, [this](auto& address)
                 {
+                    // Skip if already resolved
+                    if (address.hardware_address.has_value())
+                        return;
+
                     MIB_IPNET_ROW2 row{};
 
                     row.Address.si_family = address.ss_family;
@@ -1292,9 +1295,26 @@ namespace iphelper
                         row.Address.Ipv6 = sockaddr_in6(address);
                         break;
                     default:
-                        break;
+                        return;
                     }
 
+                    // Try to get from existing ARP/NDP cache first (fast path)
+                    // Only accept cached entries that have a valid, complete MAC address
+                    if (const auto error_code = GetIpNetEntry2(&row); NO_ERROR == error_code &&
+                        row.State != NlnsUnreachable &&
+                        row.State != NlnsIncomplete &&
+                        row.PhysicalAddressLength == ETH_ALEN)
+                    {
+                        const net::mac_address cached_mac(row.PhysicalAddress);
+                        // Ensure the MAC is not all zeros
+                        if (cached_mac != net::mac_address{})
+                        {
+                            address.hardware_address = cached_mac;
+                            return;
+                        }
+                    }
+
+                    // Fall back to resolution (slow path) - only if really needed
                     if (const auto error_code = ResolveIpNetEntry2(&row, nullptr); NO_ERROR == error_code)
                     {
                         address.hardware_address = net::mac_address(row.PhysicalAddress);
