@@ -76,6 +76,15 @@ namespace proxy
         static constexpr std::size_t max_resolve_queue_depth_ = 2048;
 
         /**
+         * @brief Minimum interval between consecutive drop-counter warning logs from
+         *        the resolver thread. The cumulative dropped count is preserved
+         *        between emissions, so no information is lost — only the log rate
+         *        is throttled to avoid flooding under sustained overload where
+         *        resolver drain cycles can fire many times per second.
+         */
+        static constexpr std::chrono::seconds drop_log_throttle_interval_{ 5 };
+
+        /**
          * @brief Cumulative count of TCP/UDP packets dropped because
          *        process_resolve_buffer_queue_ was full. Sampled and logged at a
          *        coarse rate from the resolver thread to avoid log floods under
@@ -1406,6 +1415,7 @@ namespace proxy
             // the sweep still runs when the deferred-resolve queue stays empty.
             constexpr auto maintenance_interval = tcp_mapper_entry_ttl_ / 2;
             auto last_sweep = std::chrono::steady_clock::now();
+            auto last_drop_log = last_sweep;
 
             while (is_active_.load())
             {
@@ -1461,16 +1471,22 @@ namespace proxy
 
                 // Periodically surface the count of packets dropped due to a full
                 // resolve queue so operators can correlate connectivity issues with
-                // resolver-thread overload. Logged at most once per drain cycle and
-                // only when the count has advanced. Relaxed ordering is sufficient
-                // here because the counter is a coarse overload indicator; slight
-                // skew with the queue-size check on other threads is acceptable.
-                if (const auto dropped = resolve_queue_dropped_packets_.exchange(0, std::memory_order_relaxed);
-                    dropped != 0)
+                // resolver-thread overload. The emission is throttled to at most
+                // once per drop_log_throttle_interval_ — between emissions the
+                // cumulative count keeps accumulating in the atomic counter, so no
+                // drops are lost; only the log rate is bounded. Relaxed ordering is
+                // sufficient because the counter is a coarse overload indicator.
+                if (const auto now = std::chrono::steady_clock::now();
+                    now - last_drop_log >= drop_log_throttle_interval_)
                 {
-                    NETLIB_LOG(log_level::warning,
-                        "Dropped {} packet(s) because process_resolve_buffer_queue_ exceeded {} entries.",
-                        dropped, max_resolve_queue_depth_);
+                    if (const auto dropped = resolve_queue_dropped_packets_.exchange(0, std::memory_order_relaxed);
+                        dropped != 0)
+                    {
+                        NETLIB_LOG(log_level::warning,
+                            "Dropped {} packet(s) because process_resolve_buffer_queue_ exceeded {} entries.",
+                            dropped, max_resolve_queue_depth_);
+                    }
+                    last_drop_log = now;
                 }
 
                 while (!local_queue.empty())
