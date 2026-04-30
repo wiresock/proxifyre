@@ -1470,24 +1470,18 @@ namespace proxy
                     }
                 }
 
-                // Nothing else to do on a maintenance-only wakeup (timer fired with
-                // an empty queue) — skip process-lookup refresh and drop-counter
-                // reporting until there is real packet work.
-                if (local_queue.empty())
-                {
-                    continue;
-                }
-
-                // Actualize process lookup before processing
-                process_lookup_v4_.actualize(true, true);
-
-                // Periodically surface the count of packets dropped due to a full
-                // resolve queue so operators can correlate connectivity issues with
-                // resolver-thread overload. The emission is throttled to at most
-                // once per drop_log_throttle_interval_ — between emissions the
-                // cumulative count keeps accumulating in the atomic counter, so no
-                // drops are lost; only the log rate is bounded. Relaxed ordering is
-                // sufficient because the counter is a coarse overload indicator.
+                // Periodically surface the counts of packets dropped due to a
+                // full resolve queue or buffer-pool allocation failure so
+                // operators can correlate connectivity issues with resolver
+                // overload / memory pressure. The emission is throttled to at
+                // most once per drop_log_throttle_interval_ — between
+                // emissions the cumulative counts keep accumulating in the
+                // atomic counters, so no drops are lost; only the log rate is
+                // bounded. Performed before the local_queue.empty() early-
+                // continue so the signal is still surfaced when the queue
+                // stays empty (e.g. resolver succeeds inline but allocations
+                // are failing). Relaxed ordering is sufficient because the
+                // counters are coarse overload indicators.
                 if (const auto now = std::chrono::steady_clock::now();
                     now - last_drop_log >= drop_log_throttle_interval_)
                 {
@@ -1507,6 +1501,17 @@ namespace proxy
                     }
                     last_drop_log = now;
                 }
+
+                // Nothing else to do on a maintenance-only wakeup (timer fired with
+                // an empty queue) — skip process-lookup refresh until there is
+                // real packet work.
+                if (local_queue.empty())
+                {
+                    continue;
+                }
+
+                // Actualize process lookup before processing
+                process_lookup_v4_.actualize(true, true);
 
                 while (!local_queue.empty())
                 {
