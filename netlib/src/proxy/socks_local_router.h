@@ -472,6 +472,11 @@ namespace proxy
             if (!packet_filter_)
             {
                 NETLIB_LOG(log_level::error, "Packet filter is not initialized!");
+                // Roll back is_active_ so subsequent stop()/start() cycles see
+                // a consistent inactive router state. The resolver thread has
+                // not been started yet on this path, so resolver_should_exit_
+                // does not need to be touched (it was just reset above).
+                is_active_.store(false);
                 return false;
             }
 
@@ -518,14 +523,20 @@ namespace proxy
             {
                 NETLIB_LOG(log_level::error, "Failed to start NDIS packet filter");
 
-                // Attempt to cancel notification of IP interface changes
+                // Attempt to cancel notification of IP interface changes.
+                // Log on failure but continue with cleanup either way: the
+                // packet filter never started, so proxies, the IOCP thread
+                // pool, and the resolver thread must all be torn down
+                // regardless of whether cancel_notify_ip_interface_change
+                // succeeded.
                 if (!this->cancel_notify_ip_interface_change())
                 {
-                    // Log an error if cancelling notification of IP interface changes failed
                     NETLIB_LOG(
                         log_level::error, "cancel_notify_ip_interface_change has failed, lasterror: {}",
                         GetLastError());
+                }
 
+                {
                     std::shared_lock lock(lock_);
 
                     // Stop all proxies
@@ -542,18 +553,18 @@ namespace proxy
 
                     // Stop the thread pool associated with the I/O completion port
                     io_port_.stop_thread_pool();
-
-                    is_active_.store(false);
-
-                    // The packet filter never started in this error branch, so
-                    // no callback thread can still be enqueuing — safe to
-                    // signal resolver shutdown directly.
-                    resolver_should_exit_.store(true);
-                    process_resolve_buffer_queue_cv_.notify_all();
-
-                    if (process_resolve_thread_.joinable())
-                        process_resolve_thread_.join();
                 }
+
+                is_active_.store(false);
+
+                // The packet filter never started in this error branch, so
+                // no callback thread can still be enqueuing — safe to
+                // signal resolver shutdown directly.
+                resolver_should_exit_.store(true);
+                process_resolve_buffer_queue_cv_.notify_all();
+
+                if (process_resolve_thread_.joinable())
+                    process_resolve_thread_.join();
             }
 
             return is_active_;
