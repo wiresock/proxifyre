@@ -282,33 +282,7 @@ namespace proxy
                         {
                             return result.value();
                         }
-                        // Queue for the later processing, but cap the queue depth so a
-                        // backed-up resolver thread cannot grow the queue (and the
-                        // intermediate buffer pool) without bound under load.
-                        bool queue_full = false;
-                        {
-                            std::scoped_lock lock(process_resolve_buffer_mutex_);
-                            queue_full = process_resolve_buffer_queue_.size() >= max_resolve_queue_depth_;
-                        }
-                        if (queue_full)
-                        {
-                            resolve_queue_dropped_packets_.fetch_add(1, std::memory_order_relaxed);
-                            return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
-                        }
-                        if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
-                        {
-                            {
-                                std::scoped_lock lock(process_resolve_buffer_mutex_);
-                                process_resolve_buffer_queue_.push(std::move(allocated_buffer));
-                            }
-                            process_resolve_buffer_queue_cv_.notify_one();
-                        }
-                        else
-                        {
-                            // Handle the error, e.g., log it or take corrective action
-                            NETLIB_LOG(log_level::error, "Failed to allocate buffer.");
-                        }
-                        return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+                        return enqueue_for_deferred_resolve(buffer);
                     }
 
                     if (ip_header->ip_p == IPPROTO_TCP)
@@ -317,33 +291,7 @@ namespace proxy
                         {
                             return result.value();
                         }
-                        // Queue for the later processing, but cap the queue depth so a
-                        // backed-up resolver thread cannot grow the queue (and the
-                        // intermediate buffer pool) without bound under load.
-                        bool tcp_queue_full = false;
-                        {
-                            std::scoped_lock lock(process_resolve_buffer_mutex_);
-                            tcp_queue_full = process_resolve_buffer_queue_.size() >= max_resolve_queue_depth_;
-                        }
-                        if (tcp_queue_full)
-                        {
-                            resolve_queue_dropped_packets_.fetch_add(1, std::memory_order_relaxed);
-                            return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
-                        }
-                        if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
-                        {
-                            {
-                                std::scoped_lock lock(process_resolve_buffer_mutex_);
-                                process_resolve_buffer_queue_.push(std::move(allocated_buffer));
-                            }
-                            process_resolve_buffer_queue_cv_.notify_one();
-                        }
-                        else
-                        {
-                            // Handle the error, e.g., log it or take corrective action
-                            NETLIB_LOG(log_level::error, "Failed to allocate buffer.");
-                        }
-                        return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+                        return enqueue_for_deferred_resolve(buffer);
                     }
 
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
@@ -1378,6 +1326,52 @@ namespace proxy
         }
 
         /**
+        * @brief Enqueues a TCP/UDP packet for deferred process resolution, dropping
+        *        it if process_resolve_buffer_queue_ is already at capacity.
+        *
+        * Bounding the queue is what keeps the intermediate buffer pool's high-water
+        * mark finite when the resolver thread cannot keep up with the incoming
+        * packet rate. The check is performed under process_resolve_buffer_mutex_
+        * before allocating from the pool so an overload condition does not
+        * produce buffer-pool churn. A small TOCTOU race with concurrent filter
+        * threads is tolerated; in the worst case the queue may briefly exceed
+        * max_resolve_queue_depth_ by the number of concurrent filter callbacks.
+        *
+        * @param buffer The intermediate buffer describing the packet to enqueue.
+        * @return Always returns a 'drop' action: the packet is either queued for
+        *         later re-injection (and therefore dropped from the current pass)
+        *         or dropped outright due to overload / allocation failure.
+        */
+        packet_filter::packet_action enqueue_for_deferred_resolve(ndisapi::intermediate_buffer& buffer)
+        {
+            {
+                std::scoped_lock lock(process_resolve_buffer_mutex_);
+                if (process_resolve_buffer_queue_.size() >= max_resolve_queue_depth_)
+                {
+                    // Slight undercounting under contention is acceptable; this counter
+                    // is a coarse overload signal, not a precise accounting metric.
+                    resolve_queue_dropped_packets_.fetch_add(1, std::memory_order_relaxed);
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+                }
+            }
+
+            if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
+            {
+                {
+                    std::scoped_lock lock(process_resolve_buffer_mutex_);
+                    process_resolve_buffer_queue_.push(std::move(allocated_buffer));
+                }
+                process_resolve_buffer_queue_cv_.notify_one();
+            }
+            else
+            {
+                // Handle the error, e.g., log it or take corrective action
+                NETLIB_LOG(log_level::error, "Failed to allocate buffer.");
+            }
+            return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+        }
+
+        /**
         * @brief Thread procedure for deferred process resolution and packet forwarding.
         *
         * This method runs in a dedicated thread and is responsible for processing packets
@@ -1446,7 +1440,9 @@ namespace proxy
                 // Periodically surface the count of packets dropped due to a full
                 // resolve queue so operators can correlate connectivity issues with
                 // resolver-thread overload. Logged at most once per drain cycle and
-                // only when the count has advanced.
+                // only when the count has advanced. Relaxed ordering is sufficient
+                // here because the counter is a coarse overload indicator; slight
+                // skew with the queue-size check on other threads is acceptable.
                 if (const auto dropped = resolve_queue_dropped_packets_.exchange(0, std::memory_order_relaxed);
                     dropped != 0)
                 {
