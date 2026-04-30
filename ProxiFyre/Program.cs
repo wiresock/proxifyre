@@ -325,7 +325,7 @@ namespace ProxiFyre
 
                         x.RunAsLocalSystem();
 
-                        x.SetDescription("ProxiFyre - SOCKS5 Proxifyre Service");
+                        x.SetDescription("ProxiFyre - SOCKS5 ProxiFyre Service");
                         x.SetDisplayName("ProxiFyre Service");
                         x.SetServiceName("ProxiFyreService");
                     });
@@ -370,8 +370,8 @@ namespace ProxiFyre
                         // Surface the captured installer output so failures remain diagnosable.
                         var captured = capturedOutput.ToString();
                         if (!string.IsNullOrEmpty(captured))
-                            originalOut.Write(captured);
-                        originalOut.WriteLine($"ProxiFyre {command} command failed (exit code: {exitCode}).");
+                            originalError.Write(captured);
+                        originalError.WriteLine($"ProxiFyre {command} command failed (exit code: {exitCode}).");
                     }
                 }
 
