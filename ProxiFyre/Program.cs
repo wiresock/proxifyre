@@ -281,23 +281,102 @@ namespace ProxiFyre
         /// <summary>
         /// Main method. Configures and runs the ProxiFyre service using Topshelf.
         /// </summary>
-        private static void Main()
+        /// <param name="args">Command-line arguments (e.g., install, uninstall, start, stop).</param>
+        /// <returns>The Topshelf exit code as an integer.</returns>
+        private static int Main(string[] args)
         {
-            HostFactory.Run(x =>
+            // Detect Topshelf lifecycle commands. For these commands the underlying
+            // .NET installer (System.Configuration.Install.InstallContext, invoked via
+            // ManagedInstallerClass.InstallHelper) writes multiple localized status
+            // lines to Console.Out with noticeable delays between them, which can lead
+            // users to close the console before the operation has actually completed.
+            // We capture that output and replace it with a single, unambiguous message.
+            var command = args != null && args.Length > 0 && !string.IsNullOrEmpty(args[0])
+                ? args[0].ToLowerInvariant()
+                : null;
+
+            var isLifecycleCommand = command == "install"
+                                     || command == "uninstall"
+                                     || command == "start"
+                                     || command == "stop";
+
+            var originalOut = Console.Out;
+            var originalError = Console.Error;
+
+            using (var capturedOutput = isLifecycleCommand ? new StringWriter() : null)
             {
-                x.Service<ProxiFyreService>(s =>
+                if (isLifecycleCommand)
                 {
-                    s.ConstructUsing(name => new ProxiFyreService());
-                    s.WhenStarted(tc => tc.Start());
-                    s.WhenStopped(tc => tc.Stop());
-                });
+                    Console.SetOut(capturedOutput);
+                    Console.SetError(capturedOutput);
+                }
 
-                x.RunAsLocalSystem();
+                TopshelfExitCode exitCode;
+                try
+                {
+                    exitCode = HostFactory.Run(x =>
+                    {
+                        x.Service<ProxiFyreService>(s =>
+                        {
+                            s.ConstructUsing(name => new ProxiFyreService());
+                            s.WhenStarted(tc => tc.Start());
+                            s.WhenStopped(tc => tc.Stop());
+                        });
 
-                x.SetDescription("ProxiFyre - SOCKS5 Proxifyre Service");
-                x.SetDisplayName("ProxiFyre Service");
-                x.SetServiceName("ProxiFyreService");
-            });
+                        x.RunAsLocalSystem();
+
+                        x.SetDescription("ProxiFyre - SOCKS5 Proxifyre Service");
+                        x.SetDisplayName("ProxiFyre Service");
+                        x.SetServiceName("ProxiFyreService");
+                    });
+                }
+                finally
+                {
+                    if (isLifecycleCommand)
+                    {
+                        Console.SetOut(originalOut);
+                        Console.SetError(originalError);
+                    }
+                }
+
+                if (isLifecycleCommand)
+                {
+                    if (exitCode == TopshelfExitCode.Ok)
+                    {
+                        string message;
+                        switch (command)
+                        {
+                            case "install":
+                                message = "ProxiFyre service installed successfully.";
+                                break;
+                            case "uninstall":
+                                message = "ProxiFyre service uninstalled successfully.";
+                                break;
+                            case "start":
+                                message = "ProxiFyre service started successfully.";
+                                break;
+                            case "stop":
+                                message = "ProxiFyre service stopped successfully.";
+                                break;
+                            default:
+                                message = "ProxiFyre command completed successfully.";
+                                break;
+                        }
+
+                        originalOut.WriteLine(message);
+                    }
+                    else
+                    {
+                        // Surface the captured installer output so failures remain diagnosable.
+                        var captured = capturedOutput.ToString();
+                        if (!string.IsNullOrEmpty(captured))
+                            originalOut.Write(captured);
+                        originalOut.WriteLine($"ProxiFyre {command} command failed (exit code: {exitCode}).");
+                    }
+                }
+
+                return (int)exitCode;
+            }
         }
     }
 }
