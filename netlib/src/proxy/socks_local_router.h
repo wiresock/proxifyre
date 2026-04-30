@@ -93,6 +93,15 @@ namespace proxy
         std::atomic<std::uint64_t> resolve_queue_dropped_packets_{ 0 };
 
         /**
+         * @brief Cumulative count of TCP/UDP packets dropped because the intermediate
+         *        buffer pool failed to allocate. Reported alongside
+         *        resolve_queue_dropped_packets_ via the same time-throttled log path
+         *        in the resolver thread, avoiding a per-failure log line under
+         *        memory pressure.
+         */
+        std::atomic<std::uint64_t> resolve_queue_alloc_failures_{ 0 };
+
+        /**
          * @brief Stores the set of UDP ports being mapped.
          */
         std::unordered_set<uint16_t> udp_mapper_;
@@ -1374,8 +1383,11 @@ namespace proxy
             }
             else
             {
-                // Handle the error, e.g., log it or take corrective action
-                NETLIB_LOG(log_level::error, "Failed to allocate buffer.");
+                // Treat allocation failure as a drop and account for it via a
+                // dedicated counter so it is surfaced through the resolver
+                // thread's time-throttled log path. Avoids emitting a log line
+                // per failure under memory pressure, which could itself flood.
+                resolve_queue_alloc_failures_.fetch_add(1, std::memory_order_relaxed);
             }
             return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
         }
@@ -1483,8 +1495,15 @@ namespace proxy
                         dropped != 0)
                     {
                         NETLIB_LOG(log_level::warning,
-                            "Dropped {} packet(s) because process_resolve_buffer_queue_ exceeded {} entries.",
+                            "Dropped {} packet(s) because process_resolve_buffer_queue_ reached capacity at {} entries.",
                             dropped, max_resolve_queue_depth_);
+                    }
+                    if (const auto alloc_failures = resolve_queue_alloc_failures_.exchange(0, std::memory_order_relaxed);
+                        alloc_failures != 0)
+                    {
+                        NETLIB_LOG(log_level::error,
+                            "Dropped {} packet(s) because the intermediate buffer pool failed to allocate.",
+                            alloc_failures);
                     }
                     last_drop_log = now;
                 }
