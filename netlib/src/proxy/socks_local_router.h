@@ -233,6 +233,60 @@ namespace proxy
         */
         std::atomic_bool is_active_{ false };
 
+        /**
+         * @brief Enqueues a TCP/UDP packet for deferred process resolution, dropping
+         *        it if process_resolve_buffer_queue_ is already at capacity.
+         *
+         * Bounding the queue is what keeps the intermediate buffer pool's high-water
+         * mark finite when the resolver thread cannot keep up with the incoming
+         * packet rate. The check is performed under process_resolve_buffer_mutex_
+         * before allocating from the pool so an overload condition does not
+         * produce buffer-pool churn. A small TOCTOU race with concurrent filter
+         * threads is tolerated; in the worst case the queue may briefly exceed
+         * max_resolve_queue_depth_ by the number of concurrent filter callbacks.
+         *
+         * Defined in the private section above the constructor so its declaration
+         * is in scope for the packet_filter callback lambda constructed in the
+         * constructor body, regardless of compiler treatment of complete-class
+         * context for member name lookup inside lambdas.
+         *
+         * @param buffer The intermediate buffer describing the packet to enqueue.
+         * @return Always returns a 'drop' action: the packet is either queued for
+         *         later re-injection (and therefore dropped from the current pass)
+         *         or dropped outright due to overload / allocation failure.
+         */
+        packet_filter::packet_action enqueue_for_deferred_resolve(ndisapi::intermediate_buffer& buffer)
+        {
+            {
+                std::scoped_lock lock(process_resolve_buffer_mutex_);
+                if (process_resolve_buffer_queue_.size() >= max_resolve_queue_depth_)
+                {
+                    // Slight undercounting under contention is acceptable; this counter
+                    // is a coarse overload signal, not a precise accounting metric.
+                    resolve_queue_dropped_packets_.fetch_add(1, std::memory_order_relaxed);
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+                }
+            }
+
+            if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
+            {
+                {
+                    std::scoped_lock lock(process_resolve_buffer_mutex_);
+                    process_resolve_buffer_queue_.push(std::move(allocated_buffer));
+                }
+                process_resolve_buffer_queue_cv_.notify_one();
+            }
+            else
+            {
+                // Treat allocation failure as a drop and account for it via a
+                // dedicated counter so it is surfaced through the resolver
+                // thread's time-throttled log path. Avoids emitting a log line
+                // per failure under memory pressure, which could itself flood.
+                resolve_queue_alloc_failures_.fetch_add(1, std::memory_order_relaxed);
+            }
+            return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+        }
+
     public:
         enum supported_protocols : uint8_t
         {
@@ -1341,55 +1395,6 @@ namespace proxy
                 static_cast<DWORD>(packet_queue.size()),
                 &packets_success
             );
-        }
-
-        /**
-         * @brief Enqueues a TCP/UDP packet for deferred process resolution, dropping
-         *        it if process_resolve_buffer_queue_ is already at capacity.
-         *
-         * Bounding the queue is what keeps the intermediate buffer pool's high-water
-         * mark finite when the resolver thread cannot keep up with the incoming
-         * packet rate. The check is performed under process_resolve_buffer_mutex_
-         * before allocating from the pool so an overload condition does not
-         * produce buffer-pool churn. A small TOCTOU race with concurrent filter
-         * threads is tolerated; in the worst case the queue may briefly exceed
-         * max_resolve_queue_depth_ by the number of concurrent filter callbacks.
-         *
-         * @param buffer The intermediate buffer describing the packet to enqueue.
-         * @return Always returns a 'drop' action: the packet is either queued for
-         *         later re-injection (and therefore dropped from the current pass)
-         *         or dropped outright due to overload / allocation failure.
-         */
-        packet_filter::packet_action enqueue_for_deferred_resolve(ndisapi::intermediate_buffer& buffer)
-        {
-            {
-                std::scoped_lock lock(process_resolve_buffer_mutex_);
-                if (process_resolve_buffer_queue_.size() >= max_resolve_queue_depth_)
-                {
-                    // Slight undercounting under contention is acceptable; this counter
-                    // is a coarse overload signal, not a precise accounting metric.
-                    resolve_queue_dropped_packets_.fetch_add(1, std::memory_order_relaxed);
-                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
-                }
-            }
-
-            if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
-            {
-                {
-                    std::scoped_lock lock(process_resolve_buffer_mutex_);
-                    process_resolve_buffer_queue_.push(std::move(allocated_buffer));
-                }
-                process_resolve_buffer_queue_cv_.notify_one();
-            }
-            else
-            {
-                // Treat allocation failure as a drop and account for it via a
-                // dedicated counter so it is surfaced through the resolver
-                // thread's time-throttled log path. Avoids emitting a log line
-                // per failure under memory pressure, which could itself flood.
-                resolve_queue_alloc_failures_.fetch_add(1, std::memory_order_relaxed);
-            }
-            return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
         }
 
         /**
