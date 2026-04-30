@@ -291,7 +291,7 @@ namespace ProxiFyre
             // lines to Console.Out with noticeable delays between them, which can lead
             // users to close the console before the operation has actually completed.
             // We capture that output and replace it with a single, unambiguous message.
-            var command = args != null && args.Length > 0 && !string.IsNullOrEmpty(args[0])
+            var command = args.Length > 0 && !string.IsNullOrEmpty(args[0])
                 ? args[0].ToLowerInvariant()
                 : null;
 
