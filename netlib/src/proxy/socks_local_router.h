@@ -234,6 +234,20 @@ namespace proxy
         std::atomic_bool is_active_{ false };
 
         /**
+         * @brief Atomic flag that signals the deferred-resolve thread to exit.
+         *
+         * Set to true only after the packet filter has been fully stopped (so no
+         * more enqueue_for_deferred_resolve calls can race the resolver thread's
+         * exit decision). Kept distinct from is_active_ because stop() clears
+         * is_active_ before stopping the packet filter, and the packet handler
+         * thread can therefore still produce queued buffers while is_active_ is
+         * already false. Gating the resolver's shutdown break on this flag (and
+         * not on is_active_) ensures any buffers enqueued before stop_filter()
+         * returns are still drained.
+         */
+        std::atomic_bool resolver_should_exit_{ false };
+
+        /**
          * @brief Enqueues a TCP/UDP packet for deferred process resolution, dropping
          *        it if process_resolve_buffer_queue_ is already at capacity.
          *
@@ -450,6 +464,11 @@ namespace proxy
                 return false;
             }
 
+            // Reset resolver-exit signal on every start so a previous
+            // stop()/start() cycle does not leave the new resolver thread
+            // pre-armed to exit.
+            resolver_should_exit_.store(false);
+
             if (!packet_filter_)
             {
                 NETLIB_LOG(log_level::error, "Packet filter is not initialized!");
@@ -526,6 +545,10 @@ namespace proxy
 
                     is_active_.store(false);
 
+                    // The packet filter never started in this error branch, so
+                    // no callback thread can still be enqueuing — safe to
+                    // signal resolver shutdown directly.
+                    resolver_should_exit_.store(true);
                     process_resolve_buffer_queue_cv_.notify_all();
 
                     if (process_resolve_thread_.joinable())
@@ -560,8 +583,14 @@ namespace proxy
             packet_filter_->stop_filter();
 
             // Step 2: Signal and join the process resolve thread
-            // This ensures no more packets are being queued for processing
+            // This ensures no more packets are being queued for processing.
+            // resolver_should_exit_ is set only AFTER stop_filter() returns
+            // so the resolver thread cannot observe an exit signal while the
+            // packet handler thread is still potentially enqueuing buffers,
+            // which would otherwise leave them stranded in
+            // process_resolve_buffer_queue_.
             NETLIB_DEBUG("Stopping process resolve thread");
+            resolver_should_exit_.store(true);
             process_resolve_buffer_queue_cv_.notify_all();
 
             if (process_resolve_thread_.joinable())
@@ -1444,10 +1473,10 @@ namespace proxy
                     // Timed wait so we still run periodic maintenance (tcp_mapper_
                     // TTL eviction) when no packets are being deferred.
                     process_resolve_buffer_queue_cv_.wait_for(lock, maintenance_interval, [this] {
-                        return !process_resolve_buffer_queue_.empty() || !is_active_.load();
+                        return !process_resolve_buffer_queue_.empty() || resolver_should_exit_.load();
                         });
 
-                    if (!is_active_.load() && process_resolve_buffer_queue_.empty())
+                    if (resolver_should_exit_.load() && process_resolve_buffer_queue_.empty())
                         break;
 
                     // Swap the contents of the shared queue with the local queue
