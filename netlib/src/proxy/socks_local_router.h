@@ -239,11 +239,14 @@ namespace proxy
          *
          * Bounding the queue is what keeps the intermediate buffer pool's high-water
          * mark finite when the resolver thread cannot keep up with the incoming
-         * packet rate. The check is performed under process_resolve_buffer_mutex_
-         * before allocating from the pool so an overload condition does not
-         * produce buffer-pool churn. A small TOCTOU race with concurrent filter
-         * threads is tolerated; in the worst case the queue may briefly exceed
-         * max_resolve_queue_depth_ by the number of concurrent filter callbacks.
+         * packet rate. The capacity check is performed under
+         * process_resolve_buffer_mutex_ before allocating from the pool so an
+         * overload condition does not produce unnecessary buffer-pool churn.
+         * The queued_multi_interface_packet_filter callback path drives this
+         * function from a single packet processing thread, so the size check
+         * and subsequent push are not racing other filter callbacks; the
+         * implementation does not rely on exceeding max_resolve_queue_depth_
+         * to remain bounded under concurrency.
          *
          * Defined in the private section above the constructor so its declaration
          * is in scope for the packet_filter callback lambda constructed in the
@@ -1434,7 +1437,7 @@ namespace proxy
             auto last_sweep = std::chrono::steady_clock::now();
             auto last_drop_log = last_sweep;
 
-            while (is_active_.load())
+            while (true)
             {
                 {
                     std::unique_lock lock(process_resolve_buffer_mutex_);
