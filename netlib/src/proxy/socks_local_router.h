@@ -1548,12 +1548,14 @@ namespace proxy
                 if (const auto now = std::chrono::steady_clock::now();
                     now - last_drop_log >= drop_log_throttle_interval_)
                 {
+                    bool emitted = false;
                     if (const auto dropped = resolve_queue_dropped_packets_.exchange(0, std::memory_order_relaxed);
                         dropped != 0)
                     {
                         NETLIB_LOG(log_level::warning,
                             "Dropped {} packet(s) because process_resolve_buffer_queue_ reached capacity at {} entries.",
                             dropped, max_resolve_queue_depth_);
+                        emitted = true;
                     }
                     if (const auto alloc_failures = resolve_queue_alloc_failures_.exchange(0, std::memory_order_relaxed);
                         alloc_failures != 0)
@@ -1561,8 +1563,16 @@ namespace proxy
                         NETLIB_LOG(log_level::error,
                             "Dropped {} packet(s) because the intermediate buffer pool failed to allocate.",
                             alloc_failures);
+                        emitted = true;
                     }
-                    last_drop_log = now;
+                    // Only advance the throttle timestamp when something was
+                    // actually logged so that the throttle interval bounds the
+                    // minimum gap between *emitted* logs rather than between
+                    // throttle checks.
+                    if (emitted)
+                    {
+                        last_drop_log = now;
+                    }
                 }
 
                 // Nothing else to do on a maintenance-only wakeup (timer fired with
