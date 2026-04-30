@@ -803,6 +803,21 @@ namespace proxy
                                                           if (const auto it = tcp_mapper_.find(port); it != tcp_mapper_.
                                                               end())
                                                           {
+                                                              // Discard stale entries whose age has exceeded the TTL.
+                                                              // Eviction is performed asynchronously by the resolver
+                                                              // thread and may be delayed, so validate age at lookup
+                                                              // time to avoid misrouting a new connection on a reused
+                                                              // source port.
+                                                              if (std::chrono::steady_clock::now() - it->second.created_at
+                                                                  > tcp_mapper_entry_ttl_)
+                                                              {
+                                                                  NETLIB_LOG(log_level::warning,
+                                                                            "TCP Redirect entry for port {} was stale (age exceeded TTL); discarding.",
+                                                                            port);
+                                                                  tcp_mapper_.erase(it);
+                                                                  return std::make_tuple(net::ip_address_v4{}, 0, nullptr);
+                                                              }
+
                                                               NETLIB_LOG(log_level::info,
                                                                         "TCP Redirect entry was found for the {} : {} is {} : {}",
                                                                         address, port, net::ip_address_v4{it->second.endpoint.ip}, it->second.endpoint.port);
