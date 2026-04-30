@@ -1326,22 +1326,22 @@ namespace proxy
         }
 
         /**
-        * @brief Enqueues a TCP/UDP packet for deferred process resolution, dropping
-        *        it if process_resolve_buffer_queue_ is already at capacity.
-        *
-        * Bounding the queue is what keeps the intermediate buffer pool's high-water
-        * mark finite when the resolver thread cannot keep up with the incoming
-        * packet rate. The check is performed under process_resolve_buffer_mutex_
-        * before allocating from the pool so an overload condition does not
-        * produce buffer-pool churn. A small TOCTOU race with concurrent filter
-        * threads is tolerated; in the worst case the queue may briefly exceed
-        * max_resolve_queue_depth_ by the number of concurrent filter callbacks.
-        *
-        * @param buffer The intermediate buffer describing the packet to enqueue.
-        * @return Always returns a 'drop' action: the packet is either queued for
-        *         later re-injection (and therefore dropped from the current pass)
-        *         or dropped outright due to overload / allocation failure.
-        */
+         * @brief Enqueues a TCP/UDP packet for deferred process resolution, dropping
+         *        it if process_resolve_buffer_queue_ is already at capacity.
+         *
+         * Bounding the queue is what keeps the intermediate buffer pool's high-water
+         * mark finite when the resolver thread cannot keep up with the incoming
+         * packet rate. The check is performed under process_resolve_buffer_mutex_
+         * before allocating from the pool so an overload condition does not
+         * produce buffer-pool churn. A small TOCTOU race with concurrent filter
+         * threads is tolerated; in the worst case the queue may briefly exceed
+         * max_resolve_queue_depth_ by the number of concurrent filter callbacks.
+         *
+         * @param buffer The intermediate buffer describing the packet to enqueue.
+         * @return Always returns a 'drop' action: the packet is either queued for
+         *         later re-injection (and therefore dropped from the current pass)
+         *         or dropped outright due to overload / allocation failure.
+         */
         packet_filter::packet_action enqueue_for_deferred_resolve(ndisapi::intermediate_buffer& buffer)
         {
             {
@@ -1399,11 +1399,21 @@ namespace proxy
             std::vector<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> to_adapters;
             std::vector<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> to_mstcp;
 
+            // Run the tcp_mapper_ sweep at most once per maintenance interval, even
+            // under heavy resolver activity. The interval is half the TTL so an
+            // entry is evicted within at most 1.5 * TTL of becoming stale, and the
+            // condition variable below uses the same period as its wait timeout so
+            // the sweep still runs when the deferred-resolve queue stays empty.
+            constexpr auto maintenance_interval = tcp_mapper_entry_ttl_ / 2;
+            auto last_sweep = std::chrono::steady_clock::now();
+
             while (is_active_.load())
             {
                 {
                     std::unique_lock lock(process_resolve_buffer_mutex_);
-                    process_resolve_buffer_queue_cv_.wait(lock, [this] {
+                    // Timed wait so we still run periodic maintenance (tcp_mapper_
+                    // TTL eviction) when no packets are being deferred.
+                    process_resolve_buffer_queue_cv_.wait_for(lock, maintenance_interval, [this] {
                         return !process_resolve_buffer_queue_.empty() || !is_active_.load();
                         });
 
@@ -1414,15 +1424,16 @@ namespace proxy
                     std::swap(process_resolve_buffer_queue_, local_queue);
                 }
 
-                // Actualize process lookup before processing
-                process_lookup_v4_.actualize(true, true);
-
                 // Evict stale tcp_mapper_ entries whose SYN was redirected but never
                 // produced a local proxy connection (e.g. peer RST, timeout, app gave
                 // up). Without this sweep such entries would leak indefinitely since
-                // the only other removal site is the SOCKS5 negotiate callback.
+                // the only other removal site is the SOCKS5 negotiate callback. The
+                // sweep is rate-limited to maintenance_interval to bound CPU cost
+                // when the resolver loop runs frequently under sustained load.
+                if (const auto now = std::chrono::steady_clock::now();
+                    now - last_sweep >= maintenance_interval)
                 {
-                    const auto now = std::chrono::steady_clock::now();
+                    last_sweep = now;
                     std::scoped_lock lock(tcp_mapper_lock_);
                     for (auto it = tcp_mapper_.begin(); it != tcp_mapper_.end();)
                     {
@@ -1436,6 +1447,17 @@ namespace proxy
                         }
                     }
                 }
+
+                // Nothing else to do on a maintenance-only wakeup (timer fired with
+                // an empty queue) — skip process-lookup refresh and drop-counter
+                // reporting until there is real packet work.
+                if (local_queue.empty())
+                {
+                    continue;
+                }
+
+                // Actualize process lookup before processing
+                process_lookup_v4_.actualize(true, true);
 
                 // Periodically surface the count of packets dropped due to a full
                 // resolve queue so operators can correlate connectivity issues with
