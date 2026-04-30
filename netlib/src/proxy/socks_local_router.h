@@ -40,9 +40,48 @@ namespace proxy
         using s5_udp_proxy_server = socks5_local_udp_proxy_server<socks5_udp_proxy_socket<net::ip_address_v4>>;
 
         /**
-         * @brief Stores a mapping of TCP ports to their corresponding IP endpoints.
+         * @brief Entry stored in tcp_mapper_: redirected destination endpoint and the
+         *        steady-clock timestamp at which the mapping was created. The timestamp
+         *        is used by process_resolve_thread_proc to evict stale entries whose
+         *        SYN never produced a local proxy connection (e.g. RST/timeout).
          */
-        std::unordered_map<uint16_t, net::ip_endpoint<net::ip_address_v4>> tcp_mapper_;
+        struct tcp_mapper_entry
+        {
+            net::ip_endpoint<net::ip_address_v4> endpoint;
+            std::chrono::steady_clock::time_point created_at;
+        };
+
+        /**
+         * @brief Stores a mapping of TCP source ports to their original destination
+         *        endpoints, stamped with the time the entry was created so stale
+         *        entries can be aged out.
+         */
+        std::unordered_map<uint16_t, tcp_mapper_entry> tcp_mapper_;
+
+        /**
+         * @brief Maximum age for a tcp_mapper_ entry before it is considered stale and
+         *        evicted by the resolve thread. SYN packets that never reach the local
+         *        SOCKS5 server (e.g. RST'd, dropped, app gave up) would otherwise leak
+         *        entries indefinitely.
+         */
+        static constexpr std::chrono::seconds tcp_mapper_entry_ttl_{ 30 };
+
+        /**
+         * @brief Maximum number of packets that may be queued for deferred process
+         *        resolution before new packets are dropped. Bounds memory growth of
+         *        process_resolve_buffer_queue_ (and therefore the intermediate buffer
+         *        pool) when the single-threaded resolver cannot keep up with the
+         *        incoming packet rate.
+         */
+        static constexpr std::size_t max_resolve_queue_depth_ = 2048;
+
+        /**
+         * @brief Cumulative count of TCP/UDP packets dropped because
+         *        process_resolve_buffer_queue_ was full. Sampled and logged at a
+         *        coarse rate from the resolver thread to avoid log floods under
+         *        sustained overload.
+         */
+        std::atomic<std::uint64_t> resolve_queue_dropped_packets_{ 0 };
 
         /**
          * @brief Stores the set of UDP ports being mapped.
@@ -243,7 +282,19 @@ namespace proxy
                         {
                             return result.value();
                         }
-                        // Queue for the later processing
+                        // Queue for the later processing, but cap the queue depth so a
+                        // backed-up resolver thread cannot grow the queue (and the
+                        // intermediate buffer pool) without bound under load.
+                        bool queue_full = false;
+                        {
+                            std::scoped_lock lock(process_resolve_buffer_mutex_);
+                            queue_full = process_resolve_buffer_queue_.size() >= max_resolve_queue_depth_;
+                        }
+                        if (queue_full)
+                        {
+                            resolve_queue_dropped_packets_.fetch_add(1, std::memory_order_relaxed);
+                            return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+                        }
                         if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
                         {
                             {
@@ -266,7 +317,19 @@ namespace proxy
                         {
                             return result.value();
                         }
-                        // Queue for the later processing
+                        // Queue for the later processing, but cap the queue depth so a
+                        // backed-up resolver thread cannot grow the queue (and the
+                        // intermediate buffer pool) without bound under load.
+                        bool tcp_queue_full = false;
+                        {
+                            std::scoped_lock lock(process_resolve_buffer_mutex_);
+                            tcp_queue_full = process_resolve_buffer_queue_.size() >= max_resolve_queue_depth_;
+                        }
+                        if (tcp_queue_full)
+                        {
+                            resolve_queue_dropped_packets_.fetch_add(1, std::memory_order_relaxed);
+                            return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+                        }
                         if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
                         {
                             {
@@ -679,10 +742,10 @@ namespace proxy
                                                           {
                                                               NETLIB_LOG(log_level::info,
                                                                         "TCP Redirect entry was found for the {} : {} is {} : {}",
-                                                                        address, port, net::ip_address_v4{it->second.ip}, it->second.port);
+                                                                        address, port, net::ip_address_v4{it->second.endpoint.ip}, it->second.endpoint.port);
 
-                                                              auto remote_address = it->second.ip;
-                                                              auto remote_port = it->second.port;
+                                                              auto remote_address = it->second.endpoint.ip;
+                                                              auto remote_port = it->second.endpoint.port;
 
                                                               tcp_mapper_.erase(it);
 
@@ -1233,8 +1296,11 @@ namespace proxy
                 {
                     std::scoped_lock lock(tcp_mapper_lock_);
                     tcp_mapper_[ntohs(tcp_header->th_sport)] =
-                        net::ip_endpoint(net::ip_address_v4(ip_header->ip_dst),
-                            ntohs(tcp_header->th_dport));
+                        tcp_mapper_entry{
+                            net::ip_endpoint(net::ip_address_v4(ip_header->ip_dst),
+                                ntohs(tcp_header->th_dport)),
+                            std::chrono::steady_clock::now()
+                        };
 
                     NETLIB_LOG(log_level::info,
                         "Redirecting TCP: {} : {} -> {} : {}",
@@ -1356,6 +1422,38 @@ namespace proxy
 
                 // Actualize process lookup before processing
                 process_lookup_v4_.actualize(true, true);
+
+                // Evict stale tcp_mapper_ entries whose SYN was redirected but never
+                // produced a local proxy connection (e.g. peer RST, timeout, app gave
+                // up). Without this sweep such entries would leak indefinitely since
+                // the only other removal site is the SOCKS5 negotiate callback.
+                {
+                    const auto now = std::chrono::steady_clock::now();
+                    std::scoped_lock lock(tcp_mapper_lock_);
+                    for (auto it = tcp_mapper_.begin(); it != tcp_mapper_.end();)
+                    {
+                        if (now - it->second.created_at > tcp_mapper_entry_ttl_)
+                        {
+                            it = tcp_mapper_.erase(it);
+                        }
+                        else
+                        {
+                            ++it;
+                        }
+                    }
+                }
+
+                // Periodically surface the count of packets dropped due to a full
+                // resolve queue so operators can correlate connectivity issues with
+                // resolver-thread overload. Logged at most once per drain cycle and
+                // only when the count has advanced.
+                if (const auto dropped = resolve_queue_dropped_packets_.exchange(0, std::memory_order_relaxed);
+                    dropped != 0)
+                {
+                    NETLIB_LOG(log_level::warning,
+                        "Dropped {} packet(s) because process_resolve_buffer_queue_ exceeded {} entries.",
+                        dropped, max_resolve_queue_depth_);
+                }
 
                 while (!local_queue.empty())
                 {
