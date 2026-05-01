@@ -1500,14 +1500,17 @@ namespace proxy
         * processing by using local queues and minimizing lock contention.
         *
         * The main steps are:
-        * 1. Wait for packets to be queued or for the router to become inactive.
+        * 1. Wait for packets to be queued or for resolver_should_exit_ to be set.
         * 2. Swap the shared queue with a local queue for processing.
         * 3. Refresh the process lookup table.
         * 4. For each packet, attempt to resolve the process and determine the appropriate
         *    action (pass to adapter, revert to MSTCP, or assert on unexpected cases).
         * 5. Send processed packets to their respective destinations and clear local queues.
         *
-        * The thread exits when the router is deactivated and the queue is empty.
+        * The thread exits only after resolver_should_exit_ has been set (which stop()
+        * does after packet_filter_->stop_filter() returns) and the shared queue has
+        * fully drained, so any buffers enqueued by the packet-handler thread before
+        * stop_filter() completes are still processed before the resolver thread exits.
         */
         void process_resolve_thread_proc()
         {
@@ -1626,6 +1629,17 @@ namespace proxy
                         {
                             last_drop_log = now;
                         }
+                    }
+                    else
+                    {
+                        // Both counters are zero: advance the throttle
+                        // timestamp so the throttle check (now() + atomic
+                        // loads) only runs at most once per
+                        // drop_log_throttle_interval_, instead of on every
+                        // resolver loop iteration once the interval has
+                        // elapsed. A subsequent counter increment is still
+                        // surfaced within at most one drop_log_throttle_interval_.
+                        last_drop_log = now;
                     }
                 }
 
