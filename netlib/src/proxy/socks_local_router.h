@@ -278,8 +278,14 @@ namespace proxy
                 std::scoped_lock lock(process_resolve_buffer_mutex_);
                 if (process_resolve_buffer_queue_.size() >= max_resolve_queue_depth_)
                 {
-                    // Slight undercounting under contention is acceptable; this counter
-                    // is a coarse overload signal, not a precise accounting metric.
+                    // The increment occurs while holding process_resolve_buffer_mutex_
+                    // so this full-queue drop path is not expected to undercount due
+                    // to contention. Treat the counter as a coarse overload signal
+                    // rather than precise end-to-end accounting; if the
+                    // single-callback-thread assumption changes in the future, the
+                    // more likely concurrency artifact would be temporary queue
+                    // overshoot from the unlocked allocation window below, not
+                    // missed increments in this branch.
                     resolve_queue_dropped_packets_.fetch_add(1, std::memory_order_relaxed);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
                 }
@@ -287,11 +293,28 @@ namespace proxy
 
             if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
             {
+                bool pushed = false;
                 {
                     std::scoped_lock lock(process_resolve_buffer_mutex_);
-                    process_resolve_buffer_queue_.push(std::move(allocated_buffer));
+                    // Re-check capacity under the lock so the depth bound is
+                    // enforced strictly even if multiple producers ever drive
+                    // this path concurrently in the future. The allocation
+                    // window above is unlocked, so without this re-check the
+                    // queue could transiently exceed max_resolve_queue_depth_.
+                    if (process_resolve_buffer_queue_.size() < max_resolve_queue_depth_)
+                    {
+                        process_resolve_buffer_queue_.push(std::move(allocated_buffer));
+                        pushed = true;
+                    }
+                    else
+                    {
+                        resolve_queue_dropped_packets_.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
-                process_resolve_buffer_queue_cv_.notify_one();
+                if (pushed)
+                    process_resolve_buffer_queue_cv_.notify_one();
+                // allocated_buffer falls out of scope here and is returned to the
+                // pool automatically when not pushed.
             }
             else
             {
@@ -466,8 +489,12 @@ namespace proxy
 
             // Reset resolver-exit signal on every start so a previous
             // stop()/start() cycle does not leave the new resolver thread
-            // pre-armed to exit.
+            // pre-armed to exit. Also reset the drop/alloc-failure counters
+            // so they reflect this run rather than leaking stale counts from
+            // a prior stop()/start() cycle.
             resolver_should_exit_.store(false);
+            resolve_queue_dropped_packets_.store(0, std::memory_order_relaxed);
+            resolve_queue_alloc_failures_.store(0, std::memory_order_relaxed);
 
             if (!packet_filter_)
             {
@@ -536,24 +563,30 @@ namespace proxy
                         GetLastError());
                 }
 
+                // Collect raw proxy pointers under lock_ but stop them outside
+                // the lock. Proxy cleanup threads may need to acquire the
+                // same mutex, so holding lock_ across stop() can deadlock.
+                // This mirrors the pattern used in stop().
+                std::vector<std::pair<s5_tcp_proxy_server*, s5_udp_proxy_server*>> proxies_to_stop;
                 {
                     std::shared_lock lock(lock_);
-
-                    // Stop all proxies
+                    proxies_to_stop.reserve(proxy_servers_.size());
                     for (auto& [tcp, udp] : proxy_servers_)
-                    {
-                        // Stop TCP proxy
-                        if (tcp)
-                            tcp->stop();
-
-                        // Stop UDP proxy
-                        if (udp)
-                            udp->stop();
-                    }
-
-                    // Stop the thread pool associated with the I/O completion port
-                    io_port_.stop_thread_pool();
+                        proxies_to_stop.emplace_back(tcp.get(), udp.get());
                 }
+
+                // Stop all proxies without holding lock_.
+                for (auto& [tcp, udp] : proxies_to_stop)
+                {
+                    if (tcp)
+                        tcp->stop();
+
+                    if (udp)
+                        udp->stop();
+                }
+
+                // Stop the thread pool associated with the I/O completion port.
+                io_port_.stop_thread_pool();
 
                 is_active_.store(false);
 
