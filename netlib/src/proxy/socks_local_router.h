@@ -147,6 +147,19 @@ namespace proxy
         std::shared_mutex lock_;
 
         /**
+         * @brief Serializes lifecycle operations (start(), stop(), and
+         * add_socks5_proxy()) so that proxies cannot be created/started
+         * concurrently with start()/stop() bookkeeping. Without this guard,
+         * a proxy added via add_socks5_proxy() could slip into proxy_servers_
+         * after a start() failure-cleanup snapshot is captured but before the
+         * stop loop runs, leaving a started proxy that the cleanup misses.
+         * This mutex is intentionally NOT held by the resolver thread or by
+         * proxy cleanup threads, so it does not introduce new deadlock paths
+         * with the existing lock_ ordering.
+         */
+        std::mutex lifecycle_mutex_;
+
+        /**
          * @brief Unique pointer to the TCP redirect object.
          */
         std::unique_ptr<ndisapi::tcp_local_redirect<net::ip_address_v4>> tcp_redirect_{ nullptr };
@@ -481,6 +494,11 @@ namespace proxy
          */
         bool start()
         {
+            // Serialize lifecycle operations (start/stop/add_socks5_proxy) so
+            // that a concurrent add_socks5_proxy() cannot register a started
+            // proxy after the failure-cleanup snapshot has been captured.
+            std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+
             if (auto expected = false; !is_active_.compare_exchange_strong(expected, true))
             {
                 NETLIB_LOG(log_level::error, "Filter is already active!");
@@ -616,6 +634,11 @@ namespace proxy
          */
         bool stop()
         {
+            // Serialize lifecycle operations (start/stop/add_socks5_proxy) so
+            // that an add_socks5_proxy() cannot interleave with the teardown
+            // sequence below and leave a started proxy outside the stop loop.
+            std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+
             // A flag to indicate whether the operation was active or not.
             // If the value of is_active_ was already false, this function returns false
             if (auto expected = true; !is_active_.compare_exchange_strong(expected, false))
@@ -769,6 +792,12 @@ namespace proxy
         )
         {
             using namespace std::string_literals;
+
+            // Serialize against start()/stop() so that this function cannot
+            // register/start a proxy concurrently with start() failure cleanup
+            // (which would otherwise leave a running proxy that the cleanup
+            // snapshot of proxy_servers_ has already missed) or with stop().
+            std::scoped_lock lifecycle_lock(lifecycle_mutex_);
 
             // Parse the endpoint to an IP address and port number
             auto proxy_endpoint = parse_endpoint(endpoint);
