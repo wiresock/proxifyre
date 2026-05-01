@@ -336,6 +336,13 @@ namespace proxy
                 // thread's time-throttled log path. Avoids emitting a log line
                 // per failure under memory pressure, which could itself flood.
                 resolve_queue_alloc_failures_.fetch_add(1, std::memory_order_relaxed);
+
+                // Wake the resolver thread even when the queue remains empty
+                // so allocation-failure diagnostics are not delayed until the
+                // next timed maintenance wakeup. The drop-log path itself is
+                // still throttled by drop_log_throttle_interval_, so a flood
+                // of failures cannot translate into a flood of log lines.
+                process_resolve_buffer_queue_cv_.notify_one();
             }
             return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
         }
