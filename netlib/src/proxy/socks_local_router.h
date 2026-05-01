@@ -1574,9 +1574,15 @@ namespace proxy
                 {
                     std::unique_lock lock(process_resolve_buffer_mutex_);
                     // Timed wait so we still run periodic maintenance (tcp_mapper_
-                    // TTL eviction) when no packets are being deferred.
+                    // TTL eviction) when no packets are being deferred. Also wake
+                    // early for maintenance-only notifications so throttled
+                    // alloc-failure/drop diagnostics are not delayed until the next
+                    // timeout when no packet was actually queued.
                     process_resolve_buffer_queue_cv_.wait_for(lock, maintenance_interval, [this] {
-                        return !process_resolve_buffer_queue_.empty() || resolver_should_exit_.load();
+                        return !process_resolve_buffer_queue_.empty() ||
+                            resolver_should_exit_.load() ||
+                            resolve_queue_alloc_failures_.load(std::memory_order_relaxed) != 0 ||
+                            resolve_queue_dropped_packets_.load(std::memory_order_relaxed) != 0;
                         });
 
                     if (resolver_should_exit_.load() && process_resolve_buffer_queue_.empty())
