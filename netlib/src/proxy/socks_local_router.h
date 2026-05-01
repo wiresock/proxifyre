@@ -1577,12 +1577,24 @@ namespace proxy
                     // TTL eviction) when no packets are being deferred. Also wake
                     // early for maintenance-only notifications so throttled
                     // alloc-failure/drop diagnostics are not delayed until the next
-                    // timeout when no packet was actually queued.
-                    process_resolve_buffer_queue_cv_.wait_for(lock, maintenance_interval, [this] {
-                        return !process_resolve_buffer_queue_.empty() ||
-                            resolver_should_exit_.load() ||
+                    // timeout when no packet was actually queued, but only once
+                    // the throttle window has elapsed to avoid a tight spin on
+                    // empty queues under sustained overload (the counters stay
+                    // non-zero until the throttled log path runs and exchanges
+                    // them, so waking unconditionally on non-zero counters would
+                    // re-fire every iteration until the throttle elapses).
+                    process_resolve_buffer_queue_cv_.wait_for(lock, maintenance_interval, [this, &last_drop_log] {
+                        if (!process_resolve_buffer_queue_.empty() || resolver_should_exit_.load())
+                            return true;
+
+                        const auto has_pending_drop_diagnostics =
                             resolve_queue_alloc_failures_.load(std::memory_order_relaxed) != 0 ||
                             resolve_queue_dropped_packets_.load(std::memory_order_relaxed) != 0;
+
+                        if (!has_pending_drop_diagnostics)
+                            return false;
+
+                        return std::chrono::steady_clock::now() - last_drop_log >= drop_log_throttle_interval_;
                         });
 
                     if (resolver_should_exit_.load() && process_resolve_buffer_queue_.empty())
