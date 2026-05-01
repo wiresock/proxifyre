@@ -793,13 +793,10 @@ namespace proxy
         {
             using namespace std::string_literals;
 
-            // Serialize against start()/stop() so that this function cannot
-            // register/start a proxy concurrently with start() failure cleanup
-            // (which would otherwise leave a running proxy that the cleanup
-            // snapshot of proxy_servers_ has already missed) or with stop().
-            std::scoped_lock lifecycle_lock(lifecycle_mutex_);
-
-            // Parse the endpoint to an IP address and port number
+            // Parse the endpoint to an IP address and port number. This may
+            // perform a blocking DNS lookup via getaddrinfo, so it is
+            // intentionally done OUTSIDE lifecycle_mutex_ so that a concurrent
+            // start()/stop() cannot be stalled by name resolution.
             auto proxy_endpoint = parse_endpoint(endpoint);
 
             // If parsing failed, log the error and return nullopt
@@ -808,6 +805,14 @@ namespace proxy
                 NETLIB_LOG(log_level::error, "Failed to parse the proxy endpoint {}", endpoint);
                 return {};
             }
+
+            // Serialize the lifecycle-state mutations (filter list, proxy
+            // construction/start, and proxy_servers_ insertion) against
+            // start()/stop() so that this function cannot register/start a
+            // proxy concurrently with start() failure cleanup (which would
+            // otherwise leave a running proxy that the cleanup snapshot of
+            // proxy_servers_ has already missed) or with stop().
+            std::scoped_lock lifecycle_lock(lifecycle_mutex_);
 
             // Construct filter objects for the TCP and UDP traffic to and from the proxy server
             // These filters are used to decide which packets to pass or drop
