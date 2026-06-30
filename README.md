@@ -10,6 +10,8 @@ As of **v2.1.1**, ProxiFyre also supports **process exclusions**, allowing you t
 
 As of **v2.2.0**, ProxiFyre supports **LAN bypass**, allowing local network traffic to pass through without being proxied.
 
+As of **v2.3.0**, ProxiFyre also proxies **IPv6** destinations. Previously only IPv4 traffic from a matched application was routed through the proxy while its IPv6 TCP/UDP traffic leaked out directly; now both address families are redirected to the configured SOCKS5 proxy. Existing IPv4 proxy endpoints (e.g. `127.0.0.1:1080`) continue to work unchanged — ProxiFyre reaches an IPv4 SOCKS5 server over a dual-stack connection when relaying IPv6 destinations. Note that to actually carry IPv6 destinations your SOCKS5 server must accept IPv6 target addresses (SOCKS5 `ATYP=4`); servers that only support IPv4/domain targets will reject them. **Limitation:** *fragmented* IPv6 datagrams are not redirected. To avoid corrupting a partially rewritten datagram, IPv6 packets that arrive fragmented are passed through unproxied — so an application that emits oversized IPv6 UDP datagrams (which the OS fragments at the source) can leak those datagrams outside the proxy. Most traffic is unaffected: TCP is never source-fragmented, and UDP that honors path-MTU discovery (e.g. QUIC/HTTP3) does not fragment. A one-time warning is logged when such a packet is first passed through.
+
 ---
 
 ## Configuration
