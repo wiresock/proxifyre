@@ -181,6 +181,7 @@ namespace proxy
                                         nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                                     {
                                         tcp_proxy_socket<T>::close_client(false, false);
+                                        return;
                                     }
 
                                     current_state_ = socks5_state::password_sent;
@@ -224,6 +225,7 @@ namespace proxy
                                 nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                             {
                                 tcp_proxy_socket<T>::close_client(false, false);
+                                return;
                             }
 
                             current_state_ = socks5_state::connect_sent;
@@ -283,6 +285,7 @@ namespace proxy
                             nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                         {
                             tcp_proxy_socket<T>::close_client(false, false);
+                            return;
                         }
 
                         current_state_ = socks5_state::connect_sent;
