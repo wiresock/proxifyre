@@ -21,9 +21,15 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
 
     WSADATA wsa_data;
 
-    if (constexpr auto version_requested = MAKEWORD(2, 2); ::WSAStartup(version_requested, &wsa_data) != 0)
+    constexpr auto version_requested = MAKEWORD(2, 2);
+    if (const auto wsa_error = ::WSAStartup(version_requested, &wsa_data); wsa_error != 0)
     {
-        print_log(log_level_mx::error, "WSAStartup failed with error\n");
+        // WSAStartup returns the error code directly. Winsock is unusable when
+        // it fails, so fail fast (as documented) instead of continuing with a
+        // broken socket subsystem and producing confusing follow-on errors.
+        const auto message = "WSAStartup failed with error "s + std::to_string(wsa_error);
+        print_log(log_level_mx::error, message);
+        throw std::runtime_error(message);
     }
 
     lock_ = std::make_unique<mutex_impl>();
