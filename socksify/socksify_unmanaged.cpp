@@ -21,10 +21,28 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
 
     WSADATA wsa_data;
 
-    if (constexpr auto version_requested = MAKEWORD(2, 2); ::WSAStartup(version_requested, &wsa_data) != 0)
+    constexpr auto version_requested = MAKEWORD(2, 2);
+    if (const auto wsa_error = ::WSAStartup(version_requested, &wsa_data); wsa_error != 0)
     {
-        print_log(log_level_mx::info, "WSAStartup failed with error\n");
+        // WSAStartup returns the error code directly. Winsock is unusable when
+        // it fails, so fail fast (as documented) instead of continuing with a
+        // broken socket subsystem and producing confusing follow-on errors.
+        const auto message = "WSAStartup failed with error "s + std::to_string(wsa_error);
+        print_log(log_level_mx::error, message);
+        throw std::runtime_error(message);
     }
+
+    // WSAStartup succeeded. Because a constructor that exits via an exception
+    // does not run the destructor, the remainder of construction must release
+    // the Winsock reference acquired above if it throws (e.g. the pcap log file
+    // fails to open, or router construction throws). This guard calls
+    // WSACleanup() on such a failure and is disengaged once construction
+    // completes, leaving the matching cleanup to the destructor.
+    struct winsock_cleanup_guard
+    {
+        bool engaged = true;
+        ~winsock_cleanup_guard() { if (engaged) ::WSACleanup(); }
+    } winsock_guard;
 
     lock_ = std::make_unique<mutex_impl>();
 
@@ -57,7 +75,7 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
     }
 
     // Conditionally open the pcap log file if the log level is debug or higher
-    if (um_log_level > netlib::log::log_level::debug) {
+    if (um_log_level >= netlib::log::log_level::debug) {
         pcap_log_file_.emplace("proxifyre_log.pcap", std::ios::binary | std::ios::out);
         // Check if the optional contains a value and then access it to call is_open()
         if (!pcap_log_file_->is_open()) {
@@ -76,11 +94,14 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
 
     if (!proxy_)
     {
-        print_log(log_level_mx::info, "[ERROR]: Failed to create the SOCKS5 Local Router instance!"s);
-        throw std::runtime_error("[ERROR]: Failed to create the SOCKS5 Local Router instance!");
+        print_log(log_level_mx::error, "Failed to create the SOCKS5 Local Router instance!"s);
+        throw std::runtime_error("Failed to create the SOCKS5 Local Router instance!");
     }
 
     print_log(log_level_mx::info, "SOCKS5 Local Router instance successfully created."s);
+
+    // Construction succeeded; hand Winsock cleanup back to the destructor.
+    winsock_guard.engaged = false;
 }
 
 /**
@@ -114,7 +135,7 @@ bool socksify_unmanaged::start() const
 
     if (!proxy_->start())
     {
-        print_log(log_level_mx::info, "[ERROR]: Failed to start the SOCKS5 Local Router instance!"s);
+        print_log(log_level_mx::error, "Failed to start the SOCKS5 Local Router instance!"s);
         return false;
     }
 
@@ -133,14 +154,20 @@ bool socksify_unmanaged::stop() const
 
     if (!proxy_)
     {
-        print_log(log_level_mx::info,
-            "[ERROR]: Failed to stop the SOCKS5 Local Router instance. Instance does not exist."s);
+        print_log(log_level_mx::error,
+            "Failed to stop the SOCKS5 Local Router instance. Instance does not exist."s);
         return false;
     }
 
-    if (proxy_->stop())
+    // socks_local_router::stop() returns true on success and false only when
+    // the router was already inactive (an idempotent no-op, e.g. when Dispose
+    // runs after an explicit Stop()). That is not a failure, so log it at info
+    // level to avoid noisy error logs while preserving the documented false
+    // return for callers that distinguish "stopped now" from "was not active".
+    if (!proxy_->stop())
     {
-        print_log(log_level_mx::info, "[ERROR]: Failed to stop the SOCKS5 Local Router instance."s);
+        print_log(log_level_mx::info,
+            "SOCKS5 Local Router instance was already stopped (not active)."s);
         return false;
     }
 
@@ -294,7 +321,13 @@ void socksify_unmanaged::log_event(const event_mx log)
  */
 void socksify_unmanaged::print_log(const log_level_mx level, const std::string& message) const
 {
-    if (level < log_level_)
+    // Emit the message when its severity is at or below the configured
+    // verbosity threshold. log_level_mx orders severities from error (0) to
+    // all (255), so a message must be printed when level <= log_level_. The
+    // previous strict comparison dropped messages whose level equalled the
+    // threshold, e.g. error messages were never shown at the "error" level and
+    // info messages were never shown at the "info" level.
+    if (level <= log_level_)
     {
         log_printer(message.c_str());
     }

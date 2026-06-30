@@ -48,10 +48,12 @@ namespace ProxiFyre
             // Form the path to NLog.config
             var logConfigFilePath = Path.Combine(directoryPath ?? string.Empty, "NLog.config");
 
-            // Load the configuration from JSON
-            var serviceSettings = JsonConvert.DeserializeObject<ProxiFyreSettings>(File.ReadAllText(configFilePath));
+            // Configure logging first so that any configuration problems below are recorded.
+            if (File.Exists(logConfigFilePath))
+                LogManager.Configuration = new XmlLoggingConfiguration(logConfigFilePath);
 
-            LogManager.Configuration = new XmlLoggingConfiguration(logConfigFilePath);
+            // Load and validate the configuration from JSON
+            var serviceSettings = LoadConfiguration(configFilePath);
 
             // Handle the global log level from the configuration
             _logLevel = Enum.TryParse<LogLevel>(serviceSettings.LogLevel, true, out var globalLogLevel)
@@ -83,11 +85,21 @@ namespace ProxiFyre
                     appSettings.Password, appSettings.SupportedProtocolsParse,
                     true); // Assuming the AddSocks5Proxy method supports a list of protocols
 
+                if (proxy.ToInt64() == -1)
+                {
+                    LoggerInstance.Warn(
+                        $"Failed to create SOCKS5 proxy for endpoint {appSettings.Socks5ProxyEndpoint}; skipping its application associations.");
+                    continue;
+                }
+
+                var protocols = appSettings.SupportedProtocols != null && appSettings.SupportedProtocols.Count > 0
+                    ? string.Join(", ", appSettings.SupportedProtocols)
+                    : "TCP, UDP";
                 foreach (var appName in appSettings.AppNames)
                     // Associate the defined application names to the proxies
-                    if (proxy.ToInt64() != -1 && _socksify.AssociateProcessNameToProxy(appName, proxy) && _logLevel >= LogLevel.Info)
+                    if (_socksify.AssociateProcessNameToProxy(appName, proxy) && _logLevel >= LogLevel.Info)
                         LoggerInstance.Info(
-                            $"Successfully associated {appName} to {appSettings.Socks5ProxyEndpoint} SOCKS5 proxy with protocols {string.Join(", ", appSettings.SupportedProtocols)}!");
+                            $"Successfully associated {appName} to {appSettings.Socks5ProxyEndpoint} SOCKS5 proxy with protocols {protocols}!");
             }
 
             foreach (var excludedEntry in serviceSettings.ExcludedList)
@@ -108,12 +120,93 @@ namespace ProxiFyre
         }
 
         /// <summary>
+        /// Loads, parses and validates the ProxiFyre configuration file.
+        /// </summary>
+        /// <param name="configFilePath">Full path to app-config.json.</param>
+        /// <returns>The validated <see cref="ProxiFyreSettings"/>.</returns>
+        /// <exception cref="InvalidOperationException">
+        /// Thrown when the file is missing, cannot be parsed, or fails validation.
+        /// </exception>
+        private static ProxiFyreSettings LoadConfiguration(string configFilePath)
+        {
+            if (!File.Exists(configFilePath))
+            {
+                var message = $"Configuration file not found: '{configFilePath}'. " +
+                              "Create an app-config.json next to ProxiFyre.exe before starting the service.";
+                LoggerInstance.Error(message);
+                throw new InvalidOperationException(message);
+            }
+
+            ProxiFyreSettings settings;
+            try
+            {
+                settings = JsonConvert.DeserializeObject<ProxiFyreSettings>(File.ReadAllText(configFilePath));
+            }
+            catch (Exception ex)
+            {
+                var message = $"Failed to read or parse configuration file '{configFilePath}': {ex.Message}";
+                LoggerInstance.Error(ex, message);
+                throw new InvalidOperationException(message, ex);
+            }
+
+            if (settings == null)
+            {
+                var message = $"Configuration file '{configFilePath}' is empty or contains no settings.";
+                LoggerInstance.Error(message);
+                throw new InvalidOperationException(message);
+            }
+
+            if (settings.Proxies == null || settings.Proxies.Count == 0)
+            {
+                var message = $"Configuration file '{configFilePath}' does not define any proxies. " +
+                              "Add at least one entry under \"proxies\".";
+                LoggerInstance.Error(message);
+                throw new InvalidOperationException(message);
+            }
+
+            foreach (var proxy in settings.Proxies)
+            {
+                if (proxy == null)
+                {
+                    var message = $"Configuration file '{configFilePath}' contains a null entry under \"proxies\". " +
+                                  "Remove the empty entry or replace it with a valid proxy definition.";
+                    LoggerInstance.Error(message);
+                    throw new InvalidOperationException(message);
+                }
+
+                if (string.IsNullOrWhiteSpace(proxy.Socks5ProxyEndpoint))
+                {
+                    var message = "Each proxy entry must specify a non-empty \"socks5ProxyEndpoint\".";
+                    LoggerInstance.Error(message);
+                    throw new InvalidOperationException(message);
+                }
+
+                // Drop null/blank application names so they are never marshalled
+                // to the unmanaged layer, where marshal_as<std::wstring> throws
+                // on a null String^.
+                if (proxy.AppNames == null)
+                    proxy.AppNames = new List<string>();
+                else
+                    proxy.AppNames.RemoveAll(string.IsNullOrWhiteSpace);
+
+                if (proxy.AppNames.Count == 0)
+                    LoggerInstance.Warn(
+                        $"Proxy '{proxy.Socks5ProxyEndpoint}' has no application names; it will not match any process.");
+            }
+
+            // Drop null/blank excluded entries for the same reason.
+            settings.ExcludedList.RemoveAll(string.IsNullOrWhiteSpace);
+
+            return settings;
+        }
+
+        /// <summary>
         /// Stops the ProxiFyre service and disposes of resources.
         /// </summary>
         public void Stop()
         {
             // Dispose of the Socksifier before exiting
-            _socksify.Dispose();
+            _socksify?.Dispose();
             if (_logLevel >= LogLevel.Info)
                 LoggerInstance.Info("ProxiFyre Service has stopped.");
             LogManager.Shutdown();
@@ -260,7 +353,7 @@ namespace ProxiFyre
             {
                 get
                 {
-                    if (SupportedProtocols.Count == 0 ||
+                    if (SupportedProtocols == null || SupportedProtocols.Count == 0 ||
                         (SupportedProtocols.Contains("TCP") && SupportedProtocols.Contains("UDP")))
                         return SupportedProtocolsEnum.BOTH;
                     if (SupportedProtocols.Contains("TCP"))
