@@ -32,6 +32,18 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
         throw std::runtime_error(message);
     }
 
+    // WSAStartup succeeded. Because a constructor that exits via an exception
+    // does not run the destructor, the remainder of construction must release
+    // the Winsock reference acquired above if it throws (e.g. the pcap log file
+    // fails to open, or router construction throws). This guard calls
+    // WSACleanup() on such a failure and is disengaged once construction
+    // completes, leaving the matching cleanup to the destructor.
+    struct winsock_cleanup_guard
+    {
+        bool engaged = true;
+        ~winsock_cleanup_guard() { if (engaged) ::WSACleanup(); }
+    } winsock_guard;
+
     lock_ = std::make_unique<mutex_impl>();
 
     print_log(log_level_mx::info, "Creating SOCKS5 Local Router instance..."s);
@@ -63,7 +75,7 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
     }
 
     // Conditionally open the pcap log file if the log level is debug or higher
-    if (um_log_level > netlib::log::log_level::debug) {
+    if (um_log_level >= netlib::log::log_level::debug) {
         pcap_log_file_.emplace("proxifyre_log.pcap", std::ios::binary | std::ios::out);
         // Check if the optional contains a value and then access it to call is_open()
         if (!pcap_log_file_->is_open()) {
@@ -87,6 +99,9 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
     }
 
     print_log(log_level_mx::info, "SOCKS5 Local Router instance successfully created."s);
+
+    // Construction succeeded; hand Winsock cleanup back to the destructor.
+    winsock_guard.engaged = false;
 }
 
 /**
