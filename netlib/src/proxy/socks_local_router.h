@@ -1133,7 +1133,13 @@ namespace proxy
         static std::wstring to_upper(const std::wstring& str)
         {
             std::wstring upper_case;
-            std::ranges::transform(str, std::back_inserter(upper_case), toupper);
+            upper_case.reserve(str.size());
+            // Use the wide-character ::towupper. The narrow ::toupper(int) has
+            // undefined behaviour for wchar_t values outside the unsigned char
+            // range and does not upper-case non-ASCII characters, which made
+            // process-name/exclusion matching diverge from network_process,
+            // whose names are upper-cased with ::towupper.
+            std::ranges::transform(str, std::back_inserter(upper_case), ::towupper);
             return upper_case;
         }
 
