@@ -138,7 +138,10 @@ bool socksify_unmanaged::stop() const
         return false;
     }
 
-    if (proxy_->stop())
+    // socks_local_router::stop() returns true on success (and false when the
+    // router was not active). Treating a successful stop as a failure here
+    // produced a misleading "[ERROR]" log and an inverted return value.
+    if (!proxy_->stop())
     {
         print_log(log_level_mx::info, "[ERROR]: Failed to stop the SOCKS5 Local Router instance."s);
         return false;
