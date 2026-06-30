@@ -23,7 +23,7 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
 
     if (constexpr auto version_requested = MAKEWORD(2, 2); ::WSAStartup(version_requested, &wsa_data) != 0)
     {
-        print_log(log_level_mx::info, "WSAStartup failed with error\n");
+        print_log(log_level_mx::error, "WSAStartup failed with error\n");
     }
 
     lock_ = std::make_unique<mutex_impl>();
@@ -76,7 +76,7 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
 
     if (!proxy_)
     {
-        print_log(log_level_mx::info, "[ERROR]: Failed to create the SOCKS5 Local Router instance!"s);
+        print_log(log_level_mx::error, "Failed to create the SOCKS5 Local Router instance!"s);
         throw std::runtime_error("[ERROR]: Failed to create the SOCKS5 Local Router instance!");
     }
 
@@ -114,7 +114,7 @@ bool socksify_unmanaged::start() const
 
     if (!proxy_->start())
     {
-        print_log(log_level_mx::info, "[ERROR]: Failed to start the SOCKS5 Local Router instance!"s);
+        print_log(log_level_mx::error, "Failed to start the SOCKS5 Local Router instance!"s);
         return false;
     }
 
@@ -133,17 +133,17 @@ bool socksify_unmanaged::stop() const
 
     if (!proxy_)
     {
-        print_log(log_level_mx::info,
-            "[ERROR]: Failed to stop the SOCKS5 Local Router instance. Instance does not exist."s);
+        print_log(log_level_mx::error,
+            "Failed to stop the SOCKS5 Local Router instance. Instance does not exist."s);
         return false;
     }
 
     // socks_local_router::stop() returns true on success (and false when the
     // router was not active). Treating a successful stop as a failure here
-    // produced a misleading "[ERROR]" log and an inverted return value.
+    // produced a misleading error log and an inverted return value.
     if (!proxy_->stop())
     {
-        print_log(log_level_mx::info, "[ERROR]: Failed to stop the SOCKS5 Local Router instance."s);
+        print_log(log_level_mx::error, "Failed to stop the SOCKS5 Local Router instance."s);
         return false;
     }
 
@@ -297,7 +297,13 @@ void socksify_unmanaged::log_event(const event_mx log)
  */
 void socksify_unmanaged::print_log(const log_level_mx level, const std::string& message) const
 {
-    if (level < log_level_)
+    // Emit the message when its severity is at or below the configured
+    // verbosity threshold. log_level_mx orders severities from error (0) to
+    // all (255), so a message must be printed when level <= log_level_. The
+    // previous strict comparison dropped messages whose level equalled the
+    // threshold, e.g. error messages were never shown at the "error" level and
+    // info messages were never shown at the "info" level.
+    if (level <= log_level_)
     {
         log_printer(message.c_str());
     }
