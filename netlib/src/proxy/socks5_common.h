@@ -69,10 +69,13 @@ namespace proxy
             unsigned char* password_length_ptr = reinterpret_cast<unsigned char*>(username_reserved) + username_length;
             char* password_ptr = reinterpret_cast<char*>(password_length_ptr) + 1;
 
-            strcpy_s(username_reserved, 255, username.c_str());
+            // Copy without a NUL terminator: the RFC 1929 block carries explicit length
+            // prefixes, and strcpy_s's size argument includes the terminator (so a bound of
+            // 255 faults/truncates on a 255-char field that the length check above accepts).
+            memcpy(username_reserved, username.data(), username.length());
 
             *password_length_ptr = static_cast<unsigned char>(password.length());
-            strcpy_s(password_ptr, 255, password.c_str());
+            memcpy(password_ptr, password.data(), password.length());
 
             return (3 + static_cast<int>(username.length()) + static_cast<int>(password.length()));
         }

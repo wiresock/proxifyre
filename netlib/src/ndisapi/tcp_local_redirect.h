@@ -206,6 +206,13 @@ namespace ndisapi
                 auto* tcp_header = reinterpret_cast<tcphdr_ptr>(reinterpret_cast<PUCHAR>(ip_header) +
                     sizeof(DWORD) * ip_header->ip_hl);
 
+                // Ensure the full TCP header lies within the captured frame before reading
+                // tcp_header fields (th_flags is at offset 13); avoids keying state on stale
+                // bytes for a short/forged IPv4 frame.
+                if (ip_header->ip_hl < 5 ||
+                    ETHER_HEADER_LENGTH + sizeof(DWORD) * ip_header->ip_hl + sizeof(tcphdr) > packet.m_Length)
+                    return false;
+
                 std::lock_guard lock(lock_);
 
                 if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
@@ -365,6 +372,13 @@ namespace ndisapi
                 // This is TCP packet, get TCP header pointer
                 auto* tcp_header = reinterpret_cast<tcphdr_ptr>(reinterpret_cast<PUCHAR>(ip_header) +
                     sizeof(DWORD) * ip_header->ip_hl);
+
+                // Ensure the full TCP header lies within the captured frame before reading
+                // tcp_header fields (th_flags is at offset 13); avoids keying state on stale
+                // bytes for a short/forged IPv4 frame.
+                if (ip_header->ip_hl < 5 ||
+                    ETHER_HEADER_LENGTH + sizeof(DWORD) * ip_header->ip_hl + sizeof(tcphdr) > packet.m_Length)
+                    return false;
 
                 std::lock_guard lock(lock_);
 
