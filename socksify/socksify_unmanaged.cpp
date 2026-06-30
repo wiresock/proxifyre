@@ -95,7 +95,7 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
     if (!proxy_)
     {
         print_log(log_level_mx::error, "Failed to create the SOCKS5 Local Router instance!"s);
-        throw std::runtime_error("[ERROR]: Failed to create the SOCKS5 Local Router instance!");
+        throw std::runtime_error("Failed to create the SOCKS5 Local Router instance!");
     }
 
     print_log(log_level_mx::info, "SOCKS5 Local Router instance successfully created."s);
@@ -159,12 +159,15 @@ bool socksify_unmanaged::stop() const
         return false;
     }
 
-    // socks_local_router::stop() returns true on success (and false when the
-    // router was not active). Treating a successful stop as a failure here
-    // produced a misleading error log and an inverted return value.
+    // socks_local_router::stop() returns true on success and false only when
+    // the router was already inactive (an idempotent no-op, e.g. when Dispose
+    // runs after an explicit Stop()). That is not a failure, so log it at info
+    // level to avoid noisy error logs while preserving the documented false
+    // return for callers that distinguish "stopped now" from "was not active".
     if (!proxy_->stop())
     {
-        print_log(log_level_mx::error, "Failed to stop the SOCKS5 Local Router instance."s);
+        print_log(log_level_mx::info,
+            "SOCKS5 Local Router instance was already stopped (not active)."s);
         return false;
     }
 
