@@ -92,7 +92,9 @@ namespace ProxiFyre
                     continue;
                 }
 
-                var protocols = string.Join(", ", appSettings.SupportedProtocols ?? new List<string>());
+                var protocols = appSettings.SupportedProtocols != null && appSettings.SupportedProtocols.Count > 0
+                    ? string.Join(", ", appSettings.SupportedProtocols)
+                    : "TCP, UDP";
                 foreach (var appName in appSettings.AppNames)
                     // Associate the defined application names to the proxies
                     if (_socksify.AssociateProcessNameToProxy(appName, proxy) && _logLevel >= LogLevel.Info)
@@ -164,6 +166,14 @@ namespace ProxiFyre
 
             foreach (var proxy in settings.Proxies)
             {
+                if (proxy == null)
+                {
+                    var message = $"Configuration file '{configFilePath}' contains a null entry under \"proxies\". " +
+                                  "Remove the empty entry or replace it with a valid proxy definition.";
+                    LoggerInstance.Error(message);
+                    throw new InvalidOperationException(message);
+                }
+
                 if (string.IsNullOrWhiteSpace(proxy.Socks5ProxyEndpoint))
                 {
                     var message = "Each proxy entry must specify a non-empty \"socks5ProxyEndpoint\".";
