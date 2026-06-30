@@ -245,6 +245,13 @@ namespace proxy
         per_io_context_t io_context_send_to_remote_{ proxy_io_operation::relay_io_write, nullptr, false };
 
         /**
+         * @brief Set on the first is_ready_for_removal() pass that sees both sockets closed,
+         *        so the next pass (a full cleanup cycle later) releases the self-references.
+         *        The grace lets any still-queued IOCP completion drain first.
+         */
+        bool removal_armed_ = false;
+
+        /**
          * @brief Indicates whether Nagle's algorithm is disabled for the remote socket.
          *
          * When true, disables Nagle's algorithm (TCP_NODELAY) to reduce latency for small packets.
@@ -753,6 +760,21 @@ namespace proxy
          *       The 1-hour safety timeout prevents memory leaks from truly abandoned connections while
          *       allowing legitimate long-lived connections to function normally.
          */
+        /**
+         * @brief Releases the strong self-references held by this socket's per-I/O context
+         *        members, breaking the reference cycle so the object can be destroyed. Called
+         *        by is_ready_for_removal() once both sockets are closed and queued completions
+         *        have drained. Overridden by derived classes that own additional per-I/O
+         *        contexts (e.g. the SOCKS5 negotiation contexts).
+         */
+        virtual void release_self_references() noexcept
+        {
+            io_context_recv_from_local_.proxy_socket_ptr.reset();
+            io_context_recv_from_remote_.proxy_socket_ptr.reset();
+            io_context_send_to_local_.proxy_socket_ptr.reset();
+            io_context_send_to_remote_.proxy_socket_ptr.reset();
+        }
+
         bool is_ready_for_removal()
         {
             using namespace std::chrono_literals;
@@ -784,6 +806,22 @@ namespace proxy
                     remote_recv_buf_.len = 0;
                     local_recv_buf_.len = 0;
                 }
+
+                // Break the per-session shared_ptr cycle: each per-I/O context member holds a
+                // strong reference back to this object so it stays alive while overlapped I/O
+                // is in flight. Release those refs here so the destructor can finally run once
+                // the server drops its own reference. Wait one cleanup cycle after both sockets
+                // close (removal_armed_) before releasing: any IOCP completion still queued for
+                // this socket fires within milliseconds of closesocket(), so a full cleanup
+                // interval guarantees they have all been delivered (and safely no-op'd) first.
+                if (!removal_armed_)
+                {
+                    removal_armed_ = true;
+                    NETLIB_DEBUG("is_ready_for_removal: Sockets closed; arming removal for the next cycle");
+                    return false;
+                }
+
+                release_self_references();
 
                 NETLIB_INFO("is_ready_for_removal: Session is ready for removal - all sockets closed and buffers cleared");
                 return true;

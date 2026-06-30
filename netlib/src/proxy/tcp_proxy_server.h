@@ -323,38 +323,57 @@ namespace proxy
 
                         auto io_context = static_cast<per_io_context_t*>(povlp);
 
+                        // Acquire the socket's strong reference under a SHARED server lock so
+                        // this read is serialized with clear_thread's release_self_references(),
+                        // which resets the same shared_ptr while clear_thread holds the EXCLUSIVE
+                        // server lock_. That removes the data race on the shared_ptr and prevents
+                        // the object being released/destroyed between this read and its use; the
+                        // captured strong ref then keeps the object alive for the rest of the
+                        // callback. A relay/negotiate context whose socket already released its
+                        // self-references reads null and safely no-ops; inject_io_write contexts
+                        // are heap-owned and always carry a strong ref, so they are still handled.
+                        decltype(io_context->proxy_socket_ptr) proxy_socket;
+                        proxy_io_operation io_operation;
+                        {
+                            std::shared_lock lock(lock_);
+                            proxy_socket = io_context->proxy_socket_ptr;
+                            io_operation = io_context->io_operation;
+                        }
+                        if (!proxy_socket && io_operation != proxy_io_operation::inject_io_write)
+                            return true;
+
                         if (!status || (status && (num_bytes == 0)))
                         {
-                            if ((io_context->io_operation == proxy_io_operation::relay_io_read) ||
-                                (io_context->io_operation == proxy_io_operation::negotiate_io_read))
+                            if ((io_operation == proxy_io_operation::relay_io_read) ||
+                                (io_operation == proxy_io_operation::negotiate_io_read))
                             {
-                                io_context->proxy_socket_ptr->close_client(true, io_context->is_local);
+                                proxy_socket->close_client(true, io_context->is_local);
                                 return false;
                             }
 
                             if (!status)
                             {
-                                io_context->proxy_socket_ptr->close_client(false, io_context->is_local);
+                                proxy_socket->close_client(false, io_context->is_local);
                                 return false;
                             }
                         }
 
-                        switch (io_context->io_operation)
+                        switch (io_operation)
                         {
                         case proxy_io_operation::relay_io_read:
-                            io_context->proxy_socket_ptr->process_receive_buffer_complete(num_bytes, io_context);
+                            proxy_socket->process_receive_buffer_complete(num_bytes, io_context);
                             break;
 
                         case proxy_io_operation::relay_io_write:
-                            io_context->proxy_socket_ptr->process_send_buffer_complete(num_bytes, io_context);
+                            proxy_socket->process_send_buffer_complete(num_bytes, io_context);
                             break;
 
                         case proxy_io_operation::negotiate_io_read:
-                            io_context->proxy_socket_ptr->process_receive_negotiate_complete(num_bytes, io_context);
+                            proxy_socket->process_receive_negotiate_complete(num_bytes, io_context);
                             break;
 
                         case proxy_io_operation::negotiate_io_write:
-                            io_context->proxy_socket_ptr->process_send_negotiate_complete(num_bytes, io_context);
+                            proxy_socket->process_send_negotiate_complete(num_bytes, io_context);
                             break;
 
                         case proxy_io_operation::inject_io_write:
@@ -723,6 +742,19 @@ namespace proxy
             }
             else
             {
+                // Allow this AF_INET6 upstream socket to reach IPv4 SOCKS5 servers
+                // via IPv4-mapped addresses (e.g. ::ffff:127.0.0.1). ProxiFyre's
+                // IPv6 proxy path targets the configured (often IPv4) SOCKS5 server
+                // through its v4-mapped form, so the socket must be dual-stack.
+                DWORD v6_only = 0;
+                if (setsockopt(remote_socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                    reinterpret_cast<const char*>(&v6_only), sizeof(v6_only)) == SOCKET_ERROR)
+                {
+                    NETLIB_WARNING("connect_to_remote_host: Failed to clear IPV6_V6ONLY on remote socket: {}",
+                        WSAGetLastError());
+                    // Continue: a v6-only socket still works for genuine IPv6 upstreams.
+                }
+
                 sockaddr_in6 sa_local{};
                 sa_local.sin6_family = address_type_t::af_type;
                 sa_local.sin6_port = htons(0);
@@ -1010,8 +1042,10 @@ namespace proxy
                 }
             }
 
-            // cleanup on exit
-            std::shared_lock lock(lock_);
+            // cleanup on exit. Exclusive lock: this block MUTATES sock_array_events_
+            // (closes events/sockets and writes INVALID_SOCKET), so a shared (read) lock
+            // would be the wrong contract.
+            std::unique_lock lock(lock_);
 
             for (auto&& a : sock_array_events_)
             {
