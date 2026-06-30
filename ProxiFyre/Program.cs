@@ -181,13 +181,21 @@ namespace ProxiFyre
                     throw new InvalidOperationException(message);
                 }
 
+                // Drop null/blank application names so they are never marshalled
+                // to the unmanaged layer, where marshal_as<std::wstring> throws
+                // on a null String^.
                 if (proxy.AppNames == null)
                     proxy.AppNames = new List<string>();
+                else
+                    proxy.AppNames.RemoveAll(string.IsNullOrWhiteSpace);
 
                 if (proxy.AppNames.Count == 0)
                     LoggerInstance.Warn(
                         $"Proxy '{proxy.Socks5ProxyEndpoint}' has no application names; it will not match any process.");
             }
+
+            // Drop null/blank excluded entries for the same reason.
+            settings.ExcludedList.RemoveAll(string.IsNullOrWhiteSpace);
 
             return settings;
         }
