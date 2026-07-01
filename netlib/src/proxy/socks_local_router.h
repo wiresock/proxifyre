@@ -40,23 +40,42 @@ namespace proxy
         using s5_udp_proxy_server = socks5_local_udp_proxy_server<socks5_udp_proxy_socket<net::ip_address_v4>>;
 
         /**
-         * @brief Entry stored in tcp_mapper_: redirected destination endpoint and the
-         *        steady-clock timestamp at which the mapping was created. The timestamp
-         *        is used by process_resolve_thread_proc to evict stale entries whose
-         *        SYN never produced a local proxy connection (e.g. RST/timeout).
+         * @brief Type alias for the SOCKS5 TCP proxy server specialized for IPv6.
          */
-        struct tcp_mapper_entry
+        using s5_tcp_proxy_server_v6 = tcp_proxy_server<socks5_tcp_proxy_socket<net::ip_address_v6>>;
+
+        /**
+         * @brief Type alias for the SOCKS5 UDP proxy server specialized for IPv6.
+         */
+        using s5_udp_proxy_server_v6 = socks5_local_udp_proxy_server<socks5_udp_proxy_socket<net::ip_address_v6>>;
+
+        /**
+         * @brief Entry stored in the TCP source-port mappers: redirected destination
+         *        endpoint and the steady-clock timestamp at which the mapping was
+         *        created. The timestamp is used by process_resolve_thread_proc to evict
+         *        stale entries whose SYN never produced a local proxy connection
+         *        (e.g. RST/timeout). Templated on the address family so the IPv4 and
+         *        IPv6 mappers share a single definition.
+         */
+        template <typename AddrT>
+        struct tcp_mapper_entry_t
         {
-            net::ip_endpoint<net::ip_address_v4> endpoint;
+            net::ip_endpoint<AddrT> endpoint;
             std::chrono::steady_clock::time_point created_at;
         };
+
+        using tcp_mapper_entry = tcp_mapper_entry_t<net::ip_address_v4>;
+        using tcp_mapper_entry_v6 = tcp_mapper_entry_t<net::ip_address_v6>;
 
         /**
          * @brief Stores a mapping of TCP source ports to their original destination
          *        endpoints, stamped with the time the entry was created so stale
-         *        entries can be aged out.
+         *        entries can be aged out. Separate maps are kept per address family
+         *        because IPv4 and IPv6 connections may reuse the same source port
+         *        value independently.
          */
         std::unordered_map<uint16_t, tcp_mapper_entry> tcp_mapper_;
+        std::unordered_map<uint16_t, tcp_mapper_entry_v6> tcp_mapper_v6_;
 
         /**
          * @brief Maximum age for a tcp_mapper_ entry before it is considered stale and
@@ -105,16 +124,19 @@ namespace proxy
          * @brief Stores the set of UDP ports being mapped.
          */
         std::unordered_set<uint16_t> udp_mapper_;
+        std::unordered_set<uint16_t> udp_mapper_v6_;
 
         /**
          * @brief Mutex to synchronize access to the TCP port mapping.
          */
         std::mutex tcp_mapper_lock_;
+        std::mutex tcp_mapper_v6_lock_;
 
         /**
          * @brief Mutex to synchronize access to the UDP port mapping.
          */
         std::mutex udp_mapper_lock_;
+        std::mutex udp_mapper_v6_lock_;
 
         /**
          * @brief I/O completion port for asynchronous operations.
@@ -130,6 +152,14 @@ namespace proxy
          * @brief Vector storing pairs of unique pointers to TCP and UDP proxy servers.
          */
         std::vector<std::pair<std::unique_ptr<s5_tcp_proxy_server>, std::unique_ptr<s5_udp_proxy_server>>> proxy_servers_;
+
+        /**
+         * @brief IPv6 counterpart of proxy_servers_. Kept index-aligned with
+         *        proxy_servers_ (add_socks5_proxy() always appends to both), so a
+         *        proxy index resolved from proxy_to_names_ selects the matching
+         *        IPv4 and IPv6 proxy pair.
+         */
+        std::vector<std::pair<std::unique_ptr<s5_tcp_proxy_server_v6>, std::unique_ptr<s5_udp_proxy_server_v6>>> proxy_servers_v6_;
 
         /**
          * @brief Maps proxy indexes to their corresponding process names (sorted by proxy ID).
@@ -165,9 +195,19 @@ namespace proxy
         std::unique_ptr<ndisapi::tcp_local_redirect<net::ip_address_v4>> tcp_redirect_{ nullptr };
 
         /**
+         * @brief Unique pointer to the IPv6 TCP redirect object.
+         */
+        std::unique_ptr<ndisapi::tcp_local_redirect<net::ip_address_v6>> tcp_redirect_v6_{ nullptr };
+
+        /**
          * @brief Unique pointer to the UDP redirect object.
          */
         std::unique_ptr<ndisapi::socks5_udp_local_redirect<net::ip_address_v4>> udp_redirect_{ nullptr };
+
+        /**
+         * @brief Unique pointer to the IPv6 UDP redirect object.
+         */
+        std::unique_ptr<ndisapi::socks5_udp_local_redirect<net::ip_address_v6>> udp_redirect_v6_{ nullptr };
 
         /**
          * @brief Unique pointer to the packet filter object.
@@ -347,6 +387,48 @@ namespace proxy
             return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
         }
 
+        /**
+         * @brief Compile-time selectors that return the TCP/UDP source-port mapper
+         *        (and its lock) for the requested address family. They let the
+         *        family-generic helpers (build_proxy_pair, process_*_packet_v6)
+         *        reference the correct member without duplicating their bodies.
+         */
+        template <typename AddrT>
+        auto& tcp_mapper_for() noexcept
+        {
+            if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
+                return tcp_mapper_;
+            else
+                return tcp_mapper_v6_;
+        }
+
+        template <typename AddrT>
+        std::mutex& tcp_mapper_lock_for() noexcept
+        {
+            if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
+                return tcp_mapper_lock_;
+            else
+                return tcp_mapper_v6_lock_;
+        }
+
+        template <typename AddrT>
+        auto& udp_mapper_for() noexcept
+        {
+            if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
+                return udp_mapper_;
+            else
+                return udp_mapper_v6_;
+        }
+
+        template <typename AddrT>
+        std::mutex& udp_mapper_lock_for() noexcept
+        {
+            if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
+                return udp_mapper_lock_;
+            else
+                return udp_mapper_v6_lock_;
+        }
+
     public:
         enum supported_protocols : uint8_t
         {
@@ -385,6 +467,14 @@ namespace proxy
             udp_redirect_ = std::make_unique<ndisapi::socks5_udp_local_redirect<net::ip_address_v4>>(
                 log_level_, log_stream);
 
+            // Initialize the IPv6 redirect objects. The lower redirect/proxy stack is
+            // fully dual-stack (templated + if constexpr), so the IPv6 path mirrors the
+            // IPv4 one: redirected IPv6 TCP/UDP egress is NAT'd to the local IPv6 proxy
+            // listeners instead of leaking out unproxied.
+            tcp_redirect_v6_ = std::make_unique<ndisapi::tcp_local_redirect<net::ip_address_v6>>(log_level_, log_stream);
+            udp_redirect_v6_ = std::make_unique<ndisapi::socks5_udp_local_redirect<net::ip_address_v6>>(
+                log_level_, log_stream);
+
             // Initialize packet filter
             packet_filter_ = std::make_unique<packet_filter>(
                 nullptr,
@@ -392,8 +482,16 @@ namespace proxy
                 {
                     auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
                     const auto destination_mac = net::mac_address(ethernet_header->h_dest);
+                    const auto ether_type = ntohs(ethernet_header->h_proto);
 
-                    if (ntohs(ethernet_header->h_proto) != ETH_P_IP)
+                    // IPv6 traffic from proxied apps would otherwise leave the machine
+                    // unproxied; route it through the parallel IPv6 path.
+                    if (ether_type == ETH_P_IPV6)
+                    {
+                        return handle_ipv6_filter(buffer, destination_mac);
+                    }
+
+                    if (ether_type != ETH_P_IP)
                     {
                         return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
                     }
@@ -540,8 +638,14 @@ namespace proxy
                     GetLastError());
             }
 
+            // IPv6 listeners that started but whose pair partner failed are stopped AFTER
+            // releasing lock_, mirroring stop()'s "never hold lock_ across a proxy stop()"
+            // discipline (a proxy's teardown path may contend for shared state).
+            std::vector<std::unique_ptr<s5_tcp_proxy_server_v6>> ipv6_disabled_tcp;
+            std::vector<std::unique_ptr<s5_udp_proxy_server_v6>> ipv6_disabled_udp;
+
             {
-                std::shared_lock lock(lock_);
+                std::unique_lock lock(lock_);
 
                 // Start thread pool
                 io_port_.start_thread_pool();
@@ -565,7 +669,58 @@ namespace proxy
                         }
                     }
                 }
+
+                // Start the IPv6 proxies (index-aligned with proxy_servers_). IPv6
+                // listeners are optional: if the OS/socket stack rejects either half
+                // of the pair, disable that IPv6 slot so later packet handling falls
+                // back to pass-through instead of redirecting to a dead local port.
+                for (auto& [tcp, udp] : proxy_servers_v6_)
+                {
+                    // Disable this IPv6 slot by moving its servers out of the shared
+                    // vector (which nulls the slot) so they can be stopped and destroyed
+                    // after lock_ is released rather than under it.
+                    const auto disable_ipv6_pair = [&]
+                    {
+                        if (tcp)
+                            ipv6_disabled_tcp.push_back(std::move(tcp));
+                        if (udp)
+                            ipv6_disabled_udp.push_back(std::move(udp));
+                    };
+
+                    if (tcp)
+                    {
+                        if (!tcp->start())
+                        {
+                            NETLIB_LOG(
+                                log_level::warning,
+                                "IPv6 TCP proxy on port {} is disabled because it failed to start.",
+                                tcp->proxy_port());
+                            disable_ipv6_pair();
+                            continue;
+                        }
+                    }
+
+                    if (udp)
+                    {
+                        if (!udp->start())
+                        {
+                            NETLIB_LOG(
+                                log_level::warning,
+                                "IPv6 UDP proxy on port {} is disabled because it failed to start.",
+                                udp->proxy_port());
+                            disable_ipv6_pair();
+                        }
+                    }
+                }
             }
+
+            // Stop any disabled IPv6 listeners without holding lock_.
+            for (auto& tcp : ipv6_disabled_tcp)
+                if (tcp)
+                    tcp->stop();
+            for (auto& udp : ipv6_disabled_udp)
+                if (udp)
+                    udp->stop();
 
             process_resolve_thread_ = std::thread(&socks_local_router::process_resolve_thread_proc, this);
 
@@ -593,15 +748,29 @@ namespace proxy
                 // same mutex, so holding lock_ across stop() can deadlock.
                 // This mirrors the pattern used in stop().
                 std::vector<std::pair<s5_tcp_proxy_server*, s5_udp_proxy_server*>> proxies_to_stop;
+                std::vector<std::pair<s5_tcp_proxy_server_v6*, s5_udp_proxy_server_v6*>> proxies_to_stop_v6;
                 {
                     std::shared_lock lock(lock_);
                     proxies_to_stop.reserve(proxy_servers_.size());
                     for (auto& [tcp, udp] : proxy_servers_)
                         proxies_to_stop.emplace_back(tcp.get(), udp.get());
+
+                    proxies_to_stop_v6.reserve(proxy_servers_v6_.size());
+                    for (auto& [tcp, udp] : proxy_servers_v6_)
+                        proxies_to_stop_v6.emplace_back(tcp.get(), udp.get());
                 }
 
                 // Stop all proxies without holding lock_.
                 for (auto& [tcp, udp] : proxies_to_stop)
+                {
+                    if (tcp)
+                        tcp->stop();
+
+                    if (udp)
+                        udp->stop();
+                }
+
+                for (auto& [tcp, udp] : proxies_to_stop_v6)
                 {
                     if (tcp)
                         tcp->stop();
@@ -684,6 +853,16 @@ namespace proxy
                 udp_redirect_->stop();  // This should join the cleanup thread
             }
 
+            if (tcp_redirect_v6_)
+            {
+                tcp_redirect_v6_->stop();  // This should join the cleanup thread
+            }
+
+            if (udp_redirect_v6_)
+            {
+                udp_redirect_v6_->stop();  // This should join the cleanup thread
+            }
+
             // Step 4: Stop all proxy servers WITHOUT holding lock_
             // CRITICAL: We must NOT hold lock_ while calling stop() or during destruction
             // because the cleanup threads inside the proxies need to acquire the same lock
@@ -703,6 +882,24 @@ namespace proxy
                 {
                     NETLIB_DEBUG("Stopping IPv4 UDP proxy #{} on port {}", i, proxy_servers_[i].second->proxy_port());
                     proxy_servers_[i].second->stop();
+                }
+            }
+
+            NETLIB_DEBUG("Stopping {} IPv6 proxy pairs", proxy_servers_v6_.size());
+
+            // Stop all IPv6 proxies without holding lock_
+            for (size_t i = 0; i < proxy_servers_v6_.size(); ++i)
+            {
+                if (proxy_servers_v6_[i].first)
+                {
+                    NETLIB_DEBUG("Stopping IPv6 TCP proxy #{} on port {}", i, proxy_servers_v6_[i].first->proxy_port());
+                    proxy_servers_v6_[i].first->stop();
+                }
+
+                if (proxy_servers_v6_[i].second)
+                {
+                    NETLIB_DEBUG("Stopping IPv6 UDP proxy #{} on port {}", i, proxy_servers_v6_[i].second->proxy_port());
+                    proxy_servers_v6_[i].second->stop();
                 }
             }
 
@@ -772,6 +969,7 @@ namespace proxy
         void set_bypass_lan() noexcept
         {
             add_lan_passover_filters_v4();
+            add_lan_passover_filters_v6();
         }
 
         /**
@@ -783,6 +981,115 @@ namespace proxy
             return packet_filter_->IsDriverLoaded();
         }
 
+    private:
+        /**
+         * @brief Builds a (TCP, UDP) SOCKS5 proxy-server pair for a single address
+         *        family, without starting them.
+         *
+         * Both the IPv4 and IPv6 paths in add_socks5_proxy() go through this single
+         * templated helper so the accept-callback logic (source-port mapper lookup,
+         * TTL eviction, negotiate-context construction) lives in one place. The correct
+         * per-family source-port mapper is selected at compile time via the
+         * *_mapper_for<AddrT>() helpers.
+         *
+         * @tparam AddrT net::ip_address_v4 or net::ip_address_v6.
+         * @param upstream The upstream SOCKS5 server endpoint the proxy connects to.
+         *        For the IPv6 instantiation this is the IPv4-mapped form of the
+         *        configured endpoint, so an IPv4 SOCKS5 server keeps working over the
+         *        proxy's dual-stack upstream socket.
+         * @param protocols Which of TCP/UDP to create.
+         * @param cred_pair Optional SOCKS5 username/password.
+         * @return Pair of unique_ptrs; either element is null when its protocol is not requested.
+         */
+        template <typename AddrT>
+        std::pair<std::unique_ptr<tcp_proxy_server<socks5_tcp_proxy_socket<AddrT>>>,
+                  std::unique_ptr<socks5_local_udp_proxy_server<socks5_udp_proxy_socket<AddrT>>>>
+        build_proxy_pair(const net::ip_endpoint<AddrT>& upstream,
+                         const supported_protocols protocols,
+                         const std::optional<std::pair<std::string, std::string>>& cred_pair)
+        {
+            using tcp_server_t = tcp_proxy_server<socks5_tcp_proxy_socket<AddrT>>;
+            using udp_server_t = socks5_local_udp_proxy_server<socks5_udp_proxy_socket<AddrT>>;
+            using tcp_negotiate_t = typename tcp_server_t::negotiate_context_t;
+            using udp_negotiate_t = typename udp_server_t::negotiate_context_t;
+
+            auto tcp_server = (protocols == both || protocols == tcp)
+                ? std::make_unique<tcp_server_t>(
+                    0, io_port_,
+                    [this, upstream, cred_pair](const AddrT address, const uint16_t port)
+                        -> std::tuple<AddrT, uint16_t, std::unique_ptr<tcp_negotiate_t>>
+                    {
+                        auto& mapper = tcp_mapper_for<AddrT>();
+                        std::scoped_lock lock(tcp_mapper_lock_for<AddrT>());
+
+                        if (const auto it = mapper.find(port); it != mapper.end())
+                        {
+                            // Discard stale entries whose age has exceeded the TTL.
+                            // Eviction is performed asynchronously by the resolver
+                            // thread and may be delayed, so validate age at lookup
+                            // time to avoid misrouting a new connection on a reused
+                            // source port.
+                            if (std::chrono::steady_clock::now() - it->second.created_at > tcp_mapper_entry_ttl_)
+                            {
+                                NETLIB_LOG(log_level::warning,
+                                    "TCP Redirect entry for port {} was stale (age exceeded TTL); discarding.",
+                                    port);
+                                mapper.erase(it);
+                                return std::make_tuple(AddrT{}, 0, nullptr);
+                            }
+
+                            NETLIB_LOG(log_level::info,
+                                "TCP Redirect entry was found for the {} : {} is {}",
+                                std::string{ address }, port, it->second.endpoint.to_string());
+
+                            auto remote_address = it->second.endpoint.ip;
+                            auto remote_port = it->second.endpoint.port;
+
+                            mapper.erase(it);
+
+                            return std::make_tuple(upstream.ip, upstream.port,
+                                std::make_unique<tcp_negotiate_t>(
+                                    remote_address, remote_port,
+                                    cred_pair ? std::optional(cred_pair.value().first) : std::nullopt,
+                                    cred_pair ? std::optional(cred_pair.value().second) : std::nullopt));
+                        }
+
+                        return std::make_tuple(AddrT{}, 0, nullptr);
+                    }, log_level_, log_stream_)
+                : nullptr;
+
+            auto udp_server = (protocols == both || protocols == udp)
+                ? std::make_unique<udp_server_t>(
+                    0, io_port_,
+                    [this, upstream, cred_pair](const AddrT address, const uint16_t port)
+                        -> std::tuple<AddrT, uint16_t, std::unique_ptr<udp_negotiate_t>>
+                    {
+                        auto& mapper = udp_mapper_for<AddrT>();
+                        std::scoped_lock lock(udp_mapper_lock_for<AddrT>());
+
+                        if (const auto it = mapper.find(port); it != mapper.end())
+                        {
+                            NETLIB_LOG(log_level::info,
+                                "UDP Redirect entry was found for the {} : {}",
+                                std::string{ address }, port);
+
+                            mapper.erase(it);
+
+                            return std::make_tuple(upstream.ip, upstream.port,
+                                std::make_unique<udp_negotiate_t>(
+                                    AddrT{}, 0,
+                                    cred_pair ? std::optional(cred_pair.value().first) : std::nullopt,
+                                    cred_pair ? std::optional(cred_pair.value().second) : std::nullopt));
+                        }
+
+                        return std::make_tuple(AddrT{}, 0, nullptr);
+                    }, log_level_, log_stream_)
+                : nullptr;
+
+            return { std::move(tcp_server), std::move(udp_server) };
+        }
+
+    public:
         /**
          * Add a SOCKS5 proxy and optionally starts it.
          * @param endpoint string representing the endpoint of the SOCKS5 proxy server.
@@ -863,127 +1170,116 @@ namespace proxy
 
             try
             {
-                // Create TCP and UDP proxy server objects and start them if required
+                // Create the IPv4 proxy-server pair first; this is the historical,
+                // required path. The IPv6 pair is best-effort below so IPv4 proxy
+                // registration still works on hosts where IPv6 sockets are disabled.
+                auto [socks_tcp_proxy_server, socks_udp_proxy_server] =
+                    build_proxy_pair<net::ip_address_v4>(proxy_endpoint.value(), protocols, cred_pair);
 
-                auto socks_tcp_proxy_server = (protocols == both || protocols == tcp)
-                                                  ? std::make_unique<s5_tcp_proxy_server>(
-                                                      0, io_port_, [this, endpoint = proxy_endpoint.value(), cred_pair](
-                                                      const net::ip_address_v4 address, const uint16_t port)->
-                                                      std::tuple<net::ip_address_v4, uint16_t, std::unique_ptr<
-                                                                     s5_tcp_proxy_server::negotiate_context_t>>
-                                                      {
-                                                          std::scoped_lock lock(tcp_mapper_lock_);
+                std::unique_ptr<s5_tcp_proxy_server_v6> socks_tcp_proxy_server_v6;
+                std::unique_ptr<s5_udp_proxy_server_v6> socks_udp_proxy_server_v6;
 
-                                                          if (const auto it = tcp_mapper_.find(port); it != tcp_mapper_.
-                                                              end())
-                                                          {
-                                                              // Discard stale entries whose age has exceeded the TTL.
-                                                              // Eviction is performed asynchronously by the resolver
-                                                              // thread and may be delayed, so validate age at lookup
-                                                              // time to avoid misrouting a new connection on a reused
-                                                              // source port.
-                                                              if (std::chrono::steady_clock::now() - it->second.created_at
-                                                                  > tcp_mapper_entry_ttl_)
-                                                              {
-                                                                  NETLIB_LOG(log_level::warning,
-                                                                            "TCP Redirect entry for port {} was stale (age exceeded TTL); discarding.",
-                                                                            port);
-                                                                  tcp_mapper_.erase(it);
-                                                                  return std::make_tuple(net::ip_address_v4{}, 0, nullptr);
-                                                              }
+                try
+                {
+                    // The IPv6 path connects to the IPv4-mapped form of the configured
+                    // upstream over a dual-stack socket, so existing IPv4 SOCKS5
+                    // endpoints (e.g. 127.0.0.1:1080) keep working while IPv6
+                    // destinations are proxied instead of leaking.
+                    // Build the IPv4-mapped IPv6 form of the configured (IPv4) upstream
+                    // directly from its octets rather than via "::ffff:" + string parsing,
+                    // which would silently yield :: on a parse failure under NDEBUG.
+                    in6_addr mapped_upstream{};
+                    mapped_upstream.u.Byte[10] = 0xff;
+                    mapped_upstream.u.Byte[11] = 0xff;
+                    const in_addr upstream_v4 = proxy_endpoint.value().ip;
+                    memcpy(&mapped_upstream.u.Byte[12], &upstream_v4, sizeof(upstream_v4));
+                    const net::ip_endpoint<net::ip_address_v6> upstream_v6{
+                        net::ip_address_v6{ mapped_upstream },
+                        proxy_endpoint.value().port
+                    };
 
-                                                              NETLIB_LOG(log_level::info,
-                                                                        "TCP Redirect entry was found for the {} : {} is {} : {}",
-                                                                        address, port, net::ip_address_v4{it->second.endpoint.ip}, it->second.endpoint.port);
-
-                                                              auto remote_address = it->second.endpoint.ip;
-                                                              auto remote_port = it->second.endpoint.port;
-
-                                                              tcp_mapper_.erase(it);
-
-                                                              return std::make_tuple(endpoint.ip, endpoint.port,
-                                                                  std::make_unique<
-                                                                      s5_tcp_proxy_server::negotiate_context_t>(
-                                                                      remote_address, remote_port,
-                                                                      cred_pair
-                                                                          ? std::optional(cred_pair.value().first)
-                                                                          : std::nullopt,
-                                                                      cred_pair
-                                                                          ? std::optional(cred_pair.value().second)
-                                                                          : std::nullopt));
-                                                          }
-
-                                                          return std::make_tuple(net::ip_address_v4{}, 0, nullptr);
-                                                      }, log_level_, log_stream_)
-                                                  : nullptr;
-
-                auto socks_udp_proxy_server = (protocols == both || protocols == udp)
-                                                  ? std::make_unique<s5_udp_proxy_server>(
-                                                      0, io_port_, [this, endpoint = proxy_endpoint.value(), cred_pair](
-                                                      const net::ip_address_v4 address, const uint16_t port)->
-                                                      std::tuple<net::ip_address_v4, uint16_t, std::unique_ptr<
-                                                                     s5_udp_proxy_server::negotiate_context_t>>
-                                                      {
-                                                          std::scoped_lock lock(udp_mapper_lock_);
-
-                                                          if (const auto it = udp_mapper_.find(port); it != udp_mapper_.
-                                                              end())
-                                                          {
-                                                              NETLIB_LOG(log_level::info,
-                                                                        "UDP Redirect entry was found for the {} : {}",
-                                                                        address, port);
-
-                                                              udp_mapper_.erase(it);
-
-                                                              return std::make_tuple(endpoint.ip, endpoint.port,
-                                                                  std::make_unique<
-                                                                      s5_udp_proxy_server::negotiate_context_t>(
-                                                                      net::ip_address_v4{}, 0,
-                                                                      cred_pair
-                                                                          ? std::optional(cred_pair.value().first)
-                                                                          : std::nullopt,
-                                                                      cred_pair
-                                                                          ? std::optional(cred_pair.value().second)
-                                                                          : std::nullopt));
-                                                          }
-
-                                                          return std::make_tuple(net::ip_address_v4{}, 0, nullptr);
-                                                      }, log_level_, log_stream_)
-                                                  : nullptr;
+                    auto proxy_pair_v6 = build_proxy_pair<net::ip_address_v6>(upstream_v6, protocols, cred_pair);
+                    socks_tcp_proxy_server_v6 = std::move(proxy_pair_v6.first);
+                    socks_udp_proxy_server_v6 = std::move(proxy_pair_v6.second);
+                }
+                catch (const std::exception& e)
+                {
+                    NETLIB_LOG(log_level::warning,
+                        "IPv6 SOCKS5 proxy listeners for {} are disabled: {}",
+                        endpoint, e.what());
+                }
+                catch (...)
+                {
+                    NETLIB_LOG(log_level::warning,
+                        "IPv6 SOCKS5 proxy listeners for {} are disabled: unknown error",
+                        endpoint);
+                }
 
                 if (start) // optionally start proxies
                 {
-                    // If successful in starting the servers, log the local listening ports
-                    if (socks_tcp_proxy_server)
+                    // IPv4 listeners are required: on failure return nullopt and let
+                    // the local unique_ptrs tear down (their destructors stop any listener
+                    // that already started), so the add fails atomically.
+                    const auto start_listener = [&endpoint, this](auto& server, const char* family,
+                                                                  const char* proto) -> bool
                     {
-                        if (!socks_tcp_proxy_server->start())
+                        if (!server)
+                            return true;
+
+                        if (!server->start())
                         {
-                            NETLIB_LOG(log_level::error, "Failed to start TCP SOCKS5 proxy {}", endpoint);
-                            return {};
+                            NETLIB_LOG(log_level::error, "Failed to start {} {} SOCKS5 proxy {}", family, proto, endpoint);
+                            return false;
                         }
 
                         NETLIB_LOG(log_level::info,
-                                  "Local TCP proxy for {} is listening port: {}", endpoint, socks_tcp_proxy_server->proxy_port());
+                            "Local {} {} proxy for {} is listening port: {}", family, proto, endpoint, server->proxy_port());
+                        return true;
+                    };
+
+                    if (!start_listener(socks_tcp_proxy_server, "IPv4", "TCP")) return {};
+                    if (!start_listener(socks_udp_proxy_server, "IPv4", "UDP")) return {};
+
+                    const auto disable_ipv6_listeners = [&]
+                    {
+                        if (socks_tcp_proxy_server_v6)
+                            socks_tcp_proxy_server_v6->stop();
+                        if (socks_udp_proxy_server_v6)
+                            socks_udp_proxy_server_v6->stop();
+
+                        socks_tcp_proxy_server_v6.reset();
+                        socks_udp_proxy_server_v6.reset();
+                    };
+
+                    if (!start_listener(socks_tcp_proxy_server_v6, "IPv6", "TCP"))
+                    {
+                        disable_ipv6_listeners();
                     }
-
-                    if (socks_udp_proxy_server)
+                    else if (!start_listener(socks_udp_proxy_server_v6, "IPv6", "UDP"))
                     {
-                        if (!socks_udp_proxy_server->start())
-                        {
-                            NETLIB_LOG(log_level::error, "Failed to start UDP SOCKS5 proxy {}", endpoint);
-                            return {};
-                        }
-
-                        NETLIB_LOG(log_level::info,
-                                  "Local UDP proxy for {} is listening port: {}", endpoint, socks_udp_proxy_server->proxy_port());
+                        disable_ipv6_listeners();
                     }
                 }
 
-                // Lock the mutex to safely add the proxy servers to the shared data structure
+                // Lock the mutex to safely add the proxy servers to the shared data
+                // structures. proxy_servers_ and proxy_servers_v6_ are appended together
+                // so they stay index-aligned (the returned index addresses both).
                 std::scoped_lock lock(lock_);
+
+                // Reserve capacity on BOTH vectors up front so the two appends below
+                // are exception-atomic: reserve() is the only step here that can throw
+                // (std::bad_alloc on reallocation), while the subsequent emplace_back of
+                // moved unique_ptrs is noexcept once capacity is guaranteed. If either
+                // reserve throws, neither vector has grown, preserving the index-alignment
+                // invariant (a half-completed append would otherwise permanently skew the
+                // vectors and silently leave IPv6 unproxied for later proxies).
+                proxy_servers_.reserve(proxy_servers_.size() + 1);
+                proxy_servers_v6_.reserve(proxy_servers_v6_.size() + 1);
 
                 proxy_servers_.emplace_back(
                     std::move(socks_tcp_proxy_server), std::move(socks_udp_proxy_server));
+                proxy_servers_v6_.emplace_back(
+                    std::move(socks_tcp_proxy_server_v6), std::move(socks_udp_proxy_server_v6));
 
                 return proxy_servers_.size() - 1; // Return the index of the added proxy server
             }
@@ -1181,11 +1477,28 @@ namespace proxy
             if (process->id == ::GetCurrentProcessId())
                 return false;
 
+            // Matches a configured executable name (one without a path separator) against the
+            // process's bare name. Anchored to the whole filename -- an exact match, or the
+            // entry as the filename stem immediately followed by an extension -- so a short
+            // pattern can't match an unrelated process (e.g. "NOTE" matching "EVILNOTE.EXE").
+            // Inputs are already uppercased by the caller. Path-form entries (containing a
+            // separator) still use substring matching against the full path.
+            const auto name_matches = [](const std::wstring& name, const std::wstring& entry)
+            {
+                if (entry.empty())
+                    return false;
+                if (name == entry)
+                    return true;
+                return name.size() > entry.size()
+                    && name.compare(0, entry.size(), entry) == 0
+                    && name[entry.size()] == L'.';
+            };
+
             // Check exclusion list
             for (const auto& excluded_entry : excluded_list_) {
                 if ((excluded_entry.find(L'\\') != std::wstring::npos || excluded_entry.find(L'/') != std::wstring::npos)
                     ? (process->path_name.find(excluded_entry) != std::wstring::npos)
-                    : (process->name.find(excluded_entry) != std::wstring::npos)
+                    : name_matches(process->name, excluded_entry)
                     ) {
                     process->excluded = true;
                     return false; // Excluded
@@ -1194,7 +1507,7 @@ namespace proxy
 
             return (app.find(L'\\') != std::wstring::npos || app.find(L'/') != std::wstring::npos)
                     ? (process->path_name.find(app) != std::wstring::npos)
-                    : (process->name.find(app) != std::wstring::npos);
+                    : name_matches(process->name, app);
         }
 
         /**
@@ -1213,7 +1526,7 @@ namespace proxy
             {
                 if (match_app_name(process_pattern, process))
                 {
-                    return proxy_servers_[proxy_id].first
+                    return proxy_id < proxy_servers_.size() && proxy_servers_[proxy_id].first
                         ? std::optional(proxy_servers_[proxy_id].first->proxy_port())
                         : std::nullopt;
                 }
@@ -1239,7 +1552,7 @@ namespace proxy
             {
                 if (match_app_name(process_pattern, process))
                 {
-                    return proxy_servers_[proxy_id].second
+                    return proxy_id < proxy_servers_.size() && proxy_servers_[proxy_id].second
                         ? std::optional(proxy_servers_[proxy_id].second->proxy_port())
                         : std::nullopt;
                 }
@@ -1281,6 +1594,82 @@ namespace proxy
             // Checks each proxy server to see if the given port number is being used.
             // Returns true if any server is using the port, false otherwise.
             return std::ranges::any_of(std::as_const(proxy_servers_), [port](auto& proxy)
+            {
+                if (proxy.second && proxy.second->proxy_port() == port)
+                    return true;
+                return false;
+            });
+        }
+
+        /**
+         * IPv6 counterpart of get_proxy_port_tcp(). Indexes proxy_servers_v6_, which is
+         * kept index-aligned with proxy_servers_, so the same proxy_to_names_ mapping
+         * selects the matching IPv6 proxy.
+         */
+        std::optional<uint16_t> get_proxy_port_tcp_v6(const std::shared_ptr<iphelper::network_process>& process)
+        {
+            if (!process) return {};
+
+            std::shared_lock lock(lock_);
+
+            for (const auto& [proxy_id, process_pattern] : proxy_to_names_)
+            {
+                if (match_app_name(process_pattern, process))
+                {
+                    return proxy_id < proxy_servers_v6_.size() && proxy_servers_v6_[proxy_id].first
+                        ? std::optional(proxy_servers_v6_[proxy_id].first->proxy_port())
+                        : std::nullopt;
+                }
+            }
+
+            return {};
+        }
+
+        /**
+         * IPv6 counterpart of get_proxy_port_udp(). See get_proxy_port_tcp_v6().
+         */
+        std::optional<uint16_t> get_proxy_port_udp_v6(const std::shared_ptr<iphelper::network_process>& process)
+        {
+            if (!process) return {};
+
+            std::shared_lock lock(lock_);
+
+            for (const auto& [proxy_id, process_pattern] : proxy_to_names_)
+            {
+                if (match_app_name(process_pattern, process))
+                {
+                    return proxy_id < proxy_servers_v6_.size() && proxy_servers_v6_[proxy_id].second
+                        ? std::optional(proxy_servers_v6_[proxy_id].second->proxy_port())
+                        : std::nullopt;
+                }
+            }
+
+            return {};
+        }
+
+        /**
+         * IPv6 counterpart of is_tcp_proxy_port(): checks the IPv6 TCP proxy listeners.
+         */
+        bool is_tcp_proxy_port_v6(const uint16_t port)
+        {
+            std::shared_lock lock(lock_);
+
+            return std::ranges::any_of(std::as_const(proxy_servers_v6_), [port](auto& proxy)
+            {
+                if (proxy.first && proxy.first->proxy_port() == port)
+                    return true;
+                return false;
+            });
+        }
+
+        /**
+         * IPv6 counterpart of is_udp_proxy_port(): checks the IPv6 UDP proxy listeners.
+         */
+        bool is_udp_proxy_port_v6(const uint16_t port)
+        {
+            std::shared_lock lock(lock_);
+
+            return std::ranges::any_of(std::as_const(proxy_servers_v6_), [port](auto& proxy)
             {
                 if (proxy.second && proxy.second->proxy_port() == port)
                     return true;
@@ -1486,6 +1875,257 @@ namespace proxy
         }
 
         /**
+         * @brief Dispatches an IPv6 frame from the packet-filter callback.
+         *
+         * Mirrors the IPv4 dispatch in the constructor's filter callback: locates the
+         * transport header (skipping IPv6 extension headers), passes broadcast/multicast
+         * UDP through untouched, and routes TCP/UDP to the IPv6 process handlers. When a
+         * handler cannot resolve the owning process inline, the frame is queued for
+         * deferred resolution.
+         *
+         * @param buffer The intermediate buffer describing the IPv6 frame.
+         * @param destination_mac Destination MAC, used to skip broadcast/multicast UDP.
+         * @return The packet action to apply.
+         */
+        packet_filter::packet_action handle_ipv6_filter(ndisapi::intermediate_buffer& buffer,
+                                                        const net::mac_address& destination_mac)
+        {
+            log_packet_to_pcap(buffer);
+
+            auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
+            auto* const ip_header = reinterpret_cast<ipv6hdr_ptr>(ethernet_header + 1);
+
+            const auto [transport, protocol] =
+                net::ipv6_helper::find_transport_header(ip_header, buffer.m_Length - ETHER_HEADER_LENGTH);
+
+            if (transport == nullptr)
+            {
+                // No usable transport header: either a fragmented IPv6 datagram (which
+                // this build deliberately does not rewrite, to avoid corrupting a
+                // partially-rewritten datagram) or an unsupported extension chain. Such
+                // traffic is passed through UNPROXIED, so a proxied app's fragmented IPv6
+                // egress leaks its real source address. Warn once so the limitation is
+                // visible at runtime (see README, IPv6 fragmentation note).
+                static std::atomic_flag fragment_passthrough_warned;
+                if (!fragment_passthrough_warned.test_and_set(std::memory_order_relaxed))
+                {
+                    NETLIB_LOG(log_level::warning,
+                        "Fragmented or unsupported IPv6 packet passed through unproxied; "
+                        "fragmented IPv6 traffic is not redirected to the SOCKS5 proxy.");
+                }
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+            }
+
+            if (protocol == IPPROTO_UDP)
+            {
+                // skip broadcast and multicast UDP packets
+                if (destination_mac.is_broadcast() || destination_mac.is_multicast())
+                {
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+                }
+
+                if (const auto result = process_udp_packet_v6(buffer, false))
+                {
+                    return result.value();
+                }
+                return enqueue_for_deferred_resolve(buffer);
+            }
+
+            if (protocol == IPPROTO_TCP)
+            {
+                if (const auto result = process_tcp_packet_v6(buffer, false))
+                {
+                    return result.value();
+                }
+                return enqueue_for_deferred_resolve(buffer);
+            }
+
+            return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+        }
+
+        /**
+         * @brief IPv6 counterpart of process_udp_packet().
+         *
+         * Behaves identically to the IPv4 handler but parses an IPv6 header (skipping
+         * extension headers via ipv6_helper), and uses the IPv6 process lookup, mapper,
+         * proxy-port lookup, and redirect objects. See process_udp_packet() for the
+         * postponed/return-value contract.
+         */
+        std::optional<packet_filter::packet_action> process_udp_packet_v6(ndisapi::intermediate_buffer& buffer, const bool postponed)
+        {
+            auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
+            auto* const ip_header = reinterpret_cast<ipv6hdr_ptr>(ethernet_header + 1);
+
+            const auto [transport, protocol] =
+                net::ipv6_helper::find_transport_header(ip_header, buffer.m_Length - ETHER_HEADER_LENGTH);
+
+            if (transport == nullptr || protocol != IPPROTO_UDP)
+            {
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+            }
+
+            const auto* const udp_header = static_cast<udphdr_ptr>(transport);
+
+            // If the destination port is 53 (DNS), allow the packet to pass through
+            // without redirection (mirrors the IPv4 path).
+            if (ntohs(udp_header->th_dport) == 53)
+            {
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+            }
+
+            // If the packet is from a known proxy port, process for server-to-client redirection
+            if (is_udp_proxy_port_v6(ntohs(udp_header->th_sport)))
+            {
+                if (udp_redirect_v6_->process_server_to_client_packet(buffer))
+                {
+                    log_packet_to_pcap(buffer);
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+                }
+            }
+
+            auto process = process_lookup_v6_.
+                lookup_process_for_udp<false>(net::ip_endpoint<net::ip_address_v6>{
+                ip_header->ip6_src, ntohs(udp_header->th_sport)
+            });
+
+            if (!process)
+            {
+                if (postponed)
+                {
+                    process = process_lookup_v6_.
+                        lookup_process_for_udp<true>(net::ip_endpoint<net::ip_address_v6>{
+                        ip_header->ip6_src, ntohs(udp_header->th_sport)
+                    });
+                }
+                else
+                {
+                    return std::nullopt;
+                }
+            }
+
+            if (process->excluded || process->bypass_udp)
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+
+            if (const auto port = process->udp_proxy_port ? process->udp_proxy_port : get_proxy_port_udp_v6(process); port.has_value())
+            {
+                if (udp_redirect_v6_->is_new_endpoint(buffer))
+                {
+                    std::scoped_lock lock(udp_mapper_v6_lock_);
+                    udp_mapper_v6_.insert(ntohs(udp_header->th_sport));
+
+                    NETLIB_LOG(log_level::info,
+                        "Redirecting UDP6 {} : {} -> {} : {}",
+                        std::string{ net::ip_address_v6{ip_header->ip6_src} }, ntohs(udp_header->th_sport),
+                        std::string{ net::ip_address_v6{ip_header->ip6_dst} }, ntohs(udp_header->th_dport));
+                }
+
+                if (udp_redirect_v6_->process_client_to_server_packet(buffer, htons(port.value())))
+                {
+                    log_packet_to_pcap(buffer);
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+                }
+            }
+            else
+            {
+                process->bypass_udp = true;
+            }
+
+            return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+        }
+
+        /**
+         * @brief IPv6 counterpart of process_tcp_packet().
+         *
+         * Behaves identically to the IPv4 handler but parses an IPv6 header (skipping
+         * extension headers via ipv6_helper), and uses the IPv6 process lookup, mapper,
+         * proxy-port lookup, and redirect objects. See process_tcp_packet() for the
+         * postponed/return-value contract.
+         */
+        std::optional<packet_filter::packet_action> process_tcp_packet_v6(ndisapi::intermediate_buffer& buffer, const bool postponed)
+        {
+            auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
+            auto* const ip_header = reinterpret_cast<ipv6hdr_ptr>(ethernet_header + 1);
+
+            const auto [transport, protocol] =
+                net::ipv6_helper::find_transport_header(ip_header, buffer.m_Length - ETHER_HEADER_LENGTH);
+
+            if (transport == nullptr || protocol != IPPROTO_TCP)
+            {
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+            }
+
+            const auto* const tcp_header = static_cast<tcphdr_ptr>(transport);
+
+            // If the packet is from a known proxy port, process for server-to-client redirection
+            if (is_tcp_proxy_port_v6(ntohs(tcp_header->th_sport)))
+            {
+                if (tcp_redirect_v6_->process_server_to_client_packet(buffer))
+                {
+                    log_packet_to_pcap(buffer);
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+                }
+            }
+
+            auto process = process_lookup_v6_.
+                lookup_process_for_tcp<false>(net::ip_session<net::ip_address_v6>{
+                ip_header->ip6_src, ip_header->ip6_dst, ntohs(tcp_header->th_sport),
+                    ntohs(tcp_header->th_dport)
+            });
+
+            if (!process)
+            {
+                if (postponed)
+                {
+                    process = process_lookup_v6_.
+                        lookup_process_for_tcp<true>(net::ip_session<net::ip_address_v6>{
+                        ip_header->ip6_src, ip_header->ip6_dst, ntohs(tcp_header->th_sport),
+                            ntohs(tcp_header->th_dport)
+                    });
+                }
+                else
+                {
+                    return std::nullopt;
+                }
+            }
+
+            if (process->excluded || process->bypass_tcp)
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+
+            if (const auto port = process->tcp_proxy_port ? process->tcp_proxy_port : get_proxy_port_tcp_v6(process); port.has_value())
+            {
+                // If this is a SYN packet (connection initiation), map the source port to the destination endpoint
+                if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
+                {
+                    std::scoped_lock lock(tcp_mapper_v6_lock_);
+                    tcp_mapper_v6_[ntohs(tcp_header->th_sport)] =
+                        tcp_mapper_entry_v6{
+                            net::ip_endpoint(net::ip_address_v6(ip_header->ip6_dst),
+                                ntohs(tcp_header->th_dport)),
+                            std::chrono::steady_clock::now()
+                        };
+
+                    NETLIB_LOG(log_level::info,
+                        "Redirecting TCP6: {} : {} -> {} : {}",
+                        std::string{ net::ip_address_v6{ip_header->ip6_src} }, ntohs(tcp_header->th_sport),
+                        std::string{ net::ip_address_v6{ip_header->ip6_dst} }, ntohs(tcp_header->th_dport));
+                }
+
+                // Attempt to process the packet for client-to-server redirection
+                if (tcp_redirect_v6_->process_client_to_server_packet(buffer, htons(port.value())))
+                {
+                    log_packet_to_pcap(buffer);
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+                }
+            }
+            else
+            {
+                process->bypass_tcp = true;
+            }
+
+            return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+        }
+
+        /**
          * @brief Logs a single packet to the pcap logger.
          *
          * This function logs a single packet to the pcap logger if it is available.
@@ -1623,16 +2263,34 @@ namespace proxy
                     now - last_sweep >= maintenance_interval)
                 {
                     last_sweep = now;
-                    std::scoped_lock lock(tcp_mapper_lock_);
-                    for (auto it = tcp_mapper_.begin(); it != tcp_mapper_.end();)
                     {
-                        if (now - it->second.created_at > tcp_mapper_entry_ttl_)
+                        std::scoped_lock lock(tcp_mapper_lock_);
+                        for (auto it = tcp_mapper_.begin(); it != tcp_mapper_.end();)
                         {
-                            it = tcp_mapper_.erase(it);
+                            if (now - it->second.created_at > tcp_mapper_entry_ttl_)
+                            {
+                                it = tcp_mapper_.erase(it);
+                            }
+                            else
+                            {
+                                ++it;
+                            }
                         }
-                        else
+                    }
+
+                    // Same TTL sweep for the IPv6 TCP mapper.
+                    {
+                        std::scoped_lock lock(tcp_mapper_v6_lock_);
+                        for (auto it = tcp_mapper_v6_.begin(); it != tcp_mapper_v6_.end();)
                         {
-                            ++it;
+                            if (now - it->second.created_at > tcp_mapper_entry_ttl_)
+                            {
+                                it = tcp_mapper_v6_.erase(it);
+                            }
+                            else
+                            {
+                                ++it;
+                            }
                         }
                     }
                 }
@@ -1721,6 +2379,7 @@ namespace proxy
 
                 // Actualize process lookup before processing
                 process_lookup_v4_.actualize(true, true);
+                process_lookup_v6_.actualize(true, true);
 
                 while (!local_queue.empty())
                 {
@@ -1728,6 +2387,74 @@ namespace proxy
                     local_queue.pop();
 
                     auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer_ptr->m_IBuffer);
+
+                    // Dispatch on EtherType first: IPv6 packets carry an IPv6
+                    // header (with optional extension headers) rather than an
+                    // iphdr, so reading iphdr::ip_p for them would misparse.
+                    if (const auto ether_type = ntohs(ethernet_header->h_proto);
+                        ether_type == ETH_P_IPV6)
+                    {
+                        const auto* const ip_header =
+                            reinterpret_cast<ipv6hdr_ptr>(ethernet_header + 1);
+                        const auto [transport_header, protocol] =
+                            net::ipv6_helper::find_transport_header(
+                                ip_header, buffer_ptr->m_Length - ETHER_HEADER_LENGTH);
+
+                        if (transport_header == nullptr)
+                        {
+                            // Non-initial fragment or malformed/unsupported chain:
+                            // nothing actionable was deferred, so pass it through.
+                            to_adapters.push_back(std::move(buffer_ptr));
+                            continue;
+                        }
+
+                        if (protocol == IPPROTO_UDP)
+                        {
+                            if (const auto result = process_udp_packet_v6(*buffer_ptr, true);
+                                result && result->action == packet_filter::packet_action::action_type::pass)
+                            {
+                                to_adapters.push_back(std::move(buffer_ptr));
+                            }
+                            else if (result && result->action == packet_filter::packet_action::action_type::revert)
+                            {
+                                to_mstcp.push_back(std::move(buffer_ptr));
+                            }
+                            else
+                            {
+                                // Invariant: a postponed packet always yields a result. If a
+                                // future change ever breaks it, fail safe by passing the packet
+                                // through rather than silently dropping it in a release build.
+                                assert(false && "process_udp_packet_v6 should always return a result for postponed packets");
+                                to_adapters.push_back(std::move(buffer_ptr));
+                            }
+                        }
+                        else if (protocol == IPPROTO_TCP)
+                        {
+                            if (const auto result = process_tcp_packet_v6(*buffer_ptr, true);
+                                result && result->action == packet_filter::packet_action::action_type::pass)
+                            {
+                                to_adapters.push_back(std::move(buffer_ptr));
+                            }
+                            else if (result && result->action == packet_filter::packet_action::action_type::revert)
+                            {
+                                to_mstcp.push_back(std::move(buffer_ptr));
+                            }
+                            else
+                            {
+                                // Fail safe (see above): pass through instead of dropping.
+                                assert(false && "process_tcp_packet_v6 should always return a result for postponed packets");
+                                to_adapters.push_back(std::move(buffer_ptr));
+                            }
+                        }
+                        else
+                        {
+                            // Unexpected (only TCP/UDP are queued): pass through, don't drop.
+                            assert(false && "Only TCP/UDP packets should be queued for deferred processing");
+                            to_adapters.push_back(std::move(buffer_ptr));
+                        }
+
+                        continue;
+                    }
 
                     if (const auto* const ip_header = reinterpret_cast<iphdr_ptr>(ethernet_header + 1);
                         ip_header->ip_p == IPPROTO_UDP)
@@ -1743,8 +2470,10 @@ namespace proxy
                         }
                         else
                         {
-                            // Should always have a result for postponed packets
+                            // Should always have a result for postponed packets; if not,
+                            // fail safe by passing it through rather than dropping it.
                             assert(false && "process_udp_packet should always return a result for postponed packets");
+                            to_adapters.push_back(std::move(buffer_ptr));
                         }
                     }
                     else if (ip_header->ip_p == IPPROTO_TCP)
@@ -1760,14 +2489,18 @@ namespace proxy
                         }
                         else
                         {
-                            // Should always have a result for postponed packets
+                            // Should always have a result for postponed packets; if not,
+                            // fail safe by passing it through rather than dropping it.
                             assert(false && "process_tcp_packet should always return a result for postponed packets");
+                            to_adapters.push_back(std::move(buffer_ptr));
                         }
                     }
                     else
                     {
-                        // Only TCP/UDP packets should be queued for deferred processing
+                        // Only TCP/UDP packets should be queued for deferred processing;
+                        // pass anything unexpected through rather than dropping it.
                         assert(false && "Only TCP/UDP packets should be queued for deferred processing");
+                        to_adapters.push_back(std::move(buffer_ptr));
                     }
                 }
 
@@ -1927,6 +2660,70 @@ namespace proxy
             }
 
             NETLIB_LOG(log_level::info, "LAN bypass enabled - local network traffic will not be proxied");
+        }
+
+        /**
+        * @brief Builds and adds IPv6 pass-through filters for common local network ranges.
+        *
+        * IPv6 counterpart of add_lan_passover_filters_v4(). Because IPv6 destinations
+        * are now proxied, LAN bypass must also exempt the IPv6 local/special-purpose
+        * ranges; otherwise a matched application's link-local / ULA / multicast IPv6
+        * traffic would be redirected to the SOCKS5 proxy (which generally cannot reach
+        * those scopes) even with bypassLan enabled.
+        *
+        * Bypassed ranges:
+        * - fe80::/10  (Link-local unicast)
+        * - fc00::/7   (Unique local addresses, ULA)
+        * - ff00::/8   (Multicast)
+        */
+        void add_lan_passover_filters_v6()
+        {
+            // Local / special-purpose IPv6 ranges, in CIDR notation. Because the IPv6
+            // redirect also captures IPv4-mapped destinations (::ffff:a.b.c.d) that a
+            // dual-stack app opens to a v4 LAN host, the IPv4 private/link-local/multicast
+            // ranges are also exempted in their v4-mapped form so bypassLan covers them.
+            static constexpr std::array<const char*, 9> local_ranges{ {
+                "::1/128",                  // Loopback
+                "fe80::/10",                // Link-local unicast
+                "fc00::/7",                 // Unique local addresses (ULA)
+                "ff00::/8",                 // Multicast
+                "::ffff:10.0.0.0/104",      // IPv4-mapped 10.0.0.0/8 (private)
+                "::ffff:172.16.0.0/108",    // IPv4-mapped 172.16.0.0/12 (private)
+                "::ffff:192.168.0.0/112",   // IPv4-mapped 192.168.0.0/16 (private)
+                "::ffff:169.254.0.0/112",   // IPv4-mapped 169.254.0.0/16 (link-local)
+                "::ffff:127.0.0.0/104"      // IPv4-mapped loopback
+            } };
+
+            for (const auto* const cidr : local_ranges)
+            {
+                const auto subnet = net::ip_subnet<net::ip_address_v6>::from_cidr(cidr);
+                if (!subnet)
+                {
+                    // The ranges above are compile-time constants, so this should
+                    // never trigger; guard defensively rather than dereference a
+                    // nullopt if one is ever mistyped.
+                    NETLIB_LOG(log_level::warning, "Failed to parse IPv6 LAN bypass range '{}'; skipping.", cidr);
+                    continue;
+                }
+
+                // Allow inbound traffic originating from the local subnet
+                ndisapi::filter<net::ip_address_v6> in_filter;
+                in_filter
+                    .set_direction(ndisapi::direction_t::in)
+                    .set_action(ndisapi::action_t::pass)
+                    .set_source_address(subnet.value());
+                static_filters_.add_filter_front(in_filter);
+
+                // Allow outbound traffic destined to the local subnet
+                ndisapi::filter<net::ip_address_v6> out_filter;
+                out_filter
+                    .set_direction(ndisapi::direction_t::out)
+                    .set_action(ndisapi::action_t::pass)
+                    .set_dest_address(subnet.value());
+                static_filters_.add_filter_front(out_filter);
+            }
+
+            NETLIB_LOG(log_level::info, "IPv6 LAN bypass enabled - local IPv6 network traffic will not be proxied");
         }
     };
 }

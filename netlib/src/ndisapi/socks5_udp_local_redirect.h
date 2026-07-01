@@ -305,6 +305,24 @@ namespace ndisapi
                     std::string{ T{ip_header->ip_dst} },
                     ntohs(udp_header->th_dport));
 
+                // Validate lengths before inserting the SOCKS5 UDP header: the UDP header
+                // must be fully captured, and the packet must have room to grow by
+                // socks5_header_size. Without the MAX_ETHER_FRAME guard a near-MTU datagram
+                // makes the memmove (and the m_Length increment below) write past m_IBuffer;
+                // the captured-size check prevents the payload-size underflow on a truncated
+                // frame. Mirrors the IPv6 attach guards.
+                {
+                    constexpr auto socks5_header_size = sizeof(proxy::socks5_udp_header<T>);
+                    const auto* const packet_end = packet.m_IBuffer + packet.m_Length;
+                    const auto* const udp_header_bytes = reinterpret_cast<const uint8_t*>(udp_header);
+                    if (udp_header_bytes > packet_end ||
+                        static_cast<size_t>(packet_end - udp_header_bytes) < sizeof(udphdr) ||
+                        packet.m_Length + socks5_header_size > MAX_ETHER_FRAME)
+                    {
+                        return false;
+                    }
+                }
+
                 auto* udp_payload = reinterpret_cast<uint8_t*>(udp_header + 1);
                 const auto udp_payload_size = static_cast<uint16_t>(packet.m_Length - sizeof(ether_header) - sizeof(
                     DWORD) * ip_header->ip_hl - sizeof(udphdr));
@@ -376,18 +394,32 @@ namespace ndisapi
                     std::string{ T{ip_header->ip6_dst} },
                     ntohs(udp_header->th_dport));
 
+                constexpr auto socks5_header_size = sizeof(proxy::socks5_udp_header<T>);
+                const auto* const packet_end = packet.m_IBuffer + packet.m_Length;
+                const auto* const udp_header_bytes = reinterpret_cast<const uint8_t*>(udp_header);
+                if (udp_header_bytes > packet_end ||
+                    static_cast<size_t>(packet_end - udp_header_bytes) < sizeof(udphdr))
+                {
+                    return false;
+                }
+
+                const auto udp_length = ntohs(udp_header->length);
+                const auto captured_udp_size = static_cast<size_t>(packet_end - udp_header_bytes);
+                if (udp_length < sizeof(udphdr) ||
+                    udp_length > captured_udp_size ||
+                    packet.m_Length + socks5_header_size > MAX_ETHER_FRAME)
+                {
+                    return false;
+                }
+
                 // Attach SOCK5 UDP header here
                 auto* udp_payload = reinterpret_cast<uint8_t*>(udp_header + 1);
-                const auto udp_payload_size = static_cast<uint16_t>(packet.m_Length - sizeof(ether_header) - sizeof(
-                    ipv6hdr) - sizeof(udphdr));
-                constexpr auto udp_max_payload_size = static_cast<uint16_t>(MAX_ETHER_FRAME - sizeof(ether_header) -
-                    sizeof(ipv6hdr) - sizeof(udphdr));
-                memmove(udp_payload + sizeof(proxy::socks5_udp_header<T>), udp_payload,
-                    std::min(udp_payload_size, udp_max_payload_size));
+                const auto udp_payload_size = static_cast<size_t>(udp_length - sizeof(udphdr));
+                memmove(udp_payload + socks5_header_size, udp_payload, udp_payload_size);
 
-                packet.m_Length += sizeof(proxy::socks5_udp_header<T>);
-                ip_header->ip6_len = htons(ntohs(ip_header->ip6_len) + sizeof(proxy::socks5_udp_header<T>));
-                udp_header->length = htons(ntohs(udp_header->length) + sizeof(proxy::socks5_udp_header<T>));
+                packet.m_Length += socks5_header_size;
+                ip_header->ip6_len = htons(ntohs(ip_header->ip6_len) + socks5_header_size);
+                udp_header->length = htons(ntohs(udp_header->length) + socks5_header_size);
                 auto* socks5_udp_header_ptr = reinterpret_cast<proxy::socks5_udp_header<T>*>(udp_payload);
 
                 socks5_udp_header_ptr->reserved = 0;
@@ -459,6 +491,31 @@ namespace ndisapi
                 if (it == endpoints_.cend())
                     return false;
 
+                // Validate lengths before mutating anything: udp_header->length comes from
+                // the received datagram. Without these guards a short/forged length makes
+                // udp_payload_size - socks5_header_size underflow into a huge value and the
+                // memmove writes far out of bounds. Mirrors the IPv6 detach guards.
+                constexpr auto socks5_header_size = sizeof(proxy::socks5_udp_header<T>);
+                const auto* const packet_end = packet.m_IBuffer + packet.m_Length;
+                const auto* const udp_header_bytes = reinterpret_cast<const uint8_t*>(udp_header);
+                const auto udp_length = ntohs(udp_header->length);
+                if (udp_header_bytes > packet_end ||
+                    static_cast<size_t>(packet_end - udp_header_bytes) < sizeof(udphdr) ||
+                    udp_length < sizeof(udphdr) + socks5_header_size ||
+                    udp_length > static_cast<size_t>(packet_end - udp_header_bytes) ||
+                    packet.m_Length < socks5_header_size ||
+                    ntohs(ip_header->ip_len) < socks5_header_size)
+                {
+                    return false;
+                }
+
+                // Reject a reply whose SOCKS5 UDP header ATYP doesn't match this relay's family
+                // (IPv4 = 1): parsing a mismatched layout (e.g. a 16-byte IPv6 address as IPv4)
+                // would hand the client a spoofed/garbage source endpoint. The bounds check above
+                // guarantees the SOCKS5 header is fully captured. Done before any mutation.
+                if (reinterpret_cast<const proxy::socks5_udp_header<T>*>(udp_header + 1)->address_type != 1)
+                    return false;
+
                 NETLIB_DEBUG(
                     "S2C: {}:{} -> {}:{}",
                     std::string{ T{ip_header->ip_src} },
@@ -478,9 +535,9 @@ namespace ndisapi
                 ip_header->ip_src = socks5_udp_header_ptr->dest_address;
                 udp_header->th_sport = socks5_udp_header_ptr->dest_port;
 
-                const auto udp_payload_size = static_cast<uint16_t>(ntohs(udp_header->length) - sizeof(udphdr));
-                memmove(udp_payload, udp_payload + sizeof(proxy::socks5_udp_header<T>),
-                    udp_payload_size - sizeof(proxy::socks5_udp_header<T>));
+                const auto udp_payload_size = static_cast<size_t>(udp_length - sizeof(udphdr));
+                memmove(udp_payload, udp_payload + socks5_header_size,
+                    udp_payload_size - socks5_header_size);
 
                 packet.m_Length -= sizeof(proxy::socks5_udp_header<T>);
                 ip_header->ip_len = htons(ntohs(ip_header->ip_len) - sizeof(proxy::socks5_udp_header<T>));
@@ -528,26 +585,51 @@ namespace ndisapi
                     std::string{ T{ip_header->ip6_dst} },
                     ntohs(udp_header->th_dport));
 
+                // Remove SOCK5 UDP header here
+                constexpr auto socks5_header_size = sizeof(proxy::socks5_udp_header<T>);
+                const auto* const packet_end = packet.m_IBuffer + packet.m_Length;
+                const auto* const udp_header_bytes = reinterpret_cast<const uint8_t*>(udp_header);
+                if (udp_header_bytes > packet_end ||
+                    static_cast<size_t>(packet_end - udp_header_bytes) < sizeof(udphdr))
+                {
+                    return false;
+                }
+
+                const auto udp_length = ntohs(udp_header->length);
+                const auto captured_udp_size = static_cast<size_t>(packet_end - udp_header_bytes);
+                if (udp_length < sizeof(udphdr) + socks5_header_size ||
+                    udp_length > captured_udp_size ||
+                    packet.m_Length < socks5_header_size ||
+                    ntohs(ip_header->ip6_len) < socks5_header_size)
+                {
+                    return false;
+                }
+
+                auto* udp_payload = reinterpret_cast<uint8_t*>(udp_header + 1);
+                auto* socks5_udp_header_ptr = reinterpret_cast<proxy::socks5_udp_header<T>*>(udp_payload);
+
+                // Reject a reply whose SOCKS5 UDP header ATYP doesn't match this relay's family
+                // (IPv6 = 4); see the IPv4 path. The bounds check above guarantees the header is
+                // fully captured. Done before any mutation.
+                if (socks5_udp_header_ptr->address_type != 4)
+                    return false;
+
                 // Swap Ethernet addresses
                 std::swap(eth_header->h_dest, eth_header->h_source);
 
                 // Swap IP addresses
                 std::swap(ip_header->ip6_dst, ip_header->ip6_src);
 
-                // Remove SOCK5 UDP header here
-                auto* udp_payload = reinterpret_cast<uint8_t*>(udp_header + 1);
-                auto* socks5_udp_header_ptr = reinterpret_cast<proxy::socks5_udp_header<T>*>(udp_payload);
-
                 ip_header->ip6_src = socks5_udp_header_ptr->dest_address;
                 udp_header->th_sport = socks5_udp_header_ptr->dest_port;
 
-                const auto udp_payload_size = static_cast<uint16_t>(ntohs(udp_header->length) - sizeof(udphdr));
-                memmove(udp_payload, udp_payload + sizeof(proxy::socks5_udp_header<T>),
-                    udp_payload_size - sizeof(proxy::socks5_udp_header<T>));
+                const auto udp_payload_size = static_cast<size_t>(udp_length - sizeof(udphdr));
+                memmove(udp_payload, udp_payload + socks5_header_size,
+                    udp_payload_size - socks5_header_size);
 
-                packet.m_Length -= sizeof(proxy::socks5_udp_header<T>);
-                ip_header->ip6_len = htons(ntohs(ip_header->ip6_len) - sizeof(proxy::socks5_udp_header<T>));
-                udp_header->length = htons(ntohs(udp_header->length) - sizeof(proxy::socks5_udp_header<T>));
+                packet.m_Length -= socks5_header_size;
+                ip_header->ip6_len = htons(ntohs(ip_header->ip6_len) - socks5_header_size);
+                udp_header->length = htons(ntohs(udp_header->length) - socks5_header_size);
 
                 // Recalculate checksum
                 net::ipv6_helper::recalculate_tcp_udp_checksum(&packet);

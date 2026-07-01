@@ -203,6 +203,7 @@ namespace proxy
         /// Atomic flag indicating whether the session is ready for removal and cleanup.
         /// </summary>
         std::atomic_bool ready_for_removal_{ false };
+        bool removal_armed_ = false;  ///< Set on the first removal pass; the next pass releases the self-reference.
 
     public:
         /**
@@ -370,6 +371,21 @@ namespace proxy
          */
         void close_client()
         {
+            // Cancel pending I/O and close the sockets immediately so their queued completions
+            // drain and the handles are released, instead of waiting for a destructor that the
+            // per-I/O self-reference would otherwise prevent from ever running. Idempotent.
+            if (remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                CancelIoEx(reinterpret_cast<HANDLE>(remote_socket_), nullptr);  // NOLINT(performance-no-int-to-ptr)
+                closesocket(remote_socket_);
+                remote_socket_ = INVALID_SOCKET;
+            }
+            if (socks_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                CancelIoEx(reinterpret_cast<HANDLE>(socks_socket_), nullptr);  // NOLINT(performance-no-int-to-ptr)
+                closesocket(socks_socket_);
+                socks_socket_ = INVALID_SOCKET;
+            }
             ready_for_removal_.store(true);
         }
 
@@ -381,14 +397,26 @@ namespace proxy
          *
          * @return True if the socket should be removed, false otherwise.
          */
-        bool is_ready_for_removal() const
+        bool is_ready_for_removal()
         {
             using namespace std::chrono_literals;
 
-            if (ready_for_removal_.load() || (std::chrono::steady_clock::now() - timestamp_ > 5min))
-                return true;
+            if (!ready_for_removal_.load() && (std::chrono::steady_clock::now() - timestamp_ <= 5min))
+                return false;
 
-            return false;
+            // Ready (explicit close or idle timeout). Break the per-I/O self-reference cycle so
+            // the destructor can run, but only after a one-cycle grace: ensure the sockets are
+            // closed (so any pending recv is cancelled) on the first pass, then release the
+            // self-reference on the next pass once those queued completions have drained.
+            if (!removal_armed_)
+            {
+                close_client(); // idempotent: cancels pending I/O and closes the sockets
+                removal_armed_ = true;
+                return false;
+            }
+
+            io_context_recv_from_remote_.proxy_socket_ptr.reset();
+            return true;
         }
 
         /**
@@ -697,7 +725,6 @@ namespace proxy
             NETLIB_DEBUG("inject_to_local: Packet buffer allocated successfully, copying {} bytes for {}:{}",
                 length, remote_peer_address_, remote_peer_port_);
 
-            context->wsa_buf->buf->len = length;
             memmove(context->wsa_buf->buf, data, length);
             context->wsa_buf->len = length;
 
@@ -706,7 +733,7 @@ namespace proxy
 
             if ((::WSASend(
                 local_socket_,
-                &context->wsa_buf,
+                context->wsa_buf.get(),
                 1,
                 nullptr,
                 0,
@@ -800,7 +827,6 @@ namespace proxy
             NETLIB_DEBUG("inject_to_remote: Packet buffer allocated successfully, copying {} bytes for {}:{}",
                 length, remote_peer_address_, remote_peer_port_);
 
-            context->wsa_buf->buf->len = length;
             memmove(context->wsa_buf->buf, data, length);
             context->wsa_buf->len = length;
 
@@ -809,7 +835,7 @@ namespace proxy
 
             if ((::WSASend(
                 remote_socket_,
-                &context->wsa_buf,
+                context->wsa_buf.get(),
                 1,
                 nullptr,
                 0,

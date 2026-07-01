@@ -43,9 +43,8 @@ namespace net
             while (true)
             {
                 // Ensure that current header is still within the packet
-                if (reinterpret_cast<const char*>(next_header) > reinterpret_cast<const char*>(ip_header) + packet_size
-                    - sizeof(
-                        ipv6ext))
+                if (reinterpret_cast<const char*>(next_header) + sizeof(ipv6ext) >
+                    reinterpret_cast<const char*>(ip_header) + packet_size)
                 {
                     return { nullptr, next_proto };
                 }
@@ -57,24 +56,18 @@ namespace net
                 {
                     const auto frag = reinterpret_cast<const ipv6ext_frag*>(next_header);
 
-                    // If this isn't the FIRST fragment, there won't be a TCP/UDP header anyway
-                    if ((frag->ip6_offlg & 0xFC) != 0)
+                    if (reinterpret_cast<const char*>(frag) + sizeof(ipv6ext_frag) >
+                        reinterpret_cast<const char*>(ip_header) + packet_size)
                     {
-                        // The offset is non-zero
-                        next_proto = frag->ip6_next;
-
                         return { nullptr, next_proto };
                     }
 
-                    // Otherwise it's either an entire segment or the first fragment
                     next_proto = frag->ip6_next;
-
-                    // Return next octet following the fragmentation header
-                    next_header = reinterpret_cast<const ipv6ext*>(reinterpret_cast<const char*>(next_header) +
-                        sizeof(
-                            ipv6ext_frag));
-
-                    return { const_cast<void*>(static_cast<const void*>(next_header)), next_proto };
+                    // Transparent redirection cannot safely mutate only the first
+                    // fragment while later fragments bypass the redirect path.
+                    // Leave fragmented IPv6 traffic untouched unless a caller adds
+                    // reassembly-aware handling.
+                    return { nullptr, next_proto };
                 }
 
                 // Headers we just skip over
@@ -93,8 +86,24 @@ namespace net
                     break;
 
                 default:
-                    // No more IPv6 headers to skip
-                    return { const_cast<void*>(static_cast<const void*>(next_header)), next_proto };
+                    {
+                        // No more IPv6 headers to skip. The loop guard above only
+                        // guarantees sizeof(ipv6ext) (4) bytes past next_header, but
+                        // callers cast this to a full tcphdr/udphdr and read fields well
+                        // beyond that (e.g. TCP flags at offset 13). Reject a transport
+                        // header that is truncated within the captured frame so the packet
+                        // is passed through untouched instead of reading stale bytes past
+                        // the captured packet end.
+                        const auto* const transport = reinterpret_cast<const char*>(next_header);
+                        const auto* const packet_end = reinterpret_cast<const char*>(ip_header) + packet_size;
+                        const auto captured = static_cast<size_t>(packet_end - transport);
+                        if ((next_proto == IPPROTO_TCP && captured < sizeof(tcphdr)) ||
+                            (next_proto == IPPROTO_UDP && captured < sizeof(udphdr)))
+                        {
+                            return { nullptr, next_proto };
+                        }
+                        return { const_cast<void*>(static_cast<const void*>(next_header)), next_proto };
+                    }
                 }
             }
         }

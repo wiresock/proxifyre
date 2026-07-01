@@ -80,6 +80,15 @@ namespace ProxiFyre
 
             foreach (var appSettings in serviceSettings.Proxies)
             {
+                // Warn on a half-specified credential: SOCKS5 username/password auth needs
+                // both, so providing only one silently falls back to no authentication.
+                var hasUser = !string.IsNullOrEmpty(appSettings.Username);
+                var hasPass = !string.IsNullOrEmpty(appSettings.Password);
+                if (hasUser != hasPass)
+                    LoggerInstance.Warn(
+                        $"Proxy {appSettings.Socks5ProxyEndpoint}: only one of username/password is set; " +
+                        "authentication will be skipped. Provide both or neither.");
+
                 // Add the defined SOCKS5 proxies
                 var proxy = _socksify.AddSocks5Proxy(appSettings.Socks5ProxyEndpoint, appSettings.Username,
                     appSettings.Password, appSettings.SupportedProtocolsParse,
@@ -192,6 +201,22 @@ namespace ProxiFyre
                 if (proxy.AppNames.Count == 0)
                     LoggerInstance.Warn(
                         $"Proxy '{proxy.Socks5ProxyEndpoint}' has no application names; it will not match any process.");
+
+                // Warn on unrecognized protocol tokens: SupportedProtocolsParse only counts
+                // "TCP"/"UDP" and ignores anything else, defaulting to BOTH only when neither
+                // is present -- so a typo alongside a valid token is silently dropped, and a
+                // typo on its own silently proxies both protocols.
+                if (proxy.SupportedProtocols != null)
+                {
+                    var unknownProtocols = proxy.SupportedProtocols
+                        .Where(p => p != "TCP" && p != "UDP")
+                        .ToList();
+                    if (unknownProtocols.Count > 0)
+                        LoggerInstance.Warn(
+                            $"Proxy '{proxy.Socks5ProxyEndpoint}' lists unrecognized protocol(s): " +
+                            $"{string.Join(", ", unknownProtocols)}. Only \"TCP\" and \"UDP\" are recognized; " +
+                            "unrecognized tokens are ignored (a proxy with no recognized protocol defaults to both).");
+                }
             }
 
             // Drop null/blank excluded entries for the same reason.
@@ -225,7 +250,7 @@ namespace ProxiFyre
                 // Format log entry with ISO 8601 timestamp, event, description, and data.
                 //var logMessage =
                 //    $"{DateTimeOffset.FromUnixTimeMilliseconds(entry.TimeStamp):u} | Event: {entry.Event} | Description: {entry.Description ?? string.Empty} | Data: {entry.Data}";
-                LoggerInstance.Info(entry.Description?.Replace("\n", "").Replace("\r", ""));
+                LoggerInstance.Info((entry.Description ?? string.Empty).Replace("\n", "").Replace("\r", ""));
             }
         }
 

@@ -114,9 +114,12 @@ namespace iphelper
         std::wstring device_path_name;      ///< Device path version of path_name (uppercase)
         std::optional<uint16_t> tcp_proxy_port = std::nullopt; // Optional TCP proxy port if the process is associated with a proxy
         std::optional<uint16_t> udp_proxy_port = std::nullopt; // Optional UDP proxy port if the process is associated with a proxy
-        bool excluded = false;          ///< Whether the process is excluded from proxying
-        bool bypass_tcp = false;        ///< Whether TCP connections should bypass proxying (no proxy configured)
-        bool bypass_udp = false;        ///< Whether UDP connections should bypass proxying (no proxy configured)
+        // These cache flags can be set from match_app_name()/packet handlers running on
+        // multiple threads for the same process, so they are atomic to avoid a data race
+        // (the writes are idempotent 'true' stores; relaxed ordering would suffice).
+        std::atomic<bool> excluded{ false };    ///< Whether the process is excluded from proxying
+        std::atomic<bool> bypass_tcp{ false };  ///< Whether TCP connections should bypass proxying (no proxy configured)
+        std::atomic<bool> bypass_udp{ false };  ///< Whether UDP connections should bypass proxying (no proxy configured)
     };
 
     /**
@@ -194,8 +197,8 @@ namespace iphelper
         // Core data structures
         tcp_hashtable_t  tcp_to_app_;           ///< TCP sessions to process mapping
         udp_hashtable_t  udp_to_app_;           ///< UDP endpoints to process mapping
-        std::shared_mutex tcp_to_app_mutex_;    ///< Reader-writer lock for TCP hash table
-        std::shared_mutex udp_to_app_mutex_;    ///< Reader-writer lock for UDP hash table
+        mutable std::shared_mutex tcp_to_app_mutex_;    ///< Reader-writer lock for TCP hash table (mutable: locked by const readers)
+        mutable std::shared_mutex udp_to_app_mutex_;    ///< Reader-writer lock for UDP hash table
 
         // Protected apps cache (for processes that couldn't be resolved)
         tcp_protected_t tcp_protected_apps_;        ///< TCP sessions with unresolvable processes
@@ -420,6 +423,8 @@ namespace iphelper
         std::vector<net::ip_session<T>> get_all_tcp_sessions() const
         {
             std::vector<net::ip_session<T>> sessions;
+
+            std::shared_lock lock(tcp_to_app_mutex_); // Guard concurrent access like the other readers
             sessions.reserve(tcp_to_app_.size()); // Reserve memory to avoid multiple allocations
 
             for (const auto& entry : tcp_to_app_)

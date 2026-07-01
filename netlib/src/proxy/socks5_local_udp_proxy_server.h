@@ -272,8 +272,16 @@ namespace proxy
                     server_socket_,
                     [this](const DWORD num_bytes, OVERLAPPED* povlp, const BOOL status)
                     {
+                        // Count this completion for the entire duration of the callback so
+                        // stop() waits for it. EVERY completion the IOCP delivers on this
+                        // shared key -- the server read AND every per-session proxy
+                        // relay/negotiate/inject completion -- is balanced exactly once:
+                        // +1 here, -1 in the guard below. (Previously only the server-read
+                        // re-post incremented, so proxy completions drove the counter
+                        // negative and stop() could stop waiting while a callback still ran.)
+                        active_iocp_operations_.fetch_add(1, std::memory_order_acquire);
+
                         // RAII guard to ensure we decrement on all exit paths (including exceptions)
-                        // Note: Counter was already incremented BEFORE the I/O operation was posted
                         struct operation_guard {
                             std::atomic<int32_t>& counter;
                             
@@ -333,42 +341,51 @@ namespace proxy
 
                         if (status && result)
                         {
-                            switch (io_context->io_operation)
+                            // The proxy socket may have released its self-reference during
+                            // teardown; a late completion then finds null and is safely ignored.
+                            if (auto proxy_socket = io_context->proxy_socket_ptr)
                             {
-                            case proxy_io_operation::relay_io_read:
-                                io_context->proxy_socket_ptr->process_receive_buffer_complete(num_bytes, io_context);
-                                break;
+                                switch (io_context->io_operation)
+                                {
+                                case proxy_io_operation::relay_io_read:
+                                    proxy_socket->process_receive_buffer_complete(num_bytes, io_context);
+                                    break;
 
-                            case proxy_io_operation::relay_io_write:
-                                io_context->proxy_socket_ptr->process_send_buffer_complete(num_bytes, io_context);
-                                break;
+                                case proxy_io_operation::relay_io_write:
+                                    proxy_socket->process_send_buffer_complete(num_bytes, io_context);
+                                    break;
 
-                            case proxy_io_operation::negotiate_io_read:
-                                io_context->proxy_socket_ptr->process_receive_negotiate_complete(num_bytes, io_context);
-                                break;
+                                case proxy_io_operation::negotiate_io_read:
+                                    proxy_socket->process_receive_negotiate_complete(num_bytes, io_context);
+                                    break;
 
-                            case proxy_io_operation::negotiate_io_write:
-                                io_context->proxy_socket_ptr->process_send_negotiate_complete(num_bytes, io_context);
-                                break;
+                                case proxy_io_operation::negotiate_io_write:
+                                    proxy_socket->process_send_negotiate_complete(num_bytes, io_context);
+                                    break;
 
-                            case proxy_io_operation::inject_io_write:
-                                T::process_inject_buffer_complete(packet_pool_, io_context);
-                                break;
+                                case proxy_io_operation::inject_io_write:
+                                    T::process_inject_buffer_complete(packet_pool_, io_context);
+                                    break;
 
-                            default: break; // NOLINT(clang-diagnostic-covered-switch-default)
+                                default: break; // NOLINT(clang-diagnostic-covered-switch-default)
+                                }
                             }
                         }
 
                         if (server_read)
                         {
+                            // The server read context does not own a session; drop the strong
+                            // reference taken in connect_to_remote_host so a finished session
+                            // is not pinned alive until the next inbound datagram replaces it.
+                            io_context->proxy_socket_ptr.reset();
+
                             DWORD flags = 0;
 
-                            // Increment counter BEFORE posting the I/O operation
-                            // This ensures stop() will wait for this operation to complete
+                            // Re-arm the server read. The completion this generates will be
+                            // counted when it is dispatched (the fetch_add at the top of this
+                            // lambda), so there is no separate counter bump here.
                             if (!end_server_)
                             {
-                                active_iocp_operations_.fetch_add(1, std::memory_order_acquire);
-
                                 if ((::WSARecvFrom(
                                     server_socket_,
                                     &server_recv_buf_,
@@ -380,8 +397,6 @@ namespace proxy
                                     &server_io_context_,
                                     nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                                 {
-                                    // Failed to post I/O, decrement counter
-                                    active_iocp_operations_.fetch_sub(1, std::memory_order_release);
                                     result = false;
                                 }
                             }
@@ -393,9 +408,8 @@ namespace proxy
                     completion_key_ = io_key;
                     DWORD flags = 0;
 
-                    // Increment counter BEFORE posting the initial I/O operation
-                    active_iocp_operations_.fetch_add(1, std::memory_order_acquire);
-
+                    // Post the initial server read. Its completion is counted when dispatched
+                    // (the fetch_add at the top of the completion lambda), so no bump here.
                     if ((::WSARecvFrom(
                         server_socket_,
                         &server_recv_buf_,
@@ -407,8 +421,6 @@ namespace proxy
                         &server_io_context_,
                         nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
                    {
-                        // Failed to post initial I/O, decrement counter
-                        active_iocp_operations_.fetch_sub(1, std::memory_order_release);
                         closesocket(server_socket_);
                         end_server_ = true;
                         return false;
@@ -680,6 +692,16 @@ namespace proxy
             }
             else
             {
+                // Allow this AF_INET6 upstream control socket to reach IPv4 SOCKS5
+                // servers via IPv4-mapped addresses (e.g. ::ffff:127.0.0.1) by
+                // clearing IPV6_V6ONLY so the dual-stack socket accepts both families.
+                DWORD v6_only = 0;
+                if (setsockopt(socks_tcp_socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                    reinterpret_cast<const char*>(&v6_only), sizeof(v6_only)) == SOCKET_ERROR)
+                {
+                    NETLIB_WARNING("Failed to clear IPV6_V6ONLY on SOCKS5 control socket: {}", WSAGetLastError());
+                }
+
                 sockaddr_in6 sa_local{};
                 sa_local.sin6_family = address_type_t::af_type;
                 sa_local.sin6_port = htons(0);
@@ -701,8 +723,8 @@ namespace proxy
                 sa_service.sin_addr = socks_server_address;
                 sa_service.sin_port = htons(socks_server_port);
 
-                if (connect(socks_tcp_socket, reinterpret_cast<SOCKADDR*>(&sa_service), sizeof(sa_service)) ==
-                    SOCKET_ERROR)
+                if (!connect_with_timeout(socks_tcp_socket, reinterpret_cast<SOCKADDR*>(&sa_service),
+                    sizeof(sa_service), 5000))
                 {
                     closesocket(socks_tcp_socket);
                     return INVALID_SOCKET;
@@ -715,8 +737,8 @@ namespace proxy
                 sa_service.sin6_addr = socks_server_address;
                 sa_service.sin6_port = htons(socks_server_port);
 
-                if (connect(socks_tcp_socket, reinterpret_cast<SOCKADDR*>(&sa_service), sizeof(sa_service)) ==
-                    SOCKET_ERROR)
+                if (!connect_with_timeout(socks_tcp_socket, reinterpret_cast<SOCKADDR*>(&sa_service),
+                    sizeof(sa_service), 5000))
                 {
                     closesocket(socks_tcp_socket);
                     return INVALID_SOCKET;
@@ -727,18 +749,79 @@ namespace proxy
         }
 
         /**
+         * @brief Connects a socket with a bounded timeout.
+         *
+         * A plain blocking connect() is not bounded by SO_*TIMEO and can hang for the OS
+         * default TCP connect timeout (~21s) on a black-holed SOCKS5 server while this thread
+         * holds the server lock, stalling all UDP relay. This switches the socket to
+         * non-blocking, issues the connect, and waits with select() up to timeout_ms, then
+         * restores blocking mode for the subsequent SO_*TIMEO-bounded send/recv.
+         *
+         * @return true if the connection completed within the timeout, false otherwise.
+         */
+        static bool connect_with_timeout(const SOCKET s, const sockaddr* const addr, const int addr_len,
+                                         const DWORD timeout_ms) noexcept
+        {
+            u_long non_blocking = 1;
+            if (ioctlsocket(s, FIONBIO, &non_blocking) == SOCKET_ERROR)
+                return false;
+
+            auto succeeded = false;
+            if (connect(s, addr, addr_len) == 0)
+            {
+                succeeded = true;
+            }
+            else if (WSAGetLastError() == WSAEWOULDBLOCK)
+            {
+                fd_set write_set;
+                FD_ZERO(&write_set);
+                FD_SET(s, &write_set);
+                fd_set error_set;
+                FD_ZERO(&error_set);
+                FD_SET(s, &error_set);
+
+                timeval tv{};
+                tv.tv_sec = static_cast<long>(timeout_ms / 1000);
+                tv.tv_usec = static_cast<long>((timeout_ms % 1000) * 1000);
+
+                if (const auto sel = select(0, nullptr, &write_set, &error_set, &tv);
+                    sel > 0 && FD_ISSET(s, &write_set))
+                {
+                    auto so_error = 0;
+                    auto len = static_cast<int>(sizeof(so_error));
+                    if (getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so_error), &len) == 0 &&
+                        so_error == 0)
+                    {
+                        succeeded = true;
+                    }
+                }
+            }
+
+            // Restore blocking mode for the subsequent SO_*TIMEO-bounded send/recv. If the
+            // socket connected but cannot be put back into blocking mode, fail the connect so
+            // the caller closes it rather than issuing blocking send/recv on a still-non-blocking
+            // socket (which would spuriously return WSAEWOULDBLOCK and break negotiation).
+            u_long blocking = 0;
+            if (ioctlsocket(s, FIONBIO, &blocking) == SOCKET_ERROR)
+                return false;
+            return succeeded;
+        }
+
+        /**
          * @brief Performs SOCKS5 negotiation and sends the UDP ASSOCIATE command.
          *
          * This method negotiates authentication with the SOCKS5 proxy server over the provided TCP socket,
          * using either "NO AUTHENTICATION REQUIRED" or "USERNAME/PASSWORD" (RFC 1929) as needed.
          * If authentication succeeds, it sends a UDP ASSOCIATE command to the proxy and retrieves the
-         * UDP port assigned by the proxy for relaying UDP packets.
+         * UDP relay endpoint assigned by the proxy for relaying UDP packets.
          *
          * @param socks_tcp_socket The connected TCP socket to the SOCKS5 proxy server.
          * @param negotiate_ctx Unique pointer to the negotiation context, containing optional credentials.
-         * @return The UDP port assigned by the SOCKS5 proxy for UDP relay, or std::nullopt on failure.
+         * @return The UDP relay endpoint assigned by the SOCKS5 proxy, or std::nullopt on failure.
          */
-        [[nodiscard]] std::optional<uint16_t> associate_to_socks5_proxy(const SOCKET socks_tcp_socket,
+        [[nodiscard]] std::optional<net::ip_endpoint<address_type_t>> associate_to_socks5_proxy(
+            const SOCKET socks_tcp_socket,
+            const address_type_t socks_server_address,
             std::unique_ptr<negotiate_context_t>&
             negotiate_ctx) const noexcept
         {
@@ -746,8 +829,6 @@ namespace proxy
 
             socks5_ident_req<2> ident_req{};
             socks5_ident_resp ident_resp{};
-            socks5_req<address_type_t> associate_req;
-            socks5_resp<address_type_t> associate_resp;
 
             auto socks5_ident_req_size = sizeof(ident_req);
 
@@ -856,20 +937,37 @@ namespace proxy
                     "[SOCKS5]: associate_to_socks5_proxy: USERNAME/PASSWORD authentication SUCCESS");
             }
 
-            associate_req.version = 5;
-            associate_req.cmd = 3;
-            associate_req.reserved = 0;
+            // Build the UDP ASSOCIATE request. DST.ADDR/DST.PORT only advertise the
+            // address the client expects to send datagrams from; we advertise the
+            // unspecified address. The ATYP must match the family actually used on the
+            // wire: the IPv6 proxy instance reaches the (IPv4) SOCKS5 server through an
+            // IPv4-mapped upstream, so an IPv4-only server would reject an ATYP=4 request.
+            // Send ATYP=1 with a zero IPv4 address whenever the upstream is IPv4 or
+            // IPv4-mapped, and ATYP=4 only for a genuine IPv6 upstream.
+            unsigned char associate_req_buf[4 + sizeof(in6_addr) + sizeof(unsigned short)]{};
+            associate_req_buf[0] = 5; // VER
+            associate_req_buf[1] = 3; // CMD = UDP ASSOCIATE
+            associate_req_buf[2] = 0; // RSV
+            int associate_req_len;
             if constexpr (address_type_t::af_type == AF_INET)
             {
-                associate_req.address_type = 1;
+                associate_req_buf[3] = 1; // ATYP = IPv4
+                associate_req_len = 4 + 4 + static_cast<int>(sizeof(unsigned short));
             }
             else
             {
-                associate_req.address_type = 4;
+                if (IN6_IS_ADDR_V4MAPPED(static_cast<const in6_addr*>(&socks_server_address)))
+                {
+                    associate_req_buf[3] = 1; // ATYP = IPv4 (IPv4-mapped upstream)
+                    associate_req_len = 4 + 4 + static_cast<int>(sizeof(unsigned short));
+                }
+                else
+                {
+                    associate_req_buf[3] = 4; // ATYP = IPv6 (genuine IPv6 upstream)
+                    associate_req_len = 4 + static_cast<int>(sizeof(in6_addr)) + static_cast<int>(sizeof(unsigned short));
+                }
             }
-            associate_req.dest_address = address_type_t{};
-            associate_req.dest_port = 0;
-            result = send(socks_tcp_socket, reinterpret_cast<const char*>(&associate_req), sizeof(associate_req), 0);
+            result = send(socks_tcp_socket, reinterpret_cast<const char*>(associate_req_buf), associate_req_len, 0);
             if (result == SOCKET_ERROR)
             {
                 NETLIB_INFO(
@@ -878,28 +976,166 @@ namespace proxy
                 return {};
             }
 
-            result = recv(socks_tcp_socket, reinterpret_cast<char*>(&associate_resp), sizeof(associate_resp), 0);
-            if (result == SOCKET_ERROR)
+            // Read and validate the SOCKS5 UDP ASSOCIATE reply. The reply's BND.ADDR
+            // family (ATYP) is selected by the SERVER and is independent of the address
+            // family this proxy instance uses: an IPv6 proxy instance reaches the
+            // configured (IPv4) SOCKS5 server through an IPv4-mapped upstream, so the
+            // server typically replies with ATYP=1 and a 4-byte BND.ADDR. Parsing the
+            // reply as a fixed-size socks5_resp<address_type_t> (which has a 16-byte
+            // BND.ADDR for IPv6) would then read BND.PORT from the wrong offset and
+            // hand back a bogus relay port. Parse the 4-byte reply prefix, then read
+            // exactly the bytes implied by the returned ATYP and take BND.PORT from the
+            // correct position so the relay port is family-agnostic and correct.
+
+            // Blocking read of exactly 'len' bytes (recv() may return short reads on a
+            // stream socket); returns false on error or premature close.
+            const auto recv_exact = [](const SOCKET s, void* const buffer, const int len) -> bool
+            {
+                // Bound the TOTAL time spent assembling these bytes, not just each recv().
+                // SO_RCVTIMEO is a per-call timeout, so a server that drips one byte just
+                // under it could otherwise keep this loop (and the IOCP worker that holds
+                // the server lock) alive for timeout * byte-count. Hold a single absolute
+                // deadline, shrink the receive timeout toward it on every iteration, and
+                // restore the socket's default timeout before returning.
+                constexpr DWORD total_timeout_ms = 5000;
+
+                // Save the socket's configured receive timeout and restore exactly that on
+                // every exit path, since the loop below temporarily shrinks SO_RCVTIMEO
+                // toward the deadline (leaving a tiny/stale value on the shared control
+                // socket would otherwise affect any later read on it).
+                DWORD original_timeout = total_timeout_ms;
+                int original_timeout_size = static_cast<int>(sizeof(original_timeout));
+                getsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                    reinterpret_cast<char*>(&original_timeout), &original_timeout_size);
+
+                const auto restore_timeout = [s, original_timeout]
+                {
+                    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                        reinterpret_cast<const char*>(&original_timeout), sizeof(original_timeout));
+                };
+
+                auto* const bytes = static_cast<char*>(buffer);
+                const auto deadline = GetTickCount64() + total_timeout_ms;
+                int received = 0;
+                while (received < len)
+                {
+                    const auto now = GetTickCount64();
+                    if (now >= deadline)
+                    {
+                        restore_timeout();
+                        return false;
+                    }
+
+                    auto remaining_ms = static_cast<DWORD>(deadline - now);
+                    if (setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                        reinterpret_cast<const char*>(&remaining_ms), sizeof(remaining_ms)) == SOCKET_ERROR)
+                    {
+                        restore_timeout();
+                        return false;
+                    }
+
+                    const auto n = recv(s, bytes + received, len - received, 0);
+                    if (n == SOCKET_ERROR || n == 0)
+                    {
+                        restore_timeout();
+                        return false;
+                    }
+                    received += n;
+                }
+
+                restore_timeout();
+                return true;
+            };
+
+            // Fixed 4-byte reply prefix: VER, REP, RSV, ATYP.
+            struct socks5_resp_prefix
+            {
+                unsigned char version;
+                unsigned char reply;
+                unsigned char reserved;
+                unsigned char address_type;
+            } resp_prefix{};
+
+            if (!recv_exact(socks_tcp_socket, &resp_prefix, sizeof(resp_prefix)))
             {
                 NETLIB_INFO(
-                    "[SOCKS5]: associate_to_socks5_proxy: Failed to receive SOCKS5 ASSOCIATE response: {}",
-                    WSAGetLastError());
+                    "[SOCKS5]: associate_to_socks5_proxy: Failed to receive SOCKS5 ASSOCIATE reply header");
                 return {};
             }
 
-            if ((associate_resp.version != 5) ||
-                (associate_resp.reply != 0))
+            if ((resp_prefix.version != 5) ||
+                (resp_prefix.reply != 0))
             {
                 NETLIB_INFO(
                     "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 ASSOCIATE has failed");
                 return {};
             }
 
-            NETLIB_INFO(
-                "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 ASSOCIATE SUCCESS port: {}",
-                ntohs(associate_resp.bind_port));
+            // Determine BND.ADDR length from the server-selected ATYP. For ATYP=3
+            // (domain) the first byte carries the name length.
+            int bnd_addr_len;
+            switch (resp_prefix.address_type)
+            {
+            case 1: // IPv4
+                bnd_addr_len = 4;
+                break;
+            case 4: // IPv6
+                bnd_addr_len = 16;
+                break;
+            case 3: // domain name
+                {
+                    unsigned char domain_len = 0;
+                    if (!recv_exact(socks_tcp_socket, &domain_len, sizeof(domain_len)))
+                    {
+                        NETLIB_INFO(
+                            "[SOCKS5]: associate_to_socks5_proxy: Failed to receive BND.ADDR domain length");
+                        return {};
+                    }
+                    bnd_addr_len = domain_len;
+                }
+                break;
+            default:
+                NETLIB_INFO(
+                    "[SOCKS5]: associate_to_socks5_proxy: Unexpected BND.ADDR type {} in ASSOCIATE reply",
+                    resp_prefix.address_type);
+                return {};
+            }
 
-            return ntohs(associate_resp.bind_port);
+            // Read BND.ADDR followed by the 2-byte BND.PORT. The buffer is sized for the
+            // largest possible BND.ADDR (a 255-byte domain) plus the port.
+            unsigned char bnd_addr_and_port[255 + sizeof(unsigned short)]{};
+            if (!recv_exact(socks_tcp_socket, bnd_addr_and_port,
+                bnd_addr_len + static_cast<int>(sizeof(unsigned short))))
+            {
+                NETLIB_INFO(
+                    "[SOCKS5]: associate_to_socks5_proxy: Failed to receive BND.ADDR/BND.PORT");
+                return {};
+            }
+
+            // BND.PORT immediately follows BND.ADDR, in network byte order. Assembling
+            // the two big-endian bytes directly yields the host-order port value.
+            const auto bind_port = static_cast<uint16_t>(
+                (static_cast<uint16_t>(bnd_addr_and_port[bnd_addr_len]) << 8) |
+                static_cast<uint16_t>(bnd_addr_and_port[bnd_addr_len + 1]));
+
+            // The UDP relay endpoint is, in every deployment ProxiFyre supports, the same
+            // host as the SOCKS5 server we connected the control socket to. Servers
+            // frequently report a BND.ADDR that is only meaningful from their own vantage
+            // point (0.0.0.0, 127.0.0.1, or an internal/NAT address), so honoring it
+            // verbatim can aim the relay at an address the client cannot reach -- and it
+            // would also turn a server-supplied address into a connect() target. We
+            // therefore relay to the address we already reached over the control
+            // connection (socks_server_address -- the IPv4-mapped upstream for the IPv6
+            // instance) and take only BND.PORT from the reply. BND.PORT was parsed at the
+            // family-correct offset above, so the relay port is correct regardless of the
+            // ATYP the server selected, and no blocking DNS lookup is needed for an
+            // ATYP=3 (domain) reply.
+            NETLIB_INFO(
+                "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 ASSOCIATE SUCCESS endpoint: {}:{}",
+                socks_server_address,
+                bind_port);
+
+            return net::ip_endpoint<address_type_t>{ socks_server_address, bind_port };
         }
 
         /**
@@ -967,8 +1203,8 @@ namespace proxy
                 return false;
             }
 
-            auto udp_port = associate_to_socks5_proxy(socks5_tcp_socket, negotiate_ctx);
-            if (!udp_port.has_value())
+            auto udp_endpoint = associate_to_socks5_proxy(socks5_tcp_socket, remote_address, negotiate_ctx);
+            if (!udp_endpoint.has_value())
             {
                 NETLIB_DEBUG(
                     "connect_to_remote_host: ASSOCIATE command has failed: {}:{}",
@@ -981,8 +1217,8 @@ namespace proxy
 
             NETLIB_DEBUG(
                 "connect_to_remote_host: UDP connect: {}:{}",
-                remote_address,
-                udp_port.value());
+                udp_endpoint->ip,
+                udp_endpoint->port);
 
             auto remote_socket = WSASocket(address_type_t::af_type, SOCK_DGRAM, IPPROTO_UDP, nullptr, 0,
                 WSA_FLAG_OVERLAPPED);
@@ -992,6 +1228,7 @@ namespace proxy
                 NETLIB_DEBUG(
                     "connect_to_remote_host: Failed to create UDP socket: {}",
                     WSAGetLastError());
+                closesocket(socks5_tcp_socket);
                 return false;
             }
 
@@ -1015,6 +1252,17 @@ namespace proxy
             }
             else
             {
+                // Dual-stack the AF_INET6 UDP relay socket so it can reach an IPv4
+                // SOCKS5 server's UDP relay endpoint via its IPv4-mapped address
+                // (the relay address mirrors the configured control address).
+                DWORD v6_only = 0;
+                if (setsockopt(remote_socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                    reinterpret_cast<const char*>(&v6_only), sizeof(v6_only)) == SOCKET_ERROR)
+                {
+                    NETLIB_WARNING("connect_to_remote_host: Failed to clear IPV6_V6ONLY on UDP relay socket: {}",
+                        WSAGetLastError());
+                }
+
                 sockaddr_in6 sa_local{};
                 sa_local.sin6_family = address_type_t::af_type;
                 sa_local.sin6_port = htons(0);
@@ -1037,8 +1285,8 @@ namespace proxy
             {
                 sockaddr_in sa_service{};
                 sa_service.sin_family = address_type_t::af_type;
-                sa_service.sin_addr = remote_address;
-                sa_service.sin_port = htons(udp_port.value());
+                sa_service.sin_addr = udp_endpoint->ip;
+                sa_service.sin_port = htons(udp_endpoint->port);
 
                 if (connect(remote_socket, reinterpret_cast<SOCKADDR*>(&sa_service), sizeof(sa_service)) ==
                     SOCKET_ERROR)
@@ -1055,8 +1303,8 @@ namespace proxy
             {
                 sockaddr_in6 sa_service{};
                 sa_service.sin6_family = address_type_t::af_type;
-                sa_service.sin6_addr = remote_address;
-                sa_service.sin6_port = htons(udp_port.value());
+                sa_service.sin6_addr = udp_endpoint->ip;
+                sa_service.sin6_port = htons(udp_endpoint->port);
 
                 if (connect(remote_socket, reinterpret_cast<SOCKADDR*>(&sa_service), sizeof(sa_service)) ==
                     SOCKET_ERROR)
@@ -1073,8 +1321,8 @@ namespace proxy
             auto [it, result] = proxy_sockets_.emplace(local_peer_port,
                 std::make_shared<T>(
                     socks5_tcp_socket, packet_pool_, server_socket_,
-                    recv_from_sa_, remote_socket, remote_address,
-                    udp_port.value(), std::move(negotiate_ctx),
+                    recv_from_sa_, remote_socket, udp_endpoint->ip,
+                    udp_endpoint->port, std::move(negotiate_ctx),
                     logger::log_level_, logger::log_stream_));
 
             if (result)
@@ -1095,8 +1343,8 @@ namespace proxy
                 {
                     NETLIB_DEBUG(
                         "connect_to_remote_host: Failed to initialize proxy socket for: {}:{} ({})",
-                        remote_address,
-                        udp_port.value(),
+                        udp_endpoint->ip,
+                        udp_endpoint->port,
                         e.what());
                     // Remove from map - the shared_ptr destructor will close the sockets
                     // that were transferred to T's constructor
@@ -1107,8 +1355,8 @@ namespace proxy
                 {
                     NETLIB_DEBUG(
                         "connect_to_remote_host: Failed to initialize proxy socket for: {}:{} (unknown exception)",
-                        remote_address,
-                        udp_port.value());
+                        udp_endpoint->ip,
+                        udp_endpoint->port);
                     // Remove from map - the shared_ptr destructor will close the sockets
                     proxy_sockets_.erase(it);
                     return false;
@@ -1120,8 +1368,8 @@ namespace proxy
                 closesocket(socks5_tcp_socket);
                 NETLIB_DEBUG(
                     "connect_to_remote_host: Failed to create proxy socket for: {}:{}",
-                    remote_address,
-                    udp_port.value());
+                    udp_endpoint->ip,
+                    udp_endpoint->port);
                 return false;
             }
 

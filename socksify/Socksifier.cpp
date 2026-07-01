@@ -11,6 +11,10 @@
 /// <param name="log_level">The logging level to use.</param>
 Socksifier::Socksifier::Socksifier(LogLevel log_level)
 {
+    // Default poll interval (ms). Without this the field is 0 and log_thread() busy-spins
+    // (WaitOne(0)) until the managed side assigns LogEventInterval.
+    log_event_interval_ = 1000;
+
     unmanaged_ptr_ = socksify_unmanaged::get_instance(static_cast<log_level_mx>(log_level));
 
     log_event_ = gcnew Threading::AutoResetEvent(false);
@@ -56,6 +60,13 @@ Socksifier::Socksifier::!Socksifier()
 Socksifier::Socksifier::~Socksifier()
 {
     this->!Socksifier();
+
+    // Clear the singleton so a subsequent GetInstance() (e.g. on a service restart within the
+    // same process) creates a fresh, usable instance instead of returning this disposed one
+    // (whose unmanaged core is gone), which would silently disable proxying.
+    msclr::lock l(Socksifier::typeid);
+    if (instance_ == this)
+        instance_ = nullptr;
 }
 
 /// <summary>
