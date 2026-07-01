@@ -1461,9 +1461,11 @@ namespace proxy
                         udp_endpoint->ip,
                         udp_endpoint->port,
                         e.what());
-                    // Remove from map - the shared_ptr destructor will close the sockets
-                    // that were transferred to T's constructor
-                    proxy_sockets_.erase(it);
+                    // initialize_io_contexts() may already have installed the recv self-
+                    // reference; erasing the map entry alone would not run the destructor.
+                    // Cancel I/O, break the self-reference (only once I/O has drained), and
+                    // remove the entry. See cleanup_failed_proxy_socket().
+                    cleanup_failed_proxy_socket(it);
                     return false;
                 }
                 catch (...)
@@ -1472,8 +1474,7 @@ namespace proxy
                         "connect_to_remote_host: Failed to initialize proxy socket for: {}:{} (unknown exception)",
                         udp_endpoint->ip,
                         udp_endpoint->port);
-                    // Remove from map - the shared_ptr destructor will close the sockets
-                    proxy_sockets_.erase(it);
+                    cleanup_failed_proxy_socket(it);
                     return false;
                 }
             }
@@ -1489,6 +1490,54 @@ namespace proxy
             }
 
             return result;
+        }
+
+        /**
+         * @brief Rolls back a partially-constructed proxy socket on the setup-exception path.
+         *
+         * When connect_to_remote_host() throws after inserting the socket into proxy_sockets_,
+         * initialize_io_contexts() may already have installed the recv io_context's self-
+         * reference (a strong shared_ptr back to the socket -- see
+         * socks5_udp_proxy_socket::initialize_io_contexts()). Erasing the map entry drops only
+         * the map's strong reference; the self-reference would keep the object alive with its
+         * destructor -- and thus its CancelIoEx + closesocket -- never running, leaking the
+         * remote/SOCKS socket handles and any armed WSARecv.
+         *
+         * Cancel I/O and close the sockets first (close_client(), idempotent). Then break the
+         * self-reference and remove the entry immediately ONLY if no overlapped I/O could still
+         * be in flight (outstanding_io() == 0) -- e.g. an exception before start_data_relay()
+         * posted its recv. If start_data_relay() had already posted a WSARecv, close_client()'s
+         * CancelIoEx queues its aborted completion but does not deliver it synchronously, so
+         * outstanding_io() is still nonzero here: leave the socket in the map and let
+         * is_ready_for_removal() drain it and release the self-reference once the count reaches
+         * 0. Releasing the self-reference inline while that completion is outstanding would risk
+         * a use-after-free when the IOCP handler finally dereferences its proxy_socket_ptr. This
+         * mirrors the drain gate in socks5_udp_proxy_socket::is_ready_for_removal(). Runs under
+         * the caller's lock_ (connect_to_remote_host is called while the completion handler
+         * holds it), which serializes this against completions and clear_thread.
+         *
+         * @param it Valid iterator into proxy_sockets_ for the failed session.
+         */
+        void cleanup_failed_proxy_socket(const typename decltype(proxy_sockets_)::iterator it)
+        {
+            if (it->second)
+            {
+                // Idempotent: cancels any armed WSARecv and closes remote_socket_/socks_socket_.
+                it->second->close_client();
+
+                // A still-pending recv's aborted completion has not been delivered yet, so its
+                // outstanding_io() count is nonzero. Keep the socket in the map so the normal
+                // drain path (is_ready_for_removal()) releases the self-reference after the
+                // completion arrives; releasing it here would be a use-after-free.
+                if (it->second->outstanding_io() != 0)
+                    return;
+
+                // No overlapped I/O in flight: safe to break the self-reference cycle so the
+                // destructor can run once the map entry is erased below.
+                it->second->release_self_reference();
+            }
+
+            proxy_sockets_.erase(it);
         }
 
         /**
