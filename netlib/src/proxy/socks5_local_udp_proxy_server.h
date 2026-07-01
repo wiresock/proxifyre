@@ -797,9 +797,13 @@ namespace proxy
                 }
             }
 
-            // Restore blocking mode for the subsequent SO_*TIMEO-bounded send/recv.
+            // Restore blocking mode for the subsequent SO_*TIMEO-bounded send/recv. If the
+            // socket connected but cannot be put back into blocking mode, fail the connect so
+            // the caller closes it rather than issuing blocking send/recv on a still-non-blocking
+            // socket (which would spuriously return WSAEWOULDBLOCK and break negotiation).
             u_long blocking = 0;
-            ioctlsocket(s, FIONBIO, &blocking);
+            if (ioctlsocket(s, FIONBIO, &blocking) == SOCKET_ERROR)
+                return false;
             return succeeded;
         }
 
