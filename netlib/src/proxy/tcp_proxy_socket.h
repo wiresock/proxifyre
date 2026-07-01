@@ -1645,7 +1645,20 @@ namespace proxy
             NETLIB_DEBUG("inject_to_local: Allocating per-I/O context for local socket {}",
                 static_cast<int>(local_socket_));
 
-            auto context = new(std::nothrow) per_io_context_t{ type, this->shared_from_this(), true };
+            std::shared_ptr<tcp_proxy_socket<T>> self;
+            try
+            {
+                self = this->shared_from_this();
+            }
+            catch (const std::bad_weak_ptr&)
+            {
+                // Report failure via the return value (consistent with this method) instead of
+                // letting the exception escape, mirroring initialize_io_contexts()'s handling.
+                NETLIB_ERROR("inject_to_local: shared_from_this() failed - object is not managed by shared_ptr");
+                return false;
+            }
+
+            auto context = new(std::nothrow) per_io_context_t{ type, self, true };
 
             if (context == nullptr)
             {
@@ -1750,7 +1763,20 @@ namespace proxy
             NETLIB_DEBUG("inject_to_remote: Allocating per-I/O context for remote socket {}",
                 static_cast<int>(remote_socket_));
 
-            auto context = new(std::nothrow) per_io_context_t{ type, this->shared_from_this(), false };
+            std::shared_ptr<tcp_proxy_socket<T>> self;
+            try
+            {
+                self = this->shared_from_this();
+            }
+            catch (const std::bad_weak_ptr&)
+            {
+                // Report failure via the return value (consistent with this method) instead of
+                // letting the exception escape, mirroring initialize_io_contexts()'s handling.
+                NETLIB_ERROR("inject_to_remote: shared_from_this() failed - object is not managed by shared_ptr");
+                return false;
+            }
+
+            auto context = new(std::nothrow) per_io_context_t{ type, self, false };
 
             if (context == nullptr)
             {
