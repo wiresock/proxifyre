@@ -252,6 +252,16 @@ namespace proxy
         bool removal_armed_ = false;
 
         /**
+         * @brief Count of overlapped I/O operations posted on this socket that have not yet
+         *        completed. Incremented (io_posted) immediately before each WSARecv/WSASend and
+         *        decremented (io_completed) once per completion, and on a synchronous post
+         *        failure. is_ready_for_removal() releases the self-references only when this is
+         *        zero -- a genuine "no completion can still reference our io_context members"
+         *        guarantee rather than a wall-clock grace.
+         */
+        std::atomic<long> outstanding_io_{ 0 };
+
+        /**
          * @brief Indicates whether Nagle's algorithm is disabled for the remote socket.
          *
          * When true, disables Nagle's algorithm (TCP_NODELAY) to reduce latency for small packets.
@@ -775,6 +785,40 @@ namespace proxy
             io_context_send_to_remote_.proxy_socket_ptr.reset();
         }
 
+        // Overlapped-I/O accounting. io_posted() is called immediately before every WSARecv/
+        // WSASend post on this socket; io_completed() is called once per completion (from the
+        // server IOCP handler) and on a synchronous post failure. See outstanding_io_.
+        void io_posted() noexcept { outstanding_io_.fetch_add(1, std::memory_order_acq_rel); }
+        void io_completed() noexcept { outstanding_io_.fetch_sub(1, std::memory_order_acq_rel); }
+
+        // Post an overlapped WSARecv/WSASend with I/O accounting: count the op before posting
+        // and undo the count if the post fails synchronously (no completion will arrive). Returns
+        // SOCKET_ERROR on a hard failure, 0 on success or ERROR_IO_PENDING. All relay/negotiate
+        // posts go through these so the count cannot be silently missed.
+        int post_recv(const SOCKET s, const LPWSABUF buf, const LPWSAOVERLAPPED ctx) noexcept
+        {
+            io_posted();
+            DWORD flags = 0;
+            if ((::WSARecv(s, buf, 1, nullptr, &flags, ctx, nullptr) == SOCKET_ERROR) &&
+                (ERROR_IO_PENDING != WSAGetLastError()))
+            {
+                io_completed();
+                return SOCKET_ERROR;
+            }
+            return 0;
+        }
+        int post_send(const SOCKET s, const LPWSABUF buf, const LPWSAOVERLAPPED ctx) noexcept
+        {
+            io_posted();
+            if ((::WSASend(s, buf, 1, nullptr, 0, ctx, nullptr) == SOCKET_ERROR) &&
+                (ERROR_IO_PENDING != WSAGetLastError()))
+            {
+                io_completed();
+                return SOCKET_ERROR;
+            }
+            return 0;
+        }
+
         bool is_ready_for_removal()
         {
             using namespace std::chrono_literals;
@@ -814,10 +858,19 @@ namespace proxy
                 // close (removal_armed_) before releasing: any IOCP completion still queued for
                 // this socket fires within milliseconds of closesocket(), so a full cleanup
                 // interval guarantees they have all been delivered (and safely no-op'd) first.
+                // Wait until every overlapped I/O we posted has completed before releasing the
+                // self-references: a nonzero count means a completion could still reference our
+                // io_context members after they (and this object) are freed.
+                if (outstanding_io_.load(std::memory_order_acquire) != 0)
+                {
+                    NETLIB_DEBUG("is_ready_for_removal: Sockets closed but I/O still outstanding; waiting to drain.");
+                    return false;
+                }
+
                 if (!removal_armed_)
                 {
                     removal_armed_ = true;
-                    NETLIB_DEBUG("is_ready_for_removal: Sockets closed; arming removal for the next cycle");
+                    NETLIB_DEBUG("is_ready_for_removal: Sockets closed and drained; arming removal for the next cycle");
                     return false;
                 }
 
@@ -1100,14 +1153,7 @@ namespace proxy
 
                         NETLIB_DEBUG("process_receive_buffer_complete: Sending {} bytes to remote socket", io_size);
 
-                        if ((::WSASend(
-                            remote_socket_,
-                            &remote_send_buf_,
-                            1,
-                            nullptr,
-                            0,
-                            &io_context_send_to_remote_,
-                            nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                        if (post_send(remote_socket_, &remote_send_buf_, &io_context_send_to_remote_) == SOCKET_ERROR)
                         {
                             const auto error = WSAGetLastError();
                             NETLIB_WARNING("process_receive_buffer_complete: WSASend to remote failed: {}", error);
@@ -1157,16 +1203,7 @@ namespace proxy
                     {
                         NETLIB_DEBUG("process_receive_buffer_complete: Initiating new local receive with buffer size {}", local_recv_buf_.len);
 
-                        DWORD flags = 0;
-
-                        if ((::WSARecv(
-                            local_socket_,
-                            &local_recv_buf_,
-                            1,
-                            nullptr,
-                            &flags,
-                            &io_context_recv_from_local_,
-                            nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                        if (post_recv(local_socket_, &local_recv_buf_, &io_context_recv_from_local_) == SOCKET_ERROR)
                         {
                             const auto error = WSAGetLastError();
                             NETLIB_WARNING("process_receive_buffer_complete: WSARecv from local failed: {}", error);
@@ -1199,14 +1236,7 @@ namespace proxy
 
                         NETLIB_DEBUG("process_receive_buffer_complete: Sending {} bytes to local socket", io_size);
 
-                        if ((::WSASend(
-                            local_socket_,
-                            &local_send_buf_,
-                            1,
-                            nullptr,
-                            0,
-                            &io_context_send_to_local_,
-                            nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                        if (post_send(local_socket_, &local_send_buf_, &io_context_send_to_local_) == SOCKET_ERROR)
                         {
                             const auto error = WSAGetLastError();
                             NETLIB_WARNING("process_receive_buffer_complete: WSASend to local failed: {}", error);
@@ -1257,16 +1287,7 @@ namespace proxy
                     {
                         NETLIB_DEBUG("process_receive_buffer_complete: Initiating new remote receive with buffer size {}", remote_recv_buf_.len);
 
-                        DWORD flags = 0;
-
-                        if ((::WSARecv(
-                            remote_socket_,
-                            &remote_recv_buf_,
-                            1,
-                            nullptr,
-                            &flags,
-                            &io_context_recv_from_remote_,
-                            nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                        if (post_recv(remote_socket_, &remote_recv_buf_, &io_context_recv_from_remote_) == SOCKET_ERROR)
                         {
                             const auto error = WSAGetLastError();
                             NETLIB_WARNING("process_receive_buffer_complete: WSARecv from remote failed: {}", error);
@@ -1344,8 +1365,6 @@ namespace proxy
                     {
                         NETLIB_DEBUG("process_send_buffer_complete: Remote receive buffer empty, setting up new receive");
 
-                        DWORD flags = 0;
-
                         remote_recv_buf_.buf = local_send_buf_.buf;
                         remote_recv_buf_.len = io_size;
 
@@ -1353,14 +1372,7 @@ namespace proxy
                         {
                             NETLIB_DEBUG("process_send_buffer_complete: Initiating remote receive with buffer size {}", remote_recv_buf_.len);
 
-                            if ((::WSARecv(
-                                remote_socket_,
-                                &remote_recv_buf_,
-                                1,
-                                nullptr,
-                                &flags,
-                                &io_context_recv_from_remote_,
-                                nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                            if (post_recv(remote_socket_, &remote_recv_buf_, &io_context_recv_from_remote_) == SOCKET_ERROR)
                             {
                                 const auto error = WSAGetLastError();
                                 NETLIB_WARNING("process_send_buffer_complete: WSARecv on remote failed: {}", error);
@@ -1431,14 +1443,7 @@ namespace proxy
                     {
                         NETLIB_DEBUG("process_send_buffer_complete: Continuing send to local socket with {} bytes", local_send_buf_.len);
 
-                        if ((::WSASend(
-                            local_socket_,
-                            &local_send_buf_,
-                            1,
-                            nullptr,
-                            0,
-                            &io_context_send_to_local_,
-                            nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                        if (post_send(local_socket_, &local_send_buf_, &io_context_send_to_local_) == SOCKET_ERROR)
                         {
                             const auto error = WSAGetLastError();
                             NETLIB_WARNING("process_send_buffer_complete: WSASend to local failed: {}", error);
@@ -1467,8 +1472,6 @@ namespace proxy
                     {
                         NETLIB_DEBUG("process_send_buffer_complete: Local receive buffer empty, setting up new receive");
 
-                        DWORD flags = 0;
-
                         local_recv_buf_.buf = remote_send_buf_.buf;
                         local_recv_buf_.len = io_size;
 
@@ -1476,14 +1479,7 @@ namespace proxy
                         {
                             NETLIB_DEBUG("process_send_buffer_complete: Initiating local receive with buffer size {}", local_recv_buf_.len);
 
-                            if ((::WSARecv(
-                                local_socket_,
-                                &local_recv_buf_,
-                                1,
-                                nullptr,
-                                &flags,
-                                &io_context_recv_from_local_,
-                                nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                            if (post_recv(local_socket_, &local_recv_buf_, &io_context_recv_from_local_) == SOCKET_ERROR)
                             {
                                 const auto error = WSAGetLastError();
                                 NETLIB_WARNING("process_send_buffer_complete: WSARecv on local failed: {}", error);
@@ -1554,14 +1550,7 @@ namespace proxy
                     {
                         NETLIB_DEBUG("process_send_buffer_complete: Continuing send to remote socket with {} bytes", remote_send_buf_.len);
 
-                        if ((::WSASend(
-                            remote_socket_,
-                            &remote_send_buf_,
-                            1,
-                            nullptr,
-                            0,
-                            &io_context_send_to_remote_,
-                            nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                        if (post_send(remote_socket_, &remote_send_buf_, &io_context_send_to_remote_) == SOCKET_ERROR)
                         {
                             const auto error = WSAGetLastError();
                             NETLIB_WARNING("process_send_buffer_complete: WSASend to remote failed: {}", error);
@@ -1680,6 +1669,7 @@ namespace proxy
             NETLIB_DEBUG("inject_to_local: Initiating WSASend to local socket {} with {} bytes",
                 static_cast<int>(local_socket_), length);
 
+            io_posted();
             if ((::WSASend(
                 local_socket_,
                 &context->wsa_buf,
@@ -1689,6 +1679,7 @@ namespace proxy
                 context,
                 nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
             {
+                io_completed();
                 const auto error = WSAGetLastError();
                 NETLIB_WARNING("inject_to_local: WSASend failed with error: {}", error);
 
@@ -1783,6 +1774,7 @@ namespace proxy
             NETLIB_DEBUG("inject_to_remote: Initiating WSASend to remote socket {} with {} bytes",
                 static_cast<int>(remote_socket_), length);
 
+            io_posted();
             if ((::WSASend(
                 remote_socket_,
                 &context->wsa_buf,
@@ -1792,6 +1784,7 @@ namespace proxy
                 context,
                 nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
             {
+                io_completed();
                 const auto error = WSAGetLastError();
                 NETLIB_WARNING("inject_to_remote: WSASend failed with error: {}", error);
 
@@ -1896,11 +1889,13 @@ namespace proxy
             NETLIB_DEBUG("start_data_relay: Initiating WSARecv on local socket {}",
                 static_cast<int>(local_socket_));
 
+            io_posted();
             auto ret = WSARecv(local_socket_, &local_recv_buf_, 1,
                 nullptr, &flags, &io_context_recv_from_local_, nullptr);
 
             if (const auto wsa_error = WSAGetLastError(); ret == SOCKET_ERROR && (ERROR_IO_PENDING != wsa_error))
             {
+                io_completed();
                 NETLIB_WARNING("start_data_relay: WSARecv on local socket failed with error: {}", wsa_error);
                 NETLIB_DEBUG("start_data_relay: Closing local client due to WSARecv failure");
 
@@ -1922,11 +1917,13 @@ namespace proxy
             NETLIB_DEBUG("start_data_relay: Initiating WSARecv on remote socket {}",
                 static_cast<int>(remote_socket_));
 
+            io_posted();
             ret = WSARecv(remote_socket_, &remote_recv_buf_, 1,
                 nullptr, &flags, &io_context_recv_from_remote_, nullptr);
 
             if (const auto wsa_error = WSAGetLastError(); ret == SOCKET_ERROR && (ERROR_IO_PENDING != wsa_error))
             {
+                io_completed();
                 NETLIB_WARNING("start_data_relay: WSARecv on remote socket failed with error: {}", wsa_error);
                 NETLIB_DEBUG("start_data_relay: Cleaning up local socket due to remote WSARecv failure");
 

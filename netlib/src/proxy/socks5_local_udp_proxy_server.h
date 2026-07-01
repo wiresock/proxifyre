@@ -339,6 +339,27 @@ namespace proxy
                             }
                         }
 
+                        // Balance the io_posted() done when a per-session overlapped op was
+                        // posted. This completion is a real delivery -- success OR failure: an
+                        // aborted recv/send flushed by close_client()'s CancelIoEx during teardown
+                        // arrives here with status == false. It must therefore decrement the owning
+                        // proxy socket's outstanding-I/O count exactly once on every exit path,
+                        // independent of status/result and of whether we dispatch below; trapping
+                        // the decrement inside "if (status && result)" would leak the count on every
+                        // torn-down session and the socket would never become removable. Server-read
+                        // completions ride server_io_context_, which no proxy socket ever counted, so
+                        // they are excluded. The strong ref keeps the socket alive until decrement.
+                        std::shared_ptr<T> completing_socket = server_read ? nullptr : io_context->proxy_socket_ptr;
+                        struct io_dec_guard {
+                            T* s;
+                            explicit io_dec_guard(T* sock) : s(sock) {}
+                            ~io_dec_guard() { if (s) s->io_completed(); }
+                            io_dec_guard(const io_dec_guard&) = delete;
+                            io_dec_guard(io_dec_guard&&) = delete;
+                            io_dec_guard& operator=(const io_dec_guard&) = delete;
+                            io_dec_guard& operator=(io_dec_guard&&) = delete;
+                        } io_dec{ completing_socket.get() };
+
                         if (status && result)
                         {
                             // The proxy socket may have released its self-reference during

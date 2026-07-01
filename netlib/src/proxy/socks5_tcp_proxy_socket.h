@@ -174,16 +174,10 @@ namespace proxy
                                     io_context_recv_negotiate_.wsa_buf.buf = reinterpret_cast<char*>(&ident_resp_);
                                     io_context_recv_negotiate_.wsa_buf.len = sizeof(socks5_ident_resp);
 
-                                    DWORD flags = 0;
-
-                                    if ((::WSASend(
+                                    if (this->post_send(
                                         tcp_proxy_socket<T>::remote_socket_,
                                         &io_context_send_negotiate_.wsa_buf,
-                                        1,
-                                        nullptr,
-                                        0,
-                                        &io_context_send_negotiate_,
-                                        nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                                        &io_context_send_negotiate_) == SOCKET_ERROR)
                                     {
                                         tcp_proxy_socket<T>::close_client(false, false);
                                         return;
@@ -191,14 +185,10 @@ namespace proxy
 
                                     current_state_ = socks5_state::password_sent;
 
-                                    if ((::WSARecv(
+                                    if (this->post_recv(
                                         tcp_proxy_socket<T>::remote_socket_,
                                         &io_context_recv_negotiate_.wsa_buf,
-                                        1,
-                                        nullptr,
-                                        &flags,
-                                        &io_context_recv_negotiate_,
-                                        nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                                        &io_context_recv_negotiate_) == SOCKET_ERROR)
                                     {
                                         tcp_proxy_socket<T>::close_client(true, false);
                                     }
@@ -329,16 +319,10 @@ namespace proxy
             io_context_recv_negotiate_.wsa_buf.buf = static_cast<char*>(buffer);
             io_context_recv_negotiate_.wsa_buf.len = length;
 
-            DWORD flags = 0;
-
-            if ((::WSARecv(
+            if (this->post_recv(
                 tcp_proxy_socket<T>::remote_socket_,
                 &io_context_recv_negotiate_.wsa_buf,
-                1,
-                nullptr,
-                &flags,
-                &io_context_recv_negotiate_,
-                nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                &io_context_recv_negotiate_) == SOCKET_ERROR)
             {
                 tcp_proxy_socket<T>::close_client(true, false);
                 return false;
@@ -393,14 +377,10 @@ namespace proxy
             io_context_send_negotiate_.wsa_buf.buf = reinterpret_cast<char*>(&connect_request_);
             io_context_send_negotiate_.wsa_buf.len = sizeof(socks5_req<T>);
 
-            if ((::WSASend(
+            if (this->post_send(
                 tcp_proxy_socket<T>::remote_socket_,
                 &io_context_send_negotiate_.wsa_buf,
-                1,
-                nullptr,
-                0,
-                &io_context_send_negotiate_,
-                nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                &io_context_send_negotiate_) == SOCKET_ERROR)
             {
                 tcp_proxy_socket<T>::close_client(false, false);
                 return;
@@ -509,18 +489,12 @@ namespace proxy
                     io_context_recv_negotiate_.wsa_buf.buf = reinterpret_cast<char*>(&ident_resp_);
                     io_context_recv_negotiate_.wsa_buf.len = sizeof(socks5_ident_resp);
 
-                    DWORD flags = 0;
-
                     NETLIB_DEBUG("Sending SOCKS5 identification request ({} bytes)", socks5_ident_req_size);
 
-                    if ((::WSASend(
+                    if (this->post_send(
                         tcp_proxy_socket<T>::remote_socket_,
                         &io_context_send_negotiate_.wsa_buf,
-                        1,
-                        nullptr,
-                        0,
-                        &io_context_send_negotiate_,
-                        nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                        &io_context_send_negotiate_) == SOCKET_ERROR)
                     {
                         const auto error = WSAGetLastError();
                         NETLIB_ERROR("Failed to send SOCKS5 identification request: WSA error {}", error);
@@ -531,14 +505,10 @@ namespace proxy
                     current_state_ = socks5_state::login_sent;
                     NETLIB_DEBUG("SOCKS5 identification request sent, waiting for response");
 
-                    if ((::WSARecv(
+                    if (this->post_recv(
                         tcp_proxy_socket<T>::remote_socket_,
                         &io_context_recv_negotiate_.wsa_buf,
-                        1,
-                        nullptr,
-                        &flags,
-                        &io_context_recv_negotiate_,
-                        nullptr) == SOCKET_ERROR) && (ERROR_IO_PENDING != WSAGetLastError()))
+                        &io_context_recv_negotiate_) == SOCKET_ERROR)
                     {
                         const auto error = WSAGetLastError();
                         NETLIB_ERROR("Failed to receive SOCKS5 identification response: WSA error {}", error);
