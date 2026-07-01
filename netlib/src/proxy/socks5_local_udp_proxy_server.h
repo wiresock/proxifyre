@@ -587,6 +587,27 @@ namespace proxy
                 std::this_thread::sleep_for(wait_time);
             }
 
+            // Step 4b: Regardless of how the drain loop exited, make sure no IOCP callback is still
+            // executing before we proceed. A worker inside the completion lambda has captured `this`
+            // (it touches lock_, end_server_, packet_pool_, server_io_context_ and decrements
+            // active_iocp_operations_ on the way out), so unregistering the handler and returning
+            // from stop() while active_iocp_operations_ > 0 risks a use-after-free of the server if
+            // the object is then destroyed. On the happy path this is already zero (it is part of
+            // the break condition above); on the timeout path we still wait here. Lambdas are
+            // bounded work, so this reliably reaches zero; bound it as a last resort.
+            for (int active_wait = 0;
+                 active_iocp_operations_.load(std::memory_order_acquire) != 0;
+                 ++active_wait)
+            {
+                if (active_wait > 200)
+                {
+                    NETLIB_ERROR("IOCP callbacks still active ({}) after drain; proceeding may be unsafe",
+                        active_iocp_operations_.load(std::memory_order_relaxed));
+                    break;
+                }
+                std::this_thread::sleep_for(std::min(1ms * (1 << std::min(active_wait / 10, 6)), 100ms));
+            }
+
             // Step 5: All completions have now been processed (or we timed out), so unregister the
             // IOCP handler -- no further completion will dispatch into this server.
             if (completion_key_ != 0)
