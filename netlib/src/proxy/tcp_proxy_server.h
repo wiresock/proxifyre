@@ -344,8 +344,10 @@ namespace proxy
                         // For a counted relay/negotiate completion proxy_socket is always non-null
                         // here (the early-return above drops null relay/negotiate contexts, and a
                         // self-reference cannot have been released while the count is non-zero), so
-                        // the guard always decrements it. inject_io_write is currently unreachable
-                        // dead code; the null-tolerant guard is only a defensive no-op.
+                        // the guard always decrements it. inject_io_write is currently unused, but
+                        // its heap context now carries a real shared_from_this() ref, so if revived
+                        // the guard would find a non-null proxy_socket and correctly balance the
+                        // inline io_posted(); the null tolerance is only a defensive fallback.
                         using io_dec_socket_t = decltype(proxy_socket.get());
                         struct io_dec_guard {
                             io_dec_socket_t s;
