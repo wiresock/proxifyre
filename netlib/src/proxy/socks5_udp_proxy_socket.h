@@ -406,8 +406,10 @@ namespace proxy
 
         // Post an overlapped WSARecv/WSASend/WSASendTo with I/O accounting: count the op before
         // posting and undo the count if the post fails synchronously (no completion will arrive).
-        // Returns SOCKET_ERROR on a hard failure, 0 on success or ERROR_IO_PENDING. All relay/inject
-        // posts go through these so the count cannot be silently missed.
+        // Returns SOCKET_ERROR on a synchronous hard failure (the count was undone); otherwise
+        // returns 0 -- the post either completed inline or is pending (ERROR_IO_PENDING) and a
+        // completion will arrive to balance the count. All relay/inject posts go through these so
+        // the count cannot be silently missed.
         int post_recv(const SOCKET s, const LPWSABUF buf, const LPWSAOVERLAPPED ctx) noexcept
         {
             io_posted();

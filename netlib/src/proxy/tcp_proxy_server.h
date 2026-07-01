@@ -345,9 +345,11 @@ namespace proxy
                         // Balance the io_posted() done when this overlapped op was posted: this
                         // completion is a real delivery, so decrement the socket's outstanding-I/O
                         // count exactly once on every exit path (error return, dispatch, throw).
-                        // Only relay/negotiate contexts carry a socket ref here; inject contexts are
-                        // heap-owned and are not tracked by outstanding_io_ (their proxy_socket may
-                        // even be null), so the guard is a no-op for a null socket.
+                        // For a counted relay/negotiate completion proxy_socket is always non-null
+                        // here (the early-return above drops null relay/negotiate contexts, and a
+                        // self-reference cannot have been released while the count is non-zero), so
+                        // the guard always decrements it. inject_io_write is currently unreachable
+                        // dead code; the null-tolerant guard is only a defensive no-op.
                         using io_dec_socket_t = decltype(proxy_socket.get());
                         struct io_dec_guard {
                             io_dec_socket_t s;
