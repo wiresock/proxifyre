@@ -341,7 +341,10 @@ namespace netlib::winsys
                         // window where a completion had committed to running a handler that a
                         // concurrent shutdown was about to destroy.
                         state = it->second;
-                        state->in_flight.fetch_add(1, std::memory_order_acq_rel);
+                        // Relaxed suffices: this increment is published to unregister_handler() by
+                        // releasing the read lock below (its write-lock acquire synchronizes with
+                        // that release), not by this atomic's own ordering.
+                        state->in_flight.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
 
@@ -373,8 +376,12 @@ namespace netlib::winsys
 
                     // Clear the in-flight mark only AFTER the callback has fully returned, so an
                     // unregister_handler() waiting on it cannot let the caller free captured state
-                    // out from under the still-running callback.
-                    state->in_flight.fetch_sub(1, std::memory_order_acq_rel);
+                    // out from under the still-running callback. Release publishes the completed
+                    // callback to the waiter's acquire load. Notify only on the 1->0 transition --
+                    // the condition unregister_handler() waits for -- so the hot path does not issue
+                    // a wake syscall on every completion (under load in_flight rarely reaches zero).
+                    if (state->in_flight.fetch_sub(1, std::memory_order_release) == 1)
+                        state->in_flight.notify_all();
                 }
                 // else: handler was unregistered before we could take it; ignore
             }
@@ -673,11 +680,12 @@ namespace netlib::winsys
             }
 
             // Wait for any worker that had already marked this handler in-flight to finish. Once the
-            // count reaches zero, no worker is (or can start) executing the handler.
-            using namespace std::chrono_literals;
-            while (state->in_flight.load(std::memory_order_acquire) != 0)
+            // count reaches zero, no worker is (or can start) executing the handler. Block on the
+            // C++20 atomic wait (paired with the worker's notify_all() on the 1->0 transition)
+            // rather than polling, so shutdown is prompt and does not busy-sleep.
+            while (const auto count = state->in_flight.load(std::memory_order_acquire))
             {
-                std::this_thread::sleep_for(1ms);
+                state->in_flight.wait(count, std::memory_order_acquire);
             }
 
             return true;
