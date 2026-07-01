@@ -305,21 +305,13 @@ namespace proxy
 
                         auto io_context = static_cast<per_io_context_t*>(povlp);
 
-                        // Server shutting down: still balance this completion's io_posted() so a
-                        // completion delivered while stop() runs cannot leave outstanding_io_ stuck
-                        // non-zero, but start no new work (no connect/dispatch/re-arm) during
-                        // teardown. A per-session op carries a socket ref here; the server read
-                        // (server_io_context_) was never counted, so it is not decremented. We hold
-                        // lock_, and a counted op keeps its io_context alive, so this access is safe.
-                        if (end_server_)
-                        {
-                            if (io_context != &server_io_context_)
-                            {
-                                if (auto completing_socket = io_context->proxy_socket_ptr)
-                                    completing_socket->io_completed();
-                            }
-                            return false;
-                        }
+                        // While the server is shutting down we must still fully process each
+                        // delivered completion -- decrement its outstanding-I/O count (via io_dec
+                        // below) and release any heap per-I/O context it owns -- but must start no
+                        // NEW work (no connect, no data-relay dispatch, no recv/send re-arm). Read
+                        // this once and gate the new-work paths on it. The unconditional io_dec
+                        // guard keeps outstanding_io_ balanced without a special early return.
+                        const bool shutting_down = end_server_;
 
                         // If this is the server socket's read operation
                         if (io_context == &server_io_context_)
@@ -327,7 +319,7 @@ namespace proxy
                             // Server socket read operation complete
                             server_read = true;
 
-                            if (status && num_bytes)
+                            if (status && num_bytes && !shutting_down)
                             {
                                 do
                                 {
@@ -372,36 +364,48 @@ namespace proxy
                             io_dec_guard& operator=(io_dec_guard&&) = delete;
                         } io_dec{ completing_socket.get() };
 
-                        if (status && result)
+                        // The proxy socket may have released its self-reference during teardown; a
+                        // late completion then finds null and is safely ignored.
+                        if (auto proxy_socket = io_context->proxy_socket_ptr)
                         {
-                            // The proxy socket may have released its self-reference during
-                            // teardown; a late completion then finds null and is safely ignored.
-                            if (auto proxy_socket = io_context->proxy_socket_ptr)
+                            switch (io_context->io_operation)
                             {
-                                switch (io_context->io_operation)
-                                {
-                                case proxy_io_operation::relay_io_read:
+                            // Reads (and the no-op negotiate handlers) run a handler that posts NEW
+                            // overlapped I/O, so only dispatch them on a successful, non-teardown
+                            // completion. On an aborted read (status == false) or during shutdown
+                            // there is nothing to free -- the recv uses a member io_context -- so we
+                            // just fall through to the io_dec decrement.
+                            case proxy_io_operation::relay_io_read:
+                                if (status && result && !shutting_down)
                                     proxy_socket->process_receive_buffer_complete(num_bytes, io_context);
-                                    break;
+                                break;
 
-                                case proxy_io_operation::relay_io_write:
-                                    proxy_socket->process_send_buffer_complete(num_bytes, io_context);
-                                    break;
-
-                                case proxy_io_operation::negotiate_io_read:
+                            case proxy_io_operation::negotiate_io_read:
+                                if (status && result && !shutting_down)
                                     proxy_socket->process_receive_negotiate_complete(num_bytes, io_context);
-                                    break;
+                                break;
 
-                                case proxy_io_operation::negotiate_io_write:
+                            case proxy_io_operation::negotiate_io_write:
+                                if (status && result && !shutting_down)
                                     proxy_socket->process_send_negotiate_complete(num_bytes, io_context);
-                                    break;
+                                break;
 
-                                case proxy_io_operation::inject_io_write:
-                                    T::process_inject_buffer_complete(packet_pool_, io_context);
-                                    break;
+                            // Writes and injects own a HEAP io_context (allocated per datagram via
+                            // allocate_io_context / new). Their handler only releases that context
+                            // (and its pooled packet) and posts no new I/O, so it MUST run on EVERY
+                            // completion -- including an aborted one (status == false) flushed by
+                            // close_client()'s CancelIoEx during runtime teardown or shutdown.
+                            // Skipping it leaks the context and its buffer and keeps this socket
+                            // pinned alive via the context's strong proxy_socket_ptr.
+                            case proxy_io_operation::relay_io_write:
+                                proxy_socket->process_send_buffer_complete(num_bytes, io_context);
+                                break;
 
-                                default: break; // NOLINT(clang-diagnostic-covered-switch-default)
-                                }
+                            case proxy_io_operation::inject_io_write:
+                                T::process_inject_buffer_complete(packet_pool_, io_context);
+                                break;
+
+                            default: break; // NOLINT(clang-diagnostic-covered-switch-default)
                             }
                         }
 
@@ -481,12 +485,14 @@ namespace proxy
          *
          * This method performs a graceful shutdown by:
          * 1. Setting the end_server_ flag to signal shutdown
-         * 2. Closing the server socket, which causes pending I/O to complete with error
-         * 3. Waiting for all active IOCP operations to complete (tracked by atomic counter)
-         * 4. Joining background threads
-         * 5. Clearing resources
+         * 2. Closing the server socket, which causes the pending WSARecvFrom to complete with error
+         * 3. Cancelling each proxy socket's pending I/O (close_client) so its posted operations abort
+         * 4. Waiting for every proxy socket's overlapped I/O to drain (per-socket outstanding count)
+         *    and for all IOCP callbacks to finish
+         * 5. Releasing each socket's self-reference and clearing the map so the sockets destruct
+         * 6. Joining background threads
          *
-         * The IOCP thread pool itself is managed by io_completion_port and will be 
+         * The IOCP thread pool itself is managed by io_completion_port and will be
          * properly shut down when the completion port is destroyed.
          */
         void stop()
@@ -509,50 +515,103 @@ namespace proxy
                 server_socket_ = INVALID_SOCKET;
             }
 
-            // Step 2.5: Unregister the IOCP handler BEFORE waiting
-            if (completion_key_ != 0) {
-                (void)completion_port_.unregister_handler(completion_key_);
-                completion_key_ = 0;
-            }
+            // NOTE: the IOCP handler stays registered until AFTER the drain below. The aborted
+            // completions produced by close_client()'s CancelIoEx must still dispatch through it so
+            // they release their heap contexts and decrement each socket's outstanding_io_;
+            // unregistering here would drop those completions and the drain would never complete.
 
-            // Step 3: Close all proxy sockets FIRST to cancel their I/O operations
-            // This is CRITICAL: proxy sockets post their own I/O operations that will
-            // call back into this server's lambda, potentially after the server is destroyed.
-            // We must ensure all proxy socket I/O is cancelled before we proceed.
+            // Step 3: Cancel every proxy socket's pending I/O so its posted operations complete
+            // promptly (aborted) and stop pinning the socket. Keep the sockets in the map for now --
+            // they must stay alive until their in-flight completions have drained. Simply clearing
+            // the map does NOT destroy them: each socket's recv io_context holds a self-reference,
+            // so the destructor would never run and the handle/armed recv would leak.
             {
                 std::lock_guard lock(lock_);
                 if (!proxy_sockets_.empty())
                 {
-                    NETLIB_INFO("Closing {} proxy sockets before waiting for I/O completion", proxy_sockets_.size());
-                    // Closing the map entries will destroy the proxy sockets,
-                    // which will close their sockets and cancel any pending I/O
-                    proxy_sockets_.clear();
+                    NETLIB_INFO("Cancelling I/O on {} proxy sockets before draining", proxy_sockets_.size());
+                    for (auto& entry : proxy_sockets_)
+                    {
+                        if (entry.second)
+                            entry.second->close_client(); // idempotent: CancelIoEx + closesocket
+                    }
                 }
             }
 
-            // Step 4: Wait for all active IOCP operations to complete
-            // The socket closure ensures pending operations complete quickly.
-            // The atomic counter ensures we wait until all in-flight operations finish.
-            // Use exponential backoff to avoid busy-waiting
+            // Step 4: Wait until every proxy socket has drained all posted overlapped I/O (its
+            // per-socket outstanding count reaches zero) AND no IOCP callback is still running.
+            // The handler is still registered, so close_client()'s aborted completions dispatch,
+            // release their heap contexts, and the io_dec guard decrements the count. Gate on the
+            // per-socket count -- not just active_iocp_operations_ -- because a cancelled completion
+            // may still be queued (not yet dispatched) while active_iocp_operations_ momentarily
+            // reads zero; releasing a socket's self-reference before that completion is processed
+            // would free the io_context out from under it. Re-issue close_client() on any not-yet-
+            // drained socket each pass so a session armed concurrently with shutdown (e.g. a
+            // blocking connect that finished after end_server_ was set) is cancelled too.
+            // Exponential backoff to avoid busy-waiting.
             using namespace std::chrono_literals;
             int wait_iterations = 0;
+            bool drained_ok = false;
 
-            while (active_iocp_operations_.load(std::memory_order_acquire) > 0)
+            while (true)
             {
-                if (constexpr int max_wait_iterations = 100; ++wait_iterations > max_wait_iterations)
+                bool drained = true;
                 {
-                    // Log warning if we're taking too long
-                    NETLIB_WARNING("Timeout waiting for IOCP operations to complete. Active operations: {}",
-                    active_iocp_operations_.load(std::memory_order_relaxed));
+                    std::lock_guard lock(lock_);
+                    for (auto& entry : proxy_sockets_)
+                    {
+                        if (entry.second && entry.second->outstanding_io() != 0)
+                        {
+                            drained = false;
+                            entry.second->close_client(); // idempotent; cancels late-armed sessions
+                        }
+                    }
+                }
+
+                if (drained && active_iocp_operations_.load(std::memory_order_acquire) == 0)
+                {
+                    drained_ok = true;
                     break;
                 }
-             
+
+                if (constexpr int max_wait_iterations = 100; ++wait_iterations > max_wait_iterations)
+                {
+                    NETLIB_ERROR("Timeout waiting for proxy socket I/O to drain (active operations: {}); "
+                        "leaving sessions pinned to avoid freeing in-flight io_contexts",
+                        active_iocp_operations_.load(std::memory_order_relaxed));
+                    break;
+                }
+
                 // Exponential backoff: 1ms, 2ms, 4ms, 8ms, ... up to 100ms
                 const auto wait_time = std::min(1ms * (1 << std::min(wait_iterations / 10, 6)), 100ms);
                 std::this_thread::sleep_for(wait_time);
             }
 
-            // Step 5: Join background threads
+            // Step 5: All completions have now been processed (or we timed out), so unregister the
+            // IOCP handler -- no further completion will dispatch into this server.
+            if (completion_key_ != 0)
+            {
+                (void)completion_port_.unregister_handler(completion_key_);
+                completion_key_ = 0;
+            }
+
+            // Step 6: Only if the drain completed do we break each socket's self-reference and clear
+            // the map so the sockets (and their already-released heap I/O contexts) destruct. If the
+            // drain timed out, some overlapped op is still outstanding; releasing/clearing now would
+            // free an io_context that a still-queued completion could dereference, so we deliberately
+            // leak those sessions instead (a bounded, shutdown-only leak) rather than risk a UAF.
+            if (drained_ok)
+            {
+                std::lock_guard lock(lock_);
+                for (auto& entry : proxy_sockets_)
+                {
+                    if (entry.second)
+                        entry.second->release_self_reference();
+                }
+                proxy_sockets_.clear();
+            }
+
+            // Step 7: Join background threads
             if (proxy_server_.joinable())
             {
                 proxy_server_.join();

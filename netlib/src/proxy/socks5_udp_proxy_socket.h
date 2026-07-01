@@ -404,6 +404,16 @@ namespace proxy
         void io_posted() noexcept { outstanding_io_.fetch_add(1, std::memory_order_acq_rel); }
         void io_completed() noexcept { outstanding_io_.fetch_sub(1, std::memory_order_acq_rel); }
 
+        // Current count of overlapped I/O operations posted on this socket that have not yet
+        // completed. The server's stop() polls this for a precise per-socket drain before it
+        // releases self-references and destroys the socket.
+        [[nodiscard]] long outstanding_io() const noexcept { return outstanding_io_.load(std::memory_order_acquire); }
+
+        // Break the per-I/O self-reference (the recv context's strong ref back to this socket)
+        // so the object can finally be destroyed. Only safe once this socket's overlapped I/O
+        // has drained (outstanding_io() == 0) and no completion is in flight. Idempotent.
+        void release_self_reference() noexcept { io_context_recv_from_remote_.proxy_socket_ptr.reset(); }
+
         // Post an overlapped WSARecv/WSASend/WSASendTo with I/O accounting: count the op before
         // posting and undo the count if the post fails synchronously (no completion will arrive).
         // Returns SOCKET_ERROR on a synchronous hard failure (the count was undone); otherwise
@@ -484,7 +494,7 @@ namespace proxy
             if (outstanding_io_.load(std::memory_order_acquire) != 0)
                 return false;
 
-            io_context_recv_from_remote_.proxy_socket_ptr.reset();
+            release_self_reference();
             return true;
         }
 
