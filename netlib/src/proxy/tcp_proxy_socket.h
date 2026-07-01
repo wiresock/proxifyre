@@ -857,13 +857,12 @@ namespace proxy
                 // Break the per-session shared_ptr cycle: each per-I/O context member holds a
                 // strong reference back to this object so it stays alive while overlapped I/O
                 // is in flight. Release those refs here so the destructor can finally run once
-                // the server drops its own reference. Wait one cleanup cycle after both sockets
-                // close (removal_armed_) before releasing: any IOCP completion still queued for
-                // this socket fires within milliseconds of closesocket(), so a full cleanup
-                // interval guarantees they have all been delivered (and safely no-op'd) first.
-                // Wait until every overlapped I/O we posted has completed before releasing the
-                // self-references: a nonzero count means a completion could still reference our
-                // io_context members after they (and this object) are freed.
+                // the server drops its own reference. The deterministic gate is the outstanding_io_
+                // counter below: a nonzero count means a completion could still reference our
+                // io_context members after they (and this object) are freed, so we must not release
+                // until it reaches zero. The one-cycle removal_armed_ grace that follows is kept as
+                // a secondary belt-and-suspenders barrier (it used to be the sole, timing-based
+                // guarantee before the counter existed).
                 if (outstanding_io_.load(std::memory_order_acquire) != 0)
                 {
                     NETLIB_DEBUG("is_ready_for_removal: Sockets closed but I/O still outstanding; waiting to drain.");
