@@ -461,22 +461,26 @@ namespace proxy
             if (!ready_for_removal_.load() && (std::chrono::steady_clock::now() - timestamp_ <= 5min))
                 return false;
 
-            // Wait until every overlapped I/O we posted has completed before releasing the
-            // self-reference: a nonzero count means a completion could still reference our
-            // io_context member after it (and this object) are freed.
-            if (outstanding_io_.load(std::memory_order_acquire) != 0)
-                return false;
-
             // Ready (explicit close or idle timeout). Break the per-I/O self-reference cycle so
-            // the destructor can run, but only after a one-cycle grace: ensure the sockets are
-            // closed (so any pending recv is cancelled) on the first pass, then release the
-            // self-reference on the next pass once those queued completions have drained.
+            // the destructor can run, but only after a one-cycle grace. First pass: close the
+            // sockets so any still-armed overlapped I/O is cancelled. This MUST run before the
+            // drain gate below -- an idle session always has a WSARecv pending on the remote
+            // socket, so gating on outstanding_io_ first would return early forever and
+            // close_client() (the only thing that cancels that recv) would never run, so the
+            // I/O would never drain and the session would accumulate indefinitely.
             if (!removal_armed_)
             {
                 close_client(); // idempotent: cancels pending I/O and closes the sockets
                 removal_armed_ = true;
                 return false;
             }
+
+            // Do not release the self-reference until every overlapped I/O we posted has
+            // completed. close_client() cancelled them on the arming pass above; each aborted
+            // completion decrements outstanding_io_. A nonzero count means a completion could
+            // still reference our io_context member after it (and this object) are freed.
+            if (outstanding_io_.load(std::memory_order_acquire) != 0)
+                return false;
 
             io_context_recv_from_remote_.proxy_socket_ptr.reset();
             return true;
