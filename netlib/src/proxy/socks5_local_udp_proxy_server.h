@@ -1518,7 +1518,7 @@ namespace proxy
          *
          * @param it Valid iterator into proxy_sockets_ for the failed session.
          */
-        void cleanup_failed_proxy_socket(const typename std::map<uint16_t, std::shared_ptr<T>>::iterator it)
+        void cleanup_failed_proxy_socket(const typename decltype(proxy_sockets_)::iterator it)
         {
             if (it->second)
             {
