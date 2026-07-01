@@ -202,9 +202,10 @@ namespace ProxiFyre
                     LoggerInstance.Warn(
                         $"Proxy '{proxy.Socks5ProxyEndpoint}' has no application names; it will not match any process.");
 
-                // Warn on unrecognized protocol tokens: SupportedProtocolsParse treats a list
-                // containing neither "TCP" nor "UDP" as BOTH, so a typo would silently proxy
-                // everything instead of what the user intended.
+                // Warn on unrecognized protocol tokens: SupportedProtocolsParse only counts
+                // "TCP"/"UDP" and ignores anything else, defaulting to BOTH only when neither
+                // is present -- so a typo alongside a valid token is silently dropped, and a
+                // typo on its own silently proxies both protocols.
                 if (proxy.SupportedProtocols != null)
                 {
                     var unknownProtocols = proxy.SupportedProtocols
@@ -214,7 +215,7 @@ namespace ProxiFyre
                         LoggerInstance.Warn(
                             $"Proxy '{proxy.Socks5ProxyEndpoint}' lists unrecognized protocol(s): " +
                             $"{string.Join(", ", unknownProtocols)}. Only \"TCP\" and \"UDP\" are recognized; " +
-                            "the entry will be treated as both.");
+                            "unrecognized tokens are ignored (a proxy with no recognized protocol defaults to both).");
                 }
             }
 

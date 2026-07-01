@@ -43,9 +43,8 @@ namespace net
             while (true)
             {
                 // Ensure that current header is still within the packet
-                if (reinterpret_cast<const char*>(next_header) > reinterpret_cast<const char*>(ip_header) + packet_size
-                    - sizeof(
-                        ipv6ext))
+                if (reinterpret_cast<const char*>(next_header) + sizeof(ipv6ext) >
+                    reinterpret_cast<const char*>(ip_header) + packet_size)
                 {
                     return { nullptr, next_proto };
                 }
@@ -57,8 +56,8 @@ namespace net
                 {
                     const auto frag = reinterpret_cast<const ipv6ext_frag*>(next_header);
 
-                    if (reinterpret_cast<const char*>(frag) > reinterpret_cast<const char*>(ip_header) + packet_size -
-                        sizeof(ipv6ext_frag))
+                    if (reinterpret_cast<const char*>(frag) + sizeof(ipv6ext_frag) >
+                        reinterpret_cast<const char*>(ip_header) + packet_size)
                     {
                         return { nullptr, next_proto };
                     }
