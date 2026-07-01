@@ -408,8 +408,10 @@ namespace proxy
         // posting and undo the count if the post fails synchronously (no completion will arrive).
         // Returns SOCKET_ERROR on a synchronous hard failure (the count was undone); otherwise
         // returns 0 -- the post either completed inline or is pending (ERROR_IO_PENDING) and a
-        // completion will arrive to balance the count. All relay/inject posts go through these so
-        // the count cannot be silently missed.
+        // completion will arrive to balance the count. Most relay/inject posts go through these
+        // wrappers; the two auto-ret WSARecv re-arm sites (process_receive_buffer_complete and
+        // start_data_relay) do the same io_posted()/io_completed() accounting inline. Either way
+        // every posted op is counted exactly once.
         int post_recv(const SOCKET s, const LPWSABUF buf, const LPWSAOVERLAPPED ctx) noexcept
         {
             io_posted();
