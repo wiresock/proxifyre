@@ -1645,7 +1645,7 @@ namespace proxy
             NETLIB_DEBUG("inject_to_local: Allocating per-I/O context for local socket {}",
                 static_cast<int>(local_socket_));
 
-            auto context = new(std::nothrow) per_io_context_t{ type, this, true };
+            auto context = new(std::nothrow) per_io_context_t{ type, this->shared_from_this(), true };
 
             if (context == nullptr)
             {
@@ -1750,7 +1750,7 @@ namespace proxy
             NETLIB_DEBUG("inject_to_remote: Allocating per-I/O context for remote socket {}",
                 static_cast<int>(remote_socket_));
 
-            auto context = new(std::nothrow) per_io_context_t{ type, this, false };
+            auto context = new(std::nothrow) per_io_context_t{ type, this->shared_from_this(), false };
 
             if (context == nullptr)
             {

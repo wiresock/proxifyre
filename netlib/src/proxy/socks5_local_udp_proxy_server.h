@@ -507,8 +507,10 @@ namespace proxy
             end_server_ = true;
 
             // Step 2: Close server socket
-            // This causes any pending WSARecvFrom to complete immediately with an error.
-            // When IOCP threads wake up, they'll see end_server_ == true and return false.
+            // This causes the pending WSARecvFrom to complete with an error. Note the completion
+            // lambda's bool return is ignored by io_completion_port; shutdown is enforced by the
+            // end_server_ gate (which suppresses new work inside the lambda) and by unregistering
+            // the handler after the drain below.
             if (server_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
             {
                 closesocket(server_socket_);
