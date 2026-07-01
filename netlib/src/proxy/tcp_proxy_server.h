@@ -317,10 +317,6 @@ namespace proxy
                             operation_guard& operator=(operation_guard&&) = delete;
                         } guard{ active_iocp_operations_ };
 
-                        // Check if server is shutting down
-                        if (end_server_.load(std::memory_order_acquire))
-                            return false;
-
                         auto io_context = static_cast<per_io_context_t*>(povlp);
 
                         // Acquire the socket's strong reference under a SHARED server lock so
@@ -360,6 +356,14 @@ namespace proxy
                             io_dec_guard& operator=(const io_dec_guard&) = delete;
                             io_dec_guard& operator=(io_dec_guard&&) = delete;
                         } io_dec{ proxy_socket.get() };
+
+                        // Honor shutdown only after the decrement guard is armed: bailing here
+                        // (instead of before acquiring proxy_socket) still balances this
+                        // completion's io_posted() via io_dec, so a completion delivered while
+                        // stop() runs cannot leave outstanding_io_ stuck non-zero. We hold a strong
+                        // ref so io_context stays valid, and we still start no new work below.
+                        if (end_server_.load(std::memory_order_acquire))
+                            return false;
 
                         if (!status || (status && (num_bytes == 0)))
                         {

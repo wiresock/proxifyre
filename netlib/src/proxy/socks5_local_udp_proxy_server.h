@@ -301,13 +301,25 @@ namespace proxy
                         auto result = true;
                         auto server_read = false;
 
-                        // Check if server is shutting down
-                        if (end_server_)
-                            return false;
-
                         std::lock_guard lock(lock_);
 
                         auto io_context = static_cast<per_io_context_t*>(povlp);
+
+                        // Server shutting down: still balance this completion's io_posted() so a
+                        // completion delivered while stop() runs cannot leave outstanding_io_ stuck
+                        // non-zero, but start no new work (no connect/dispatch/re-arm) during
+                        // teardown. A per-session op carries a socket ref here; the server read
+                        // (server_io_context_) was never counted, so it is not decremented. We hold
+                        // lock_, and a counted op keeps its io_context alive, so this access is safe.
+                        if (end_server_)
+                        {
+                            if (io_context != &server_io_context_)
+                            {
+                                if (auto completing_socket = io_context->proxy_socket_ptr)
+                                    completing_socket->io_completed();
+                            }
+                            return false;
+                        }
 
                         // If this is the server socket's read operation
                         if (io_context == &server_io_context_)
