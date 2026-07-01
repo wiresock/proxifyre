@@ -596,7 +596,7 @@ namespace proxy
                         // A synchronously-failed post yields no IOCP completion, so
                         // process_send_buffer_complete() will never run to release this heap
                         // io_context. It holds a strong shared_from_this() reference, so leaving it
-                        // would pin this socket alive forever (defeating release_self_references()).
+                        // would pin this socket alive forever (defeating release_self_reference()).
                         // Release it by hand, exactly as the completion path does.
                         socks5_udp_per_io_context<T>::release_io_context(io_context_send_to_remote);
                         // Close connection to remote peer in case of error
@@ -645,7 +645,7 @@ namespace proxy
                         // A synchronously-failed post yields no IOCP completion, so
                         // process_send_buffer_complete() will never run to release this heap
                         // io_context. It holds a strong shared_from_this() reference, so leaving it
-                        // would pin this socket alive forever (defeating release_self_references()).
+                        // would pin this socket alive forever (defeating release_self_reference()).
                         // Release it by hand, exactly as the completion path does.
                         socks5_udp_per_io_context<T>::release_io_context(io_context_send_to_local);
                         // Close connection to remote peer in case of error

@@ -311,7 +311,7 @@ namespace proxy
                         // NEW work (no connect, no data-relay dispatch, no recv/send re-arm). Read
                         // this once and gate the new-work paths on it. The unconditional io_dec
                         // guard keeps outstanding_io_ balanced without a special early return.
-                        const bool shutting_down = end_server_;
+                        const bool shutting_down = end_server_.load(std::memory_order_acquire);
 
                         // If this is the server socket's read operation
                         if (io_context == &server_io_context_)
