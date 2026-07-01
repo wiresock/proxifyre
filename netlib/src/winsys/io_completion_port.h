@@ -242,11 +242,27 @@ namespace netlib::winsys
         io_completion_port& operator=(io_completion_port&&) = delete;
 
     private:
+        /// <summary>
+        /// Stored callback plus a count of worker threads currently executing it. The count is
+        /// incremented UNDER the handlers_lock_ read lock (before the handler runs) and decremented
+        /// after it returns, so unregister_handler() can erase the entry under the write lock and
+        /// then wait for the count to reach zero -- guaranteeing no worker is (or can start)
+        /// executing the handler once unregister_handler() returns.
+        /// </summary>
+        struct handler_state
+        {
+            std::function<callback_t> callback;
+            std::atomic<int32_t> in_flight{ 0 };
+
+            explicit handler_state(std::function<callback_t> cb) : callback(std::move(cb)) {}
+        };
+
         /// <summary>synchronization lock for handlers below (accessed concurrently)</summary>
         mutable mutex_type handlers_lock_;
 
-        /// <summary>callback handlers storage keyed by IOCP completion key</summary>
-        std::unordered_map<ULONG_PTR, std::function<callback_t>> handlers_;
+        /// <summary>callback handlers storage keyed by IOCP completion key. Held by shared_ptr so a
+        /// worker can keep the state alive while invoking the callback even after it is unregistered.</summary>
+        std::unordered_map<ULONG_PTR, std::shared_ptr<handler_state>> handlers_;
 
         /// <summary>monotonically increasing key generator (0 reserved for internal wake-up)</summary>
         std::atomic<ULONG_PTR> next_key_{ 1 };
@@ -311,23 +327,32 @@ namespace netlib::winsys
                 if (completion_key == 0)
                     continue;
 
-                std::function<callback_t> handler;
+                std::shared_ptr<handler_state> state;
 
                 {
                     read_lock lock(handlers_lock_);
                     const auto it = handlers_.find(completion_key);
                     if (it != handlers_.end())
                     {
-                        // Copy handler under lock to use it safely outside
-                        handler = it->second;
+                        // Take a strong ref AND mark this handler in-flight while still under the
+                        // lock, so unregister_handler() (which erases under the write lock) can
+                        // reliably observe us: either we increment before it erases (it then waits
+                        // for us), or we find nothing after it erased (we skip). This closes the
+                        // window where a completion had committed to running a handler that a
+                        // concurrent shutdown was about to destroy.
+                        state = it->second;
+                        // Relaxed suffices: this increment is published to unregister_handler() by
+                        // releasing the read lock below (its write-lock acquire synchronizes with
+                        // that release), not by this atomic's own ordering.
+                        state->in_flight.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
 
-                if (handler)
+                if (state)
                 {
                     try
                     {
-                        handler(num_bytes, overlapped_ptr, ok);
+                        state->callback(num_bytes, overlapped_ptr, ok);
                     }
                     catch (const std::exception& e)
                     {
@@ -348,8 +373,17 @@ namespace netlib::winsys
                         OutputDebugStringA("IOCP handler threw unknown exception\n");
 #endif
                     }
+
+                    // Clear the in-flight mark only AFTER the callback has fully returned, so an
+                    // unregister_handler() waiting on it cannot let the caller free captured state
+                    // out from under the still-running callback. Release publishes the completed
+                    // callback to the waiter's acquire load. Notify only on the 1->0 transition --
+                    // the condition unregister_handler() waits for -- so the hot path does not issue
+                    // a wake syscall on every completion (under load in_flight rarely reaches zero).
+                    if (state->in_flight.fetch_sub(1, std::memory_order_release) == 1)
+                        state->in_flight.notify_all();
                 }
-                // else: handler was unregistered; ignore
+                // else: handler was unregistered before we could take it; ignore
             }
         }
 
@@ -527,7 +561,7 @@ namespace netlib::winsys
                     // Check for collision and insert atomically
                     if (!handlers_.contains(candidate_key))
                     {
-                        handlers_.emplace(candidate_key, io_handler);
+                        handlers_.emplace(candidate_key, std::make_shared<handler_state>(io_handler));
                         handler_key = candidate_key;
                         break;
                     }
@@ -616,21 +650,44 @@ namespace netlib::winsys
 
         // ********************************************************************************
         /// <summary>
-        /// Unregisters a handler associated with the given completion key.
-        /// This prevents future IOCP completions from invoking the handler.
-        /// In-flight callbacks may still run once if they already copied the handler.
+        /// Unregisters a handler associated with the given completion key and BLOCKS until no
+        /// worker thread is executing it. After this returns, the handler will never be invoked
+        /// again, so the caller may safely destroy whatever the handler captured (e.g. the server
+        /// object). Correctness relies on the worker marking a handler in-flight under the read
+        /// lock before invoking it: erasing under the write lock here therefore either happens
+        /// after a worker has already marked in-flight (we wait for it) or before it looks up the
+        /// key (it finds nothing and skips).
+        ///
+        /// Must NOT be called from within a handler for the same key (it would wait on itself).
         /// </summary>
         /// <param name="key">I/O completion port key value to unregister.</param>
         /// <returns>true if the handler was found and removed, false otherwise.</returns>
         // ********************************************************************************
         [[nodiscard]] bool unregister_handler(const ULONG_PTR key)
         {
-            write_lock lock(handlers_lock_);
-            const auto it = handlers_.find(key);
-            if (it == handlers_.end())
-                return false;
+            std::shared_ptr<handler_state> state;
 
-            handlers_.erase(it);
+            {
+                write_lock lock(handlers_lock_);
+                const auto it = handlers_.find(key);
+                if (it == handlers_.end())
+                    return false;
+
+                // Keep the state alive while we wait; erasing from the map guarantees no worker can
+                // look it up (and mark it in-flight) after this point.
+                state = it->second;
+                handlers_.erase(it);
+            }
+
+            // Wait for any worker that had already marked this handler in-flight to finish. Once the
+            // count reaches zero, no worker is (or can start) executing the handler. Block on the
+            // C++20 atomic wait (paired with the worker's notify_all() on the 1->0 transition)
+            // rather than polling, so shutdown is prompt and does not busy-sleep.
+            while (const auto count = state->in_flight.load(std::memory_order_acquire))
+            {
+                state->in_flight.wait(count, std::memory_order_acquire);
+            }
+
             return true;
         }
 
