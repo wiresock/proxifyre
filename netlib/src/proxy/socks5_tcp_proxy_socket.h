@@ -414,13 +414,17 @@ namespace proxy
         per_io_context_t io_context_recv_negotiate_{ proxy_io_operation::negotiate_io_read, nullptr, false };
         per_io_context_t io_context_send_negotiate_{ proxy_io_operation::negotiate_io_write, nullptr, false };
 
-        // Also release this class's two negotiation contexts when breaking the cycle.
+    public:
+        // Also release this class's two negotiation contexts when breaking the cycle. Public (like
+        // the base override) so the owning server's stop() can break the reference cycle at shutdown.
         void release_self_references() noexcept override
         {
             tcp_proxy_socket<T>::release_self_references();
             io_context_recv_negotiate_.proxy_socket_ptr.reset();
             io_context_send_negotiate_.proxy_socket_ptr.reset();
         }
+
+    private:
 
         socks5_state current_state_{ socks5_state::pre_login };
         socks5_ident_req<2> ident_req_{};
