@@ -222,15 +222,25 @@ namespace ndisapi
                         timestamp_endpoint{
                             tcp_header->th_dport,
                             std::chrono::steady_clock::now()
-                        }); !result)
-                        return false;
-
-                    NETLIB_INFO(
-                        "NEW TCP: {}:{} -> {}:{}",
-                        std::string{ T{ip_header->ip_src} },
-                        ntohs(tcp_header->th_sport),
-                        std::string{ T{ip_header->ip_dst} },
-                        ntohs(tcp_header->th_dport));
+                        }); result)
+                    {
+                        NETLIB_INFO(
+                            "NEW TCP: {}:{} -> {}:{}",
+                            std::string{ T{ip_header->ip_src} },
+                            ntohs(tcp_header->th_sport),
+                            std::string{ T{ip_header->ip_dst} },
+                            ntohs(tcp_header->th_dport));
+                    }
+                    else
+                    {
+                        // A SYN whose {dst, src-port} key already exists is a SYN RETRANSMISSION
+                        // for a connection we are already redirecting (the local listener has not
+                        // finished the handshake yet, so the client retransmits). Returning false
+                        // here would make the caller PASS the retransmit to the real destination --
+                        // an unproxied leak of a connection we own. Refresh the timestamp and fall
+                        // through to rewrite this SYN to the local proxy, exactly like the first one.
+                        it->second.second = std::chrono::steady_clock::now();
+                    }
                 }
                 else
                 {
@@ -294,15 +304,22 @@ namespace ndisapi
                         timestamp_endpoint{
                             tcp_header->th_dport,
                             std::chrono::steady_clock::now()
-                        }); !result)
-                        return false;
-
-                    NETLIB_INFO(
-                        "NEW TCP: {}:{} -> {}:{}",
-                        std::string{ T{ip_header->ip6_src} },
-                        ntohs(tcp_header->th_sport),
-                        std::string{ T{ip_header->ip6_dst} },
-                        ntohs(tcp_header->th_dport));
+                        }); result)
+                    {
+                        NETLIB_INFO(
+                            "NEW TCP: {}:{} -> {}:{}",
+                            std::string{ T{ip_header->ip6_src} },
+                            ntohs(tcp_header->th_sport),
+                            std::string{ T{ip_header->ip6_dst} },
+                            ntohs(tcp_header->th_dport));
+                    }
+                    else
+                    {
+                        // SYN retransmission for a connection we already redirect (see the IPv4
+                        // path): refresh the timestamp and rewrite it to the local proxy instead
+                        // of leaking the retransmit to the real destination.
+                        it->second.second = std::chrono::steady_clock::now();
+                    }
                 }
                 else
                 {

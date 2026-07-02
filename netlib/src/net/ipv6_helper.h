@@ -155,7 +155,10 @@ namespace net
             }
             else if (protocol == IPPROTO_UDP && udp_header != nullptr)
             {
-                udp_header->th_sum = checksum;
+                // RFC 768 / RFC 8200: a UDP checksum that computes to 0 must be transmitted as
+                // 0xFFFF. Over IPv6 a zero UDP checksum is illegal and receivers MUST drop the
+                // datagram, so emitting 0 here would make proxied UDP silently disappear.
+                udp_header->th_sum = (checksum != 0) ? checksum : static_cast<uint16_t>(0xFFFF);
             }
             else if (protocol == IPPROTO_ICMPV6 && icmp_header != nullptr)
             {

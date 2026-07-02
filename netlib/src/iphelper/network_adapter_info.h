@@ -1422,11 +1422,19 @@ namespace iphelper
         /// 3. Not software loopback
         /// </summary>
         /// <returns>vector of network_adapter_info</returns>
-        static std::vector<network_adapter_info> get_external_network_connections()
+        static std::vector<network_adapter_info> get_external_network_connections(bool* enumeration_succeeded = nullptr)
         {
             std::vector<network_adapter_info> ret_val;
             unsigned long dw_size = 0;
             PMIB_IF_TABLE2 mib_table = nullptr;
+
+            // Distinguish a genuine "no external adapters" result (succeeded, empty) from an
+            // enumeration FAILURE (API/allocation error). Callers that unfilter adapters based
+            // on this list must not treat a transient failure as "no adapters" (fail-open), so
+            // we default to failure and set success only once enumeration actually completes.
+            bool succeeded = false;
+            if (enumeration_succeeded)
+                *enumeration_succeeded = false;
 
             SetLastError(ERROR_SUCCESS);
 
@@ -1493,6 +1501,7 @@ namespace iphelper
                             current_address = current_address->Next;
                         }
 
+                        succeeded = true; // enumeration completed
                         break;
                     }
                     // In case of insufficient buffer size we try to recover by reallocating buffer
@@ -1510,10 +1519,19 @@ namespace iphelper
                 {
                     SetLastError(error_code);
                 }
+                else
+                {
+                    // NO_ERROR with no buffer overflow means there genuinely are no adapters
+                    // to report: an empty-but-valid result, not a failure.
+                    succeeded = true;
+                }
             }
 
             // Free interface table
             FreeMibTable(mib_table);
+
+            if (enumeration_succeeded)
+                *enumeration_succeeded = succeeded;
 
             return ret_val;
         }

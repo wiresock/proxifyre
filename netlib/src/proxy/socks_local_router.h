@@ -458,7 +458,10 @@ namespace proxy
         {
             using namespace std::string_literals;
 
-            if (pcap_log_stream) {
+            // Test the MEMBER, not the constructor parameter: pcap_log_stream was moved-from into
+            // pcap_log_stream_ on the initializer list above, so `if (pcap_log_stream)` was always
+            // false and pcap logging was silently never enabled.
+            if (pcap_log_stream_) {
                 pcap_logger_.emplace(*pcap_log_stream_);
             }
 
@@ -597,6 +600,58 @@ namespace proxy
          * @return false if the operation was already active at the start of this function, otherwise true
          *         (even if there were errors starting the operation).
          */
+        /**
+         * @brief Rolls back a partially- or fully-started router. Used by both the packet-filter
+         *        start-failure path and start()'s exception handler. Safe on partial state: proxy
+         *        stop() and stop_thread_pool() are idempotent and the resolver join is guarded by
+         *        joinable(). Proxies are stopped OUTSIDE lock_ (proxy cleanup threads may contend
+         *        for the same mutex, so holding lock_ across a stop() can deadlock).
+         */
+        void start_failure_cleanup()
+        {
+            if (!this->cancel_notify_ip_interface_change())
+            {
+                NETLIB_LOG(
+                    log_level::error, "cancel_notify_ip_interface_change has failed, lasterror: {}",
+                    GetLastError());
+            }
+
+            std::vector<std::pair<s5_tcp_proxy_server*, s5_udp_proxy_server*>> proxies_to_stop;
+            std::vector<std::pair<s5_tcp_proxy_server_v6*, s5_udp_proxy_server_v6*>> proxies_to_stop_v6;
+            {
+                std::shared_lock lock(lock_);
+                proxies_to_stop.reserve(proxy_servers_.size());
+                for (auto& [tcp, udp] : proxy_servers_)
+                    proxies_to_stop.emplace_back(tcp.get(), udp.get());
+
+                proxies_to_stop_v6.reserve(proxy_servers_v6_.size());
+                for (auto& [tcp, udp] : proxy_servers_v6_)
+                    proxies_to_stop_v6.emplace_back(tcp.get(), udp.get());
+            }
+
+            for (auto& [tcp, udp] : proxies_to_stop)
+            {
+                if (tcp) tcp->stop();
+                if (udp) udp->stop();
+            }
+
+            for (auto& [tcp, udp] : proxies_to_stop_v6)
+            {
+                if (tcp) tcp->stop();
+                if (udp) udp->stop();
+            }
+
+            io_port_.stop_thread_pool();
+
+            is_active_.store(false);
+
+            resolver_should_exit_.store(true);
+            process_resolve_buffer_queue_cv_.notify_all();
+
+            if (process_resolve_thread_.joinable())
+                process_resolve_thread_.join();
+        }
+
         bool start()
         {
             // Serialize lifecycle operations (start/stop/add_socks5_proxy) so
@@ -618,6 +673,13 @@ namespace proxy
             resolver_should_exit_.store(false);
             resolve_queue_dropped_packets_.store(0, std::memory_order_relaxed);
             resolve_queue_alloc_failures_.store(0, std::memory_order_relaxed);
+
+            // Exception safety: any throw after the is_active_ CAS above must not escape with
+            // is_active_ still true (a half-started router that stop()/the destructor would then
+            // mishandle). Wrap the whole bring-up; the catch at the end rolls back via
+            // start_failure_cleanup(). Body indentation is left unchanged to keep the diff focused.
+            try
+            {
 
             if (!packet_filter_)
             {
@@ -730,68 +792,27 @@ namespace proxy
             {
                 NETLIB_LOG(log_level::error, "Failed to start NDIS packet filter");
 
-                // Attempt to cancel notification of IP interface changes.
-                // Log on failure but continue with cleanup either way: the
-                // packet filter never started, so proxies, the IOCP thread
-                // pool, and the resolver thread must all be torn down
-                // regardless of whether cancel_notify_ip_interface_change
-                // succeeded.
-                if (!this->cancel_notify_ip_interface_change())
-                {
-                    NETLIB_LOG(
-                        log_level::error, "cancel_notify_ip_interface_change has failed, lasterror: {}",
-                        GetLastError());
-                }
-
-                // Collect raw proxy pointers under lock_ but stop them outside
-                // the lock. Proxy cleanup threads may need to acquire the
-                // same mutex, so holding lock_ across stop() can deadlock.
-                // This mirrors the pattern used in stop().
-                std::vector<std::pair<s5_tcp_proxy_server*, s5_udp_proxy_server*>> proxies_to_stop;
-                std::vector<std::pair<s5_tcp_proxy_server_v6*, s5_udp_proxy_server_v6*>> proxies_to_stop_v6;
-                {
-                    std::shared_lock lock(lock_);
-                    proxies_to_stop.reserve(proxy_servers_.size());
-                    for (auto& [tcp, udp] : proxy_servers_)
-                        proxies_to_stop.emplace_back(tcp.get(), udp.get());
-
-                    proxies_to_stop_v6.reserve(proxy_servers_v6_.size());
-                    for (auto& [tcp, udp] : proxy_servers_v6_)
-                        proxies_to_stop_v6.emplace_back(tcp.get(), udp.get());
-                }
-
-                // Stop all proxies without holding lock_.
-                for (auto& [tcp, udp] : proxies_to_stop)
-                {
-                    if (tcp)
-                        tcp->stop();
-
-                    if (udp)
-                        udp->stop();
-                }
-
-                for (auto& [tcp, udp] : proxies_to_stop_v6)
-                {
-                    if (tcp)
-                        tcp->stop();
-
-                    if (udp)
-                        udp->stop();
-                }
-
-                // Stop the thread pool associated with the I/O completion port.
-                io_port_.stop_thread_pool();
-
-                is_active_.store(false);
-
-                // The packet filter never started in this error branch, so
-                // no callback thread can still be enqueuing — safe to
-                // signal resolver shutdown directly.
-                resolver_should_exit_.store(true);
-                process_resolve_buffer_queue_cv_.notify_all();
-
-                if (process_resolve_thread_.joinable())
-                    process_resolve_thread_.join();
+                // Everything this start() brought up must be torn down (the packet filter never
+                // started). Shared with the exception handler below.
+                start_failure_cleanup();
+            }
+            }
+            catch (const std::exception& e)
+            {
+                // Any throw after the is_active_ CAS (e.g. io_port_.start_thread_pool() ->
+                // std::system_error on thread-create failure, update_network_configuration() ->
+                // std::bad_alloc, or std::thread construction failing) would otherwise unwind with
+                // is_active_ still true, leaving a half-started router that a later stop()/destructor
+                // acts on incorrectly. Roll back to a clean inactive state, then report failure.
+                NETLIB_LOG(log_level::error, "Exception while starting the router: {}; rolled back", e.what());
+                start_failure_cleanup();
+                return false;
+            }
+            catch (...)
+            {
+                NETLIB_LOG(log_level::error, "Unknown exception while starting the router; rolled back");
+                start_failure_cleanup();
+                return false;
             }
 
             return is_active_;
@@ -1153,20 +1174,10 @@ namespace proxy
             const auto udp_in_filter = create_filter(IPPROTO_UDP, ndisapi::direction_t::in, proxy_endpoint.value().ip,
                                                      proxy_endpoint.value().port);
 
-            // Add the filters to a filter list
-            // Apply all the filters to the network traffic
-            if (protocols == both || protocols == udp)
-            {
-                static_filters_.add_filter_back(tcp_out_filter);
-                static_filters_.add_filter_back(tcp_in_filter);
-                static_filters_.add_filter_back(udp_out_filter);
-                static_filters_.add_filter_back(udp_in_filter);
-            }
-            else if (protocols == tcp)
-            {
-                static_filters_.add_filter_back(tcp_out_filter);
-                static_filters_.add_filter_back(tcp_in_filter);
-            }
+            // NOTE: the static PASS filters for the upstream endpoint are installed only AFTER
+            // the proxy pair is successfully built and (optionally) started -- see below, just
+            // before proxy_servers_ is updated. Installing them here (before build/start) leaked
+            // orphaned driver filters on every failure path.
 
             try
             {
@@ -1259,6 +1270,25 @@ namespace proxy
                     {
                         disable_ipv6_listeners();
                     }
+                }
+
+                // Install the static PASS filters for the upstream endpoint only NOW that the
+                // proxy pair has been successfully built and (if requested) started. add_filter_back
+                // commits immediately to the driver, so installing earlier leaked orphaned filters
+                // on every failure path (build_proxy_pair throwing, or a required listener failing
+                // to start and returning {}). Kept under lifecycle_lock and outside lock_, mirroring
+                // the original lock scope.
+                if (protocols == both || protocols == udp)
+                {
+                    static_filters_.add_filter_back(tcp_out_filter);
+                    static_filters_.add_filter_back(tcp_in_filter);
+                    static_filters_.add_filter_back(udp_out_filter);
+                    static_filters_.add_filter_back(udp_in_filter);
+                }
+                else if (protocols == tcp)
+                {
+                    static_filters_.add_filter_back(tcp_out_filter);
+                    static_filters_.add_filter_back(tcp_in_filter);
                 }
 
                 // Lock the mutex to safely add the proxy servers to the shared data
@@ -2543,7 +2573,24 @@ namespace proxy
         void update_network_configuration()
         {
             const auto ndis_adapters = packet_filter_->get_interface_list();
-            const auto configured_interfaces = iphelper::network_adapter_info::get_external_network_connections();
+            bool enumeration_succeeded = false;
+            const auto configured_interfaces =
+                iphelper::network_adapter_info::get_external_network_connections(&enumeration_succeeded);
+
+            // Fail SAFE, not open. An empty result is ambiguous: it can mean "no external
+            // adapters" OR that enumeration failed (transient API/allocation error, e.g. under
+            // memory pressure during a network-change storm). If we cannot trust the list, do
+            // NOT rebuild the filter set from it: an empty set would unfilter every interface
+            // and send all matched applications' traffic direct, bypassing the proxy. Keep the
+            // current filter state and let the next change notification retry.
+            if (!enumeration_succeeded)
+            {
+                NETLIB_LOG(log_level::warning,
+                    "update_network_configuration: network adapter enumeration failed; "
+                    "preserving current filter state to avoid a proxy-bypass.");
+                return;
+            }
+
             std::unordered_set<std::string> adapters_to_filter;
 
             for (const auto& adapter : configured_interfaces)
@@ -2580,11 +2627,17 @@ namespace proxy
                 }
             }
 
-            {
-                std::shared_lock lock(adapters_to_filter_lock_);
-                if (adapters_to_filter_ == adapters_to_filter)
-                    return;
-            }
+            // Serialize compare -> reprogram driver -> store as ONE atomic critical section.
+            // This function is reentrant: it runs from start() and from the NotifyIpInterfaceChange
+            // system-thread callback. Splitting the "did it change?" check from the driver
+            // reprogramming and the stored-set update lets two concurrent runs both pass the check,
+            // both drive filter/unfilter, and race their stores -- leaving adapters_to_filter_ out
+            // of sync with the actual NDIS filter state. Hold the exclusive lock across the whole
+            // decision so the stored set always reflects the last programming applied to the driver.
+            std::unique_lock lock(adapters_to_filter_lock_);
+
+            if (adapters_to_filter_ == adapters_to_filter)
+                return;
 
             for (const auto& adapter : ndis_adapters)
             {
@@ -2600,10 +2653,7 @@ namespace proxy
                 }
             }
 
-            {
-                std::unique_lock lock(adapters_to_filter_lock_);
-                adapters_to_filter_ = std::move(adapters_to_filter);
-            }
+            adapters_to_filter_ = std::move(adapters_to_filter);
         }
         
         /**

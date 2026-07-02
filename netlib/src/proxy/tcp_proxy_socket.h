@@ -749,6 +749,64 @@ namespace proxy
         }
 
         /**
+         * @brief Handles a graceful FIN (0-byte read) on one relay direction WITHOUT tearing down
+         *        the in-flight send on the opposite socket.
+         *
+         * The previous behavior called close_client() on any 0-byte relay read, which does
+         * shutdown(SD_BOTH) + CancelIoEx() on BOTH sockets -- cancelling a WSASend still carrying
+         * already-received relay data and truncating the transfer (e.g. a close/length-delimited
+         * download whose final chunk is still in flight to the client when the server FINs).
+         *
+         * Instead, mark the session completed (so no new relay I/O is started) and let the existing
+         * drain path in process_send_buffer_complete() flush the buffered/in-flight data and then
+         * close once it has caught up. If nothing is in flight there is nothing to drain, so close
+         * immediately to avoid lingering until the idle reaper.
+         *
+         * NOTE: this preserves data integrity for the common case (a side finishes sending, then
+         * FINs). It does not implement full bidirectional half-close (a peer that half-closes its
+         * send side yet keeps reading the reverse direction); such flows still terminate cleanly
+         * with no truncation of already-received data, just without a reverse-path continuation.
+         *
+         * @param is_local true if the FIN was read on the local socket, false if on the remote.
+         */
+        void on_peer_read_shutdown(const bool is_local)
+        {
+            std::scoped_lock lock(lock_);
+
+            if (connection_status_ == connection_status::client_completed)
+                return; // already draining or closed
+
+            timestamp_ = std::chrono::steady_clock::now();
+            connection_status_ = connection_status::client_completed;
+
+            // Stop receiving from the side that FIN'd; no more data will arrive there.
+            const SOCKET fin_socket = is_local ? local_socket_ : remote_socket_;
+            if (fin_socket != static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                if (shutdown(fin_socket, SD_RECEIVE) == SOCKET_ERROR)
+                {
+                    const auto error = WSAGetLastError();
+                    NETLIB_DEBUG("on_peer_read_shutdown: shutdown(SD_RECEIVE) failed: {}", error);
+                }
+            }
+
+            // If a send is in flight in EITHER direction, let its completion
+            // (process_send_buffer_complete) flush any remaining buffered bytes and then close once
+            // caught up -- closing now would CancelIoEx that send and truncate it. Only when both
+            // directions are idle is there nothing to drain, so close immediately (otherwise the
+            // session would linger until the idle reaper).
+            if (remote_send_buf_.len == 0 && local_send_buf_.len == 0)
+            {
+                NETLIB_DEBUG("on_peer_read_shutdown: no in-flight send to drain, closing now");
+                close_client<true>(true, is_local);
+            }
+            else
+            {
+                NETLIB_DEBUG("on_peer_read_shutdown: draining in-flight send(s) before close");
+            }
+        }
+
+        /**
          * @brief Determines if the proxy session is ready for removal and performs idle cleanup.
          *
          * This method checks whether both the local and remote sockets are closed and all I/O buffers
@@ -1986,6 +2044,12 @@ namespace proxy
                 else {
                     NETLIB_DEBUG("start_data_relay: Local socket closed successfully");
                 }
+
+                // We just closed local_socket_ by hand. Invalidate it BEFORE close_client() so its
+                // remote branch (which re-checks `local_socket_ != INVALID_SOCKET`) does not close
+                // the same handle a second time -- a double closesocket that, with Windows handle
+                // recycling, could tear down an unrelated socket opened concurrently.
+                local_socket_ = INVALID_SOCKET;
 
                 NETLIB_DEBUG("start_data_relay: Closing remote client due to WSARecv failure");
                 close_client(true, false);
