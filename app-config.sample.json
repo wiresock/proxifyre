@@ -1,0 +1,14 @@
+{
+    "logLevel": "Error",
+    "bypassLan": false,
+    "proxies": [
+        {
+            "appNames": ["chrome", "firefox"],
+            "socks5ProxyEndpoint": "proxy.example.com:1080",
+            "username": "REPLACE_WITH_USERNAME_OR_LEAVE_EMPTY",
+            "password": "REPLACE_WITH_PASSWORD_OR_LEAVE_EMPTY",
+            "supportedProtocols": ["TCP", "UDP"]
+        }
+    ],
+    "excludes": []
+}

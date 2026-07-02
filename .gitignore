@@ -43,3 +43,17 @@ ProxiFyre/bin
 ProxiFyre/obj
 .vs/
 /packages/
+
+# --- Runtime configuration with secrets: NEVER commit ---
+# app-config.json contains plaintext SOCKS5 usernames/passwords. Track only the
+# placeholder app-config.sample.json (which is deliberately NOT ignored below).
+app-config.json
+**/app-config.json
+!app-config.sample.json
+
+# --- Build output trees not covered by the extension rules above ---
+/bin/
+socksify/x64/
+socksify/Win32/
+socksify/ARM64/
+*.aps

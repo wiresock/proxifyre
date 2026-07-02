@@ -620,6 +620,15 @@ namespace proxy
 
                 NETLIB_DEBUG("process_receive_buffer_complete: Allocating I/O context for local send operation");
 
+                // A zero-length datagram from the remote SOCKS5 relay must not be forwarded:
+                // allocate_io_context() only allocates a packet buffer when size != 0, so with
+                // io_size == 0 it returns a context whose wsa_buf is null and the send path
+                // below would dereference it (wsa_buf->len / memmove) and crash the process.
+                // remote_socket_ is connect()'d to the relay endpoint, so a malicious/malformed
+                // server (or a spoofed 0-byte datagram from that address) can reach this path.
+                // Skip the local send for empty datagrams and just re-arm the remote receive.
+                if (io_size > 0)
+                {
                 // Use shared_from_this() to get shared_ptr
                 if (auto* io_context_send_to_local = socks5_udp_per_io_context<T>::allocate_io_context(
                     proxy_io_operation::relay_io_write, this->shared_from_this(), true, io_size);
@@ -660,6 +669,7 @@ namespace proxy
                 {
                     NETLIB_ERROR("process_receive_buffer_complete: Failed to allocate I/O context for local send");
                 }
+                } // if (io_size > 0): empty relay datagrams fall straight through to the re-arm
 
                 NETLIB_DEBUG("process_receive_buffer_complete: Initiating new receive operation on remote socket");
 

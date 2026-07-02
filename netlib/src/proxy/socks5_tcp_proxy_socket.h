@@ -133,15 +133,36 @@ namespace proxy
         {
             if (io_context->is_local == false)
             {
+                // Unlike the base handler and the relay completion handlers, this SOCKS5 override
+                // must guard the negotiation state (current_state_, ident_resp_, the negotiate
+                // io-contexts, remote_socket_) against a concurrent close_client()/stop() running
+                // on another IOCP thread. The IOCP dispatcher calls this handler WITHOUT holding
+                // lock_, so acquire it here. Every close_client() reachable from this handler uses
+                // the AlreadyLocked (<true>) form to avoid re-locking the non-recursive mutex; the
+                // lock is released before start_data_relay() (which locks internally).
+                std::unique_lock<std::mutex> lock(tcp_proxy_socket<T>::lock_);
+
                 if (current_state_ == socks5_state::login_sent)
                 {
+                    // The method-selection reply is 2 bytes but TCP may deliver it across multiple
+                    // completions. Accumulate before parsing; a short read otherwise reads a stale
+                    // ident_resp_.method (0 -> mis-parsed as NO-AUTH) and desyncs the handshake.
+                    ident_resp_received_ += io_size;
+                    if (ident_resp_received_ < sizeof(socks5_ident_resp))
+                    {
+                        static_cast<void>(start_negotiate_receive(
+                            reinterpret_cast<char*>(&ident_resp_) + ident_resp_received_,
+                            static_cast<ULONG>(sizeof(socks5_ident_resp)) - ident_resp_received_));
+                        return;
+                    }
+
                     current_state_ = socks5_state::login_responded;
 
                     if ((ident_resp_.version != 5) ||
                         (ident_resp_.method == 0xFF))
                     {
                         // SOCKS v5 identification or authentication failed
-                        tcp_proxy_socket<T>::close_client(true, false);
+                        tcp_proxy_socket<T>::close_client<true>(true, false);
                     }
                     else
                     {
@@ -161,7 +182,7 @@ namespace proxy
                                 // [SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but USERNAME exceeds maximum possible length
                                 )
                             {
-                                tcp_proxy_socket<T>::close_client(true, false);
+                                tcp_proxy_socket<T>::close_client<true>(true, false);
                             }
                             else
                             {
@@ -179,18 +200,19 @@ namespace proxy
                                         &io_context_send_negotiate_.wsa_buf,
                                         &io_context_send_negotiate_) == SOCKET_ERROR)
                                     {
-                                        tcp_proxy_socket<T>::close_client(false, false);
+                                        tcp_proxy_socket<T>::close_client<true>(false, false);
                                         return;
                                     }
 
                                     current_state_ = socks5_state::password_sent;
+                                    ident_resp_received_ = 0; // reset for the 2-byte auth reply
 
                                     if (this->post_recv(
                                         tcp_proxy_socket<T>::remote_socket_,
                                         &io_context_recv_negotiate_.wsa_buf,
                                         &io_context_recv_negotiate_) == SOCKET_ERROR)
                                     {
-                                        tcp_proxy_socket<T>::close_client(true, false);
+                                        tcp_proxy_socket<T>::close_client<true>(true, false);
                                     }
                                 }
                             }
@@ -203,12 +225,22 @@ namespace proxy
                 }
                 else if (current_state_ == socks5_state::password_sent)
                 {
+                    // Accumulate the 2-byte auth reply the same way (see login_sent).
+                    ident_resp_received_ += io_size;
+                    if (ident_resp_received_ < sizeof(socks5_ident_resp))
+                    {
+                        static_cast<void>(start_negotiate_receive(
+                            reinterpret_cast<char*>(&ident_resp_) + ident_resp_received_,
+                            static_cast<ULONG>(sizeof(socks5_ident_resp)) - ident_resp_received_));
+                        return;
+                    }
+
                     current_state_ = socks5_state::password_responded;
 
                     if (ident_resp_.method != 0)
                     {
                         // SOCKS v5 identification or authentication failed
-                        tcp_proxy_socket<T>::close_client(true, false);
+                        tcp_proxy_socket<T>::close_client<true>(true, false);
                     }
                     else
                     {
@@ -226,7 +258,7 @@ namespace proxy
                         (connect_response_header_.reply != 0))
                     {
                         // SOCKS v5 connect failed
-                        tcp_proxy_socket<T>::close_client(true, false);
+                        tcp_proxy_socket<T>::close_client<true>(true, false);
                         return;
                     }
 
@@ -263,7 +295,7 @@ namespace proxy
                         break;
 
                     default:
-                        tcp_proxy_socket<T>::close_client(true, false);
+                        tcp_proxy_socket<T>::close_client<true>(true, false);
                         break;
                     }
                 }
@@ -290,6 +322,11 @@ namespace proxy
                         return;
                     }
 
+                    // start_data_relay() locks lock_ internally (via close_client on its error
+                    // paths), so release our lock first to avoid re-locking the non-recursive
+                    // mutex. This is the terminal action of the handler; no shared negotiation
+                    // state is touched afterwards.
+                    lock.unlock();
                     tcp_proxy_socket<T>::start_data_relay();
                 }
             }
@@ -324,7 +361,8 @@ namespace proxy
                 &io_context_recv_negotiate_.wsa_buf,
                 &io_context_recv_negotiate_) == SOCKET_ERROR)
             {
-                tcp_proxy_socket<T>::close_client(true, false);
+                // Only reached from process_receive_negotiate_complete, which holds lock_.
+                tcp_proxy_socket<T>::close_client<true>(true, false);
                 return false;
             }
 
@@ -382,7 +420,8 @@ namespace proxy
                 &io_context_send_negotiate_.wsa_buf,
                 &io_context_send_negotiate_) == SOCKET_ERROR)
             {
-                tcp_proxy_socket<T>::close_client(false, false);
+                // Only reached from process_receive_negotiate_complete, which holds lock_.
+                tcp_proxy_socket<T>::close_client<true>(false, false);
                 return;
             }
 
@@ -435,6 +474,10 @@ namespace proxy
         unsigned char* connect_reply_buffer_{ nullptr };
         ULONG connect_reply_expected_{ 0 };
         ULONG connect_reply_received_{ 0 };
+        // Bytes accumulated so far for a fixed 2-byte reply (method-selection / auth). TCP may
+        // split the 2 bytes across completions; without accumulating, a 1-byte read would be
+        // parsed as a complete reply against stale ident_resp_ contents.
+        ULONG ident_resp_received_{ 0 };
         socks5_username_auth username_auth_{};
 
     protected:
@@ -507,6 +550,7 @@ namespace proxy
                     }
 
                     current_state_ = socks5_state::login_sent;
+                    ident_resp_received_ = 0; // reset for the 2-byte method-selection reply
                     NETLIB_DEBUG("SOCKS5 identification request sent, waiting for response");
 
                     if (this->post_recv(

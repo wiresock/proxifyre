@@ -762,6 +762,112 @@ namespace iphelper
             return nullptr;
         }
 
+        /// <summary>
+        /// Returns true and fills out_addr (network-order IPv4) if the 16-byte IPv6 address is an
+        /// IPv4-mapped address (::ffff:a.b.c.d).
+        /// </summary>
+        static bool is_v4_mapped_address(const UCHAR(&addr)[16], uint32_t& out_addr) noexcept
+        {
+            for (int i = 0; i < 10; ++i)
+                if (addr[i] != 0) return false;
+            if (addr[10] != 0xFF || addr[11] != 0xFF) return false;
+            // Copy the 4 embedded bytes as-is: they are the IPv4 address in network byte order,
+            // matching ip_address_v4's in_addr::S_un.S_addr layout on any host endianness.
+            memcpy(&out_addr, &addr[12], sizeof(out_addr));
+            return true;
+        }
+
+        /// <summary>
+        /// Returns true if the 16-byte IPv6 address is the unspecified address (::).
+        /// </summary>
+        static bool is_unspecified_v6_address(const UCHAR(&addr)[16]) noexcept
+        {
+            for (int i = 0; i < 16; ++i)
+                if (addr[i] != 0) return false;
+            return true;
+        }
+
+        /// <summary>
+        /// Enumerates the AF_INET6 TCP table and folds IPv4-mapped rows into the v4 session map.
+        /// </summary>
+        /// <remarks>
+        /// Dual-stack sockets (AF_INET6 with IPV6_V6ONLY=0) that carry IPv4 traffic appear ONLY in
+        /// the AF_INET6 connection table, as IPv4-mapped (::ffff:a.b.c.d) rows -- never in the
+        /// AF_INET table. The IPv4 packet handler consults only this v4 instance, so without folding
+        /// them in their traffic cannot be attributed and leaks un-proxied. Only called from (and so
+        /// only instantiated for) the v4 instance.
+        /// </remarks>
+        void add_v4_mapped_tcp_sessions(tcp_hashtable_t& tcp_to_app)
+        {
+            DWORD size = 0;
+            if (::GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET6,
+                TCP_TABLE_OWNER_MODULE_CONNECTIONS, 0) != ERROR_INSUFFICIENT_BUFFER || size == 0)
+                return;
+
+            auto buffer = std::make_unique<char[]>(size);
+            if (::GetExtendedTcpTable(buffer.get(), &size, FALSE, AF_INET6,
+                TCP_TABLE_OWNER_MODULE_CONNECTIONS, 0) != NO_ERROR)
+                return;
+
+            auto* table = reinterpret_cast<PMIB_TCP6TABLE_OWNER_MODULE>(buffer.get());
+            for (size_t i = 0; i < table->dwNumEntries; ++i)
+            {
+                uint32_t local_v4 = 0, remote_v4 = 0;
+                if (!is_v4_mapped_address(table->table[i].ucLocalAddr, local_v4) ||
+                    !is_v4_mapped_address(table->table[i].ucRemoteAddr, remote_v4))
+                    continue; // genuine IPv6 connection: handled by the v6 instance
+
+                if (auto process_ptr = process_tcp_entry_v6(&table->table[i]))
+                {
+                    // Keep a genuine AF_INET entry if one already exists for this 4-tuple.
+                    tcp_to_app.try_emplace(
+                        net::ip_session<net::ip_address_v4>(
+                            net::ip_address_v4{ local_v4 },
+                            net::ip_address_v4{ remote_v4 },
+                            ntohs(static_cast<uint16_t>(table->table[i].dwLocalPort)),
+                            ntohs(static_cast<uint16_t>(table->table[i].dwRemotePort))),
+                        std::move(process_ptr));
+                }
+            }
+        }
+
+        /// <summary>
+        /// Enumerates the AF_INET6 UDP table and folds IPv4-mapped and unspecified ([::]) rows into
+        /// the v4 endpoint map. An unspecified bind maps to the 0.0.0.0 wildcard, which the IPv4 UDP
+        /// handler already matches via its wildcard fallback. Only called from (and so only
+        /// instantiated for) the v4 instance.
+        /// </summary>
+        void add_v4_mapped_udp_endpoints(udp_hashtable_t& udp_to_app)
+        {
+            DWORD size = 0;
+            if (::GetExtendedUdpTable(nullptr, &size, FALSE, AF_INET6,
+                UDP_TABLE_OWNER_MODULE, 0) != ERROR_INSUFFICIENT_BUFFER || size == 0)
+                return;
+
+            auto buffer = std::make_unique<char[]>(size);
+            if (::GetExtendedUdpTable(buffer.get(), &size, FALSE, AF_INET6,
+                UDP_TABLE_OWNER_MODULE, 0) != NO_ERROR)
+                return;
+
+            auto* table = reinterpret_cast<PMIB_UDP6TABLE_OWNER_MODULE>(buffer.get());
+            for (size_t i = 0; i < table->dwNumEntries; ++i)
+            {
+                uint32_t local_v4 = 0;
+                const bool mapped = is_v4_mapped_address(table->table[i].ucLocalAddr, local_v4);
+                if (!mapped && !is_unspecified_v6_address(table->table[i].ucLocalAddr))
+                    continue; // genuine IPv6-only endpoint
+
+                if (auto process_ptr = process_udp_entry_v6(&table->table[i]))
+                {
+                    udp_to_app.try_emplace(
+                        net::ip_endpoint<net::ip_address_v4>(
+                            net::ip_address_v4{ mapped ? local_v4 : 0u },
+                            ntohs(static_cast<uint16_t>(table->table[i].dwLocalPort))),
+                        std::move(process_ptr));
+                }
+            }
+        }
+
         /**
          * @brief Initializes the TCP connection hash table from system state.
          *
@@ -813,6 +919,11 @@ namespace iphelper
                                     = std::move(process_ptr);
                             }
                         }
+
+                        // Fold dual-stack (IPv4-mapped) connections from the AF_INET6 table so they
+                        // are attributable by the IPv4 packet handler (they never appear in the
+                        // AF_INET table). See add_v4_mapped_tcp_sessions.
+                        add_v4_mapped_tcp_sessions(tcp_to_app);
                     }
                     else {
                         auto* table = reinterpret_cast<PMIB_TCP6TABLE_OWNER_MODULE>(table_buffer_tcp_.get());
@@ -890,6 +1001,11 @@ namespace iphelper
                                     = std::move(process_ptr);
                             }
                         }
+
+                        // Fold dual-stack (IPv4-mapped and unspecified) endpoints from the AF_INET6
+                        // table so they are attributable by the IPv4 packet handler. See
+                        // add_v4_mapped_udp_endpoints.
+                        add_v4_mapped_udp_endpoints(udp_to_app);
                     }
                     else {
                         auto* table = reinterpret_cast<PMIB_UDP6TABLE_OWNER_MODULE>(table_buffer_udp_.get());

@@ -283,6 +283,22 @@ namespace proxy
 
             end_server_ = false;
 
+            // A prior stop() closes and INVALIDATES the listening socket, but it is created only
+            // in the constructor (create_server_socket()). The router reuses the same
+            // tcp_proxy_server objects across stop()/start() cycles, so without recreating the
+            // socket here start() would relaunch the worker threads around INVALID_SOCKET and the
+            // accept loop (WSAAccept) would exit immediately -- a "running" server that silently
+            // accepts nothing. Recreate it (and fail start() if that fails).
+            if (server_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                if (!create_server_socket())
+                {
+                    NETLIB_ERROR("tcp_proxy_server::start: failed to recreate the listening socket");
+                    end_server_ = true;
+                    return false;
+                }
+            }
+
             sock_array_events_.reserve(connections_array_size);
 
             sock_array_events_.push_back(std::make_tuple(WSACreateEvent(),
@@ -372,6 +388,17 @@ namespace proxy
                             if ((io_operation == proxy_io_operation::relay_io_read) ||
                                 (io_operation == proxy_io_operation::negotiate_io_read))
                             {
+                                // A graceful FIN (status == true, 0 bytes) on the DATA relay path is
+                                // a half-close: do NOT hard-close, which would CancelIoEx an in-flight
+                                // send and truncate already-received data. Drain it instead. Hard
+                                // errors (status == false) and any 0-byte negotiation read still abort
+                                // immediately.
+                                if (status && io_operation == proxy_io_operation::relay_io_read)
+                                {
+                                    proxy_socket->on_peer_read_shutdown(io_context->is_local);
+                                    return false;
+                                }
+
                                 proxy_socket->close_client(true, io_context->is_local);
                                 return false;
                             }
@@ -430,6 +457,22 @@ namespace proxy
                     end_server_ = true;
                     return false;
                 }
+            }
+            else
+            {
+                // The throwaway registration socket could not be created, so no IOCP completion
+                // handler was registered and completion_key_ is unset. Launching the workers now
+                // would produce an inert server: every session's overlapped I/O would post but
+                // never complete, so outstanding_io_ never drains and sessions pin forever. Treat
+                // this exactly like an association failure and fail start().
+                NETLIB_ERROR("tcp_proxy_server::start: failed to create IOCP registration socket");
+                if (std::get<0>(sock_array_events_[0]) != WSA_INVALID_EVENT)
+                {
+                    WSACloseEvent(std::get<0>(sock_array_events_[0]));
+                }
+                sock_array_events_.clear();
+                end_server_ = true;
+                return false;
             }
 
             proxy_server_ = std::thread(&tcp_proxy_server::start_proxy_thread, this);
@@ -896,6 +939,7 @@ namespace proxy
 
             // The client_service structure specifies the address family,
             // IP address, and port of the server to be connected to.
+            WSAEVENT tracked_event = WSA_INVALID_EVENT;
             {
                 std::scoped_lock lock(lock_);
 
@@ -930,8 +974,31 @@ namespace proxy
                     return false;
                 }
 
+                // Remember the event we just tracked so a synchronous connect() failure below can
+                // find and erase this entry (see undo_pending_entry).
+                tracked_event = std::get<0>(sock_array_events_.back());
+
                 WSASetEvent(std::get<0>(sock_array_events_[0]));
             }
+
+            // If connect() fails synchronously (below) the entry pushed above would otherwise
+            // linger forever: its event is never signaled (the socket is closed), so it
+            // permanently occupies one of the limited slots and leaks the WSAEVENT. After
+            // connections_array_size such failures the server rejects every new connection until
+            // it is restarted. Erase our entry on those paths.
+            auto undo_pending_entry = [this, tracked_event]()
+            {
+                std::scoped_lock lock(lock_);
+                for (auto it = sock_array_events_.begin(); it != sock_array_events_.end(); ++it)
+                {
+                    if (std::get<0>(*it) == tracked_event)
+                    {
+                        WSACloseEvent(std::get<0>(*it));
+                        sock_array_events_.erase(it);
+                        break;
+                    }
+                }
+            };
 
             NETLIB_DEBUG("connect_to_remote_host: Initiating connection to {}:{}", remote_ip, remote_port);
 
@@ -951,6 +1018,7 @@ namespace proxy
                         NETLIB_WARNING("connect_to_remote_host: IPv4 connect failed: {}", error);
                         shutdown(remote_socket, SD_BOTH);
                         closesocket(remote_socket);
+                        undo_pending_entry();
                         return false;
                     }
                     NETLIB_DEBUG("connect_to_remote_host: IPv4 connection in progress (WSAEWOULDBLOCK)");
@@ -975,6 +1043,7 @@ namespace proxy
                         NETLIB_WARNING("connect_to_remote_host: IPv6 connect failed: {}", error);
                         shutdown(remote_socket, SD_BOTH);
                         closesocket(remote_socket);
+                        undo_pending_entry();
                         return false;
                     }
                     else
@@ -1074,6 +1143,20 @@ namespace proxy
                 if (end_server_ == true)
                     break;
 
+                // WaitForMultipleObjects can return WAIT_FAILED (0xFFFFFFFF) -- e.g. when a handle
+                // in the array has become invalid. An INFINITE wait never returns WAIT_TIMEOUT, but
+                // guard against any out-of-range value: using it as a vector index below would be a
+                // wild out-of-bounds access. Log, back off briefly to avoid a hot spin if the
+                // condition persists, and rebuild the wait set on the next iteration.
+                if (event_index == WAIT_FAILED || event_index >= wait_events.size())
+                {
+                    NETLIB_ERROR("connect_to_remote_host_thread: wait returned invalid index {} (last error {})",
+                        static_cast<unsigned long>(event_index), GetLastError());
+                    using namespace std::chrono_literals;
+                    std::this_thread::sleep_for(100ms);
+                    continue;
+                }
+
                 if (event_index != 0)
                 {
                     std::scoped_lock lock(lock_);
@@ -1098,11 +1181,25 @@ namespace proxy
                             std::move(negotiate_ctx),
                             logger::log_level_, logger::log_stream_);
 
+                        // The socket now OWNS both handles: its destructor closes them if any step
+                        // below throws (stack-unwinding destroys `socket` before the catch runs).
+                        // Null the local copies so the catch does NOT close them a second time --
+                        // a double closesocket that, with handle recycling, could tear down an
+                        // unrelated socket. If make_shared itself had thrown we would not reach here,
+                        // and the catch would still correctly close the un-transferred handles.
+                        local_socket = INVALID_SOCKET;
+                        remote_socket = INVALID_SOCKET;
+
                         // Initialize I/O contexts - can throw std::bad_weak_ptr or std::runtime_error
                         socket->initialize_io_contexts();
 
-                        // Associate with completion port
-                        socket->associate_to_completion_port(completion_key_, completion_port_);
+                        // Associate with completion port. A false return means no completion handler
+                        // was registered (CreateIoCompletionPort failed, or completion_key_ is
+                        // invalid): the session's overlapped I/O would post but never complete, so
+                        // outstanding_io_ would never drain and the session would pin forever. Treat
+                        // it as a fatal init error so the catch tears the half-built session down.
+                        if (!socket->associate_to_completion_port(completion_key_, completion_port_))
+                            throw std::runtime_error("associate_to_completion_port failed");
 
                         // Start the socket
                         socket->start();

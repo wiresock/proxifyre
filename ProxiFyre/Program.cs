@@ -121,7 +121,19 @@ namespace ProxiFyre
                 }
             }
 
-            _socksify.Start();
+            // Start() propagates failure from the whole native chain (e.g. the Windows Packet
+            // Filter driver is not installed or failed to load). Do NOT ignore it: swallowing
+            // the failure leaves the Windows service in the RUNNING state while proxying nothing,
+            // silently sending configured applications' traffic direct/un-proxied. Throw so
+            // Topshelf fails the start and the SCM reports the failure.
+            if (!_socksify.Start())
+            {
+                const string message =
+                    "Failed to start the ProxiFyre proxy engine. Ensure the Windows Packet Filter " +
+                    "(NDIS lightweight filter) driver is installed and running, then restart the service.";
+                LoggerInstance.Error(message);
+                throw new InvalidOperationException(message);
+            }
 
             // Inform user that the application is running
             if (_logLevel >= LogLevel.Info)

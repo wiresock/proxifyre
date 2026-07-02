@@ -1,5 +1,13 @@
 #pragma once
 
+// SIO_UDP_CONNRESET normally comes from <mstcpip.h>, but this header-only file relies on the
+// project's master include order and the macro is not reliably visible here across SDKs. Provide
+// the standard fallback definition; _WSAIOW/IOC_VENDOR are from <winsock2.h>, which is always
+// included ahead of this file.
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+
 namespace proxy
 {
     /**
@@ -301,7 +309,9 @@ namespace proxy
                         auto result = true;
                         auto server_read = false;
 
-                        std::lock_guard lock(lock_);
+                        // unique_lock (not lock_guard): connect_to_remote_host() releases and
+                        // re-acquires this around its blocking SOCKS5 negotiation (see H2 there).
+                        std::unique_lock lock(lock_);
 
                         auto io_context = static_cast<per_io_context_t*>(povlp);
 
@@ -323,7 +333,7 @@ namespace proxy
                             {
                                 do
                                 {
-                                    if (false == connect_to_remote_host(io_context))
+                                    if (false == connect_to_remote_host(io_context, lock))
                                     {
                                         result = false;
                                         break;
@@ -687,6 +697,21 @@ namespace proxy
             if (server_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
             {
                 return false;
+            }
+
+            // Disable SIO_UDP_CONNRESET. Without this, a prior datagram that elicited an ICMP
+            // port-unreachable from a since-closed local peer makes the NEXT WSARecvFrom complete
+            // with WSAECONNRESET, which would tear down the server read loop and stop proxying all
+            // UDP. UDP is connectionless, so this "connection reset" is spurious -- suppress it.
+            {
+                BOOL new_behavior = FALSE;
+                DWORD bytes_returned = 0;
+                if (WSAIoctl(server_socket_, SIO_UDP_CONNRESET, &new_behavior, sizeof(new_behavior),
+                    nullptr, 0, &bytes_returned, nullptr, nullptr) == SOCKET_ERROR)
+                {
+                    NETLIB_WARNING("create_server_socket: failed to disable SIO_UDP_CONNRESET: {}",
+                        WSAGetLastError());
+                }
             }
 
             if constexpr (address_type_t::af_type == AF_INET)
@@ -1272,7 +1297,7 @@ namespace proxy
          *                   On success, its proxy_socket_ptr is set to the active proxy socket.
          * @return True if the relay session was established or already exists, false on failure.
          */
-        bool connect_to_remote_host(per_io_context_t* io_context)
+        bool connect_to_remote_host(per_io_context_t* io_context, std::unique_lock<std::mutex>& lock)
         {
             uint16_t local_peer_port = 0;
             address_type_t local_peer_address{};
@@ -1308,6 +1333,18 @@ namespace proxy
                 remote_address,
                 remote_port);
 
+            // H2: the SOCKS5 TCP connect + ASSOCIATE below is fully blocking (connect_with_timeout
+            // up to ~5s, then several blocking send/recv each bounded only by a ~5s timeout), so it
+            // can hold lock_ for 10s+. Under lock_ that freezes EVERY other UDP completion for this
+            // proxy plus clear_thread and stop(). Release lock_ across the blocking negotiation and
+            // relay-socket setup. This is safe: the server read is serialized (recv_from_sa_ and
+            // server_receive_buffer_ are not re-armed until after this returns), the new session is
+            // not yet in proxy_sockets_ so no other completion can touch it, and our completion's
+            // active_iocp_operations_ guard is still held so stop() cannot tear the server down
+            // underneath us. We re-acquire lock_ and re-check end_server_ before publishing. Every
+            // early return below re-acquires lock_ first: the caller relies on it being held.
+            lock.unlock();
+
             auto socks5_tcp_socket = connect_to_socks5_proxy(remote_address, remote_port);
             if (socks5_tcp_socket == INVALID_SOCKET)
             {
@@ -1315,6 +1352,7 @@ namespace proxy
                     "connect_to_remote_host: Failed to connect to SOCKS5 proxy: {}:{}",
                     remote_address,
                     remote_port);
+                lock.lock();
                 return false;
             }
 
@@ -1327,6 +1365,7 @@ namespace proxy
                     remote_port);
 
                 closesocket(socks5_tcp_socket);
+                lock.lock();
                 return false;
             }
 
@@ -1344,7 +1383,21 @@ namespace proxy
                     "connect_to_remote_host: Failed to create UDP socket: {}",
                     WSAGetLastError());
                 closesocket(socks5_tcp_socket);
+                lock.lock();
                 return false;
+            }
+
+            // Suppress spurious WSAECONNRESET on the relay socket too (see create_server_socket):
+            // an ICMP port-unreachable from the SOCKS5 UDP relay must not kill this relay's reads.
+            {
+                BOOL new_behavior = FALSE;
+                DWORD bytes_returned = 0;
+                if (WSAIoctl(remote_socket, SIO_UDP_CONNRESET, &new_behavior, sizeof(new_behavior),
+                    nullptr, 0, &bytes_returned, nullptr, nullptr) == SOCKET_ERROR)
+                {
+                    NETLIB_WARNING("connect_to_remote_host: failed to disable SIO_UDP_CONNRESET on relay socket: {}",
+                        WSAGetLastError());
+                }
             }
 
             if constexpr (address_type_t::af_type == AF_INET)
@@ -1362,6 +1415,7 @@ namespace proxy
                     NETLIB_DEBUG(
                         "connect_to_remote_host: Failed to bind UDP socket: {}",
                         WSAGetLastError());
+                    lock.lock();
                     return false;
                 }
             }
@@ -1391,6 +1445,7 @@ namespace proxy
                     NETLIB_DEBUG(
                         "connect_to_remote_host: Failed to bind UDP socket: {}",
                         WSAGetLastError());
+                    lock.lock();
                     return false;
                 }
             }
@@ -1411,6 +1466,7 @@ namespace proxy
                     NETLIB_DEBUG(
                         "connect_to_remote_host: Failed to connect UDP socket: {}",
                         WSAGetLastError());
+                    lock.lock();
                     return false;
                 }
             }
@@ -1429,8 +1485,34 @@ namespace proxy
                     NETLIB_DEBUG(
                         "connect_to_remote_host: Failed to connect UDP socket: {}",
                         WSAGetLastError());
+                    lock.lock();
                     return false;
                 }
+            }
+
+            // Re-acquire lock_ to publish the session (see the lock.unlock() above). From here on
+            // proxy_sockets_ and the server members are accessed under the lock again.
+            lock.lock();
+
+            // stop() may have set end_server_ during the unlocked window. It is currently blocked in
+            // its drain loop waiting on our active_iocp_operations_ guard, so the server object is
+            // still alive -- but we must not create a NEW session during shutdown (it would only be
+            // torn down again). Abort cleanly.
+            if (end_server_.load(std::memory_order_acquire))
+            {
+                closesocket(remote_socket);
+                closesocket(socks5_tcp_socket);
+                return false;
+            }
+
+            // Server reads are serialized so no concurrent creation for this source port is expected,
+            // but guard defensively: if an entry appeared meanwhile, drop what we built and use it.
+            if (auto existing = proxy_sockets_.find(local_peer_port); existing != proxy_sockets_.end())
+            {
+                closesocket(remote_socket);
+                closesocket(socks5_tcp_socket);
+                io_context->proxy_socket_ptr = existing->second;
+                return true;
             }
 
             auto [it, result] = proxy_sockets_.emplace(local_peer_port,
