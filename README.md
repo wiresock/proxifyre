@@ -37,7 +37,7 @@ LogLevel can have one of the following values which define the detail of the log
 
 ### appNames
 
-- A **name** entry (no slashes) matches the executable's filename, **anchored** to the whole name.  
+- A **name** entry (one that contains neither `/` nor `\`) matches the executable's filename, **anchored** to the whole name.  
   - `firefox` or `firefox.exe` both match `firefox.exe`.  
   - It matches the exact name, or the name followed by an extension such as `.exe` — so `firefox` matches `firefox.exe` but **not** `NewFirefox.exe` (a short pattern won't match an unrelated executable).  
 - If the pattern contains **slashes or backslashes**, it is treated as a **pathname** and matched as a substring of the process's full path.  
