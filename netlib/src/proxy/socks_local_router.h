@@ -1483,8 +1483,14 @@ namespace proxy
          * - If the pattern/exclusion entry contains path separators ("/" or "\\"), it matches against the process's full path_name
          * - If the pattern/exclusion entry contains no path separators, it matches against the process's name only
          *
-         * The pattern matching is performed case-insensitively using substring matching.
-         * The function automatically excludes the current process (by process ID) to prevent self-matching.
+         * Matching semantics:
+         *   - A NAME entry (no path separator) matches the process's bare name ANCHORED to the
+         *     whole filename: an exact match, or the entry as the filename stem immediately followed
+         *     by '.' (so a short pattern like "NOTE" does not match "EVILNOTE.EXE").
+         *   - A PATH entry (contains '/' or '\\') matches as a SUBSTRING against the full path.
+         *   - An EMPTY entry ("") is the CATCH-ALL: it matches ANY process not in the exclusion list.
+         * Comparisons are effectively case-insensitive because inputs are already upper-cased by the
+         * caller. The function automatically excludes the current process (by PID) to prevent self-matching.
          *
          * @param app The application name or pattern to check against the process details.
          *            Can be either a simple process name (e.g., "notepad.exe") or a path-based pattern (e.g., "C:\\Windows\\System32\\notepad.exe").

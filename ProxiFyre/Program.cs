@@ -210,14 +210,26 @@ namespace ProxiFyre
                 if (proxy.AppNames == null)
                     proxy.AppNames = new List<string>();
                 else
-                    proxy.AppNames.RemoveAll(s => s == null || (s.Length > 0 && string.IsNullOrWhiteSpace(s)));
+                    // Remove null and whitespace-only entries but keep "": IsNullOrWhiteSpace is
+                    // already true for null/""/whitespace, so `s != string.Empty && IsNullOrWhiteSpace(s)`
+                    // drops null and "   " while preserving the "" catch-all.
+                    proxy.AppNames.RemoveAll(s => s != string.Empty && string.IsNullOrWhiteSpace(s));
 
                 if (proxy.AppNames.Count == 0)
                     LoggerInstance.Warn(
                         $"Proxy '{proxy.Socks5ProxyEndpoint}' has no application names; it will not match any process.");
                 else if (proxy.AppNames.Contains(string.Empty))
+                {
                     LoggerInstance.Info(
                         $"Proxy '{proxy.Socks5ProxyEndpoint}' has an empty application name; it will match ALL processes (catch-all) except excluded ones.");
+
+                    // Proxies are matched in configuration order and the first match wins, so a
+                    // catch-all shadows every proxy listed after it. Warn if it is not last.
+                    if (!ReferenceEquals(proxy, settings.Proxies[settings.Proxies.Count - 1]))
+                        LoggerInstance.Warn(
+                            $"Proxy '{proxy.Socks5ProxyEndpoint}' is a catch-all but is not the last configured proxy; " +
+                            "proxies listed after it will be shadowed and never matched. Move it to the end of \"proxies\".");
+                }
 
                 // Warn on unrecognized protocol tokens: SupportedProtocolsParse only counts
                 // "TCP"/"UDP" and ignores anything else, defaulting to BOTH only when neither
