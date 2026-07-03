@@ -39,11 +39,11 @@ LogLevel can have one of the following values which define the detail of the log
 
 - A **name** entry (no slashes) matches the executable's filename, **anchored** to the whole name.  
   - `firefox` or `firefox.exe` both match `firefox.exe`.  
-  - It matches the exact name, or the name followed by an extension — so `firefox` matches `firefox.exe` but **not** `NewFirefox.exe` (a short pattern won't match an unrelated executable).  
+  - It matches the exact name, or the name followed by an extension such as `.exe` — so `firefox` matches `firefox.exe` but **not** `NewFirefox.exe` (a short pattern won't match an unrelated executable).  
 - If the pattern contains **slashes or backslashes**, it is treated as a **pathname** and matched as a substring of the process's full path.  
   - This allows targeting an entire folder (useful for UWP apps).  
   - Example: `C:\\Program Files\\WindowsApps\\ROBLOXCORPORATION.ROBLOX`  
-- An **empty string** (`""`) is a **catch-all** that matches every process not listed in `excludes`. Use it for a default/fallback proxy — and list it **last**, since proxies are matched in order and a catch-all shadows any proxy defined after it.
+- An **empty string** (`""`) is a **catch-all** that matches every process not already matched by a prior proxy and not listed in `excludes`. Use it for a default/fallback proxy — and place this proxy **last** in the `proxies` list, since proxies are matched in order and a catch-all shadows any proxy defined after it.
 
 ---
 
