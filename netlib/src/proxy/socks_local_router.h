@@ -1530,11 +1530,18 @@ namespace proxy
                     && name[entry.size()] == L'.';
             };
 
-            // Check exclusion list
+            // Check exclusion list. Excludes use SUBSTRING matching for BOTH name and path forms.
+            // An exclusion is a safety / bypass rule ("keep this app OUT of the proxy"), so it must
+            // be permissive -- matching more processes rather than fewer -- to avoid accidentally
+            // routing traffic the user meant to keep direct (a real risk when combined with a ""
+            // catch-all proxy). This preserves the pre-v2.3.0 behavior; appName matching above stays
+            // anchored (where being precise is the safe direction). An empty entry is ignored so it
+            // cannot match every process.
             for (const auto& excluded_entry : excluded_list_) {
-                if ((excluded_entry.find(L'\\') != std::wstring::npos || excluded_entry.find(L'/') != std::wstring::npos)
-                    ? (process->path_name.find(excluded_entry) != std::wstring::npos)
-                    : name_matches(process->name, excluded_entry)
+                if (!excluded_entry.empty() &&
+                    ((excluded_entry.find(L'\\') != std::wstring::npos || excluded_entry.find(L'/') != std::wstring::npos)
+                        ? (process->path_name.find(excluded_entry) != std::wstring::npos)
+                        : (process->name.find(excluded_entry) != std::wstring::npos))
                     ) {
                     process->excluded = true;
                     return false; // Excluded

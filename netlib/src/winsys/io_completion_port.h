@@ -354,7 +354,7 @@ namespace netlib::winsys
                     {
                         state->callback(num_bytes, overlapped_ptr, ok);
                     }
-                    catch (const std::exception& e)
+                    catch ([[maybe_unused]] const std::exception& e)
                     {
 #ifdef _DEBUG
                         try

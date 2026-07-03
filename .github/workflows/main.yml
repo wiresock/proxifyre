@@ -70,7 +70,9 @@ jobs:
           path: 'bin\\exe\\${{ matrix.platform }}\\${{ matrix.build_configuration }}\\ProxiFyre-${{ github.ref_name }}-${{ matrix.platform }}.zip'
 
   upload-release:
-    if: ${{ always() }}
+    # Only publish when EVERY matrix build (x86/x64/ARM64) succeeded. Without this gate the job
+    # ran on `always()`, so a single failed platform build would publish a partial release that is
+    # missing an architecture's zip -- and `skipIfReleaseExists` then blocks a retry from fixing it.
     needs: build-and-package
     runs-on: windows-latest
     steps:

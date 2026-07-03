@@ -20,10 +20,16 @@ foreach ($file in $files) {
     $extractPath = "./" + $file -replace ".zip", ""
     Expand-Archive -Path $downloadPath -DestinationPath $extractPath -Force
 
-    # Sign the executable inside the extracted folder
-    $exePath = $extractPath + "/ProxiFyre.exe"
-    & signtool sign /fd sha1 /t http://timestamp.digicert.com /n "The Anti-Cloud Corporation" $exePath
-    & signtool sign /as /td sha256 /fd sha256 /tr http://timestamp.digicert.com /n "The Anti-Cloud Corporation" $exePath
+    # Sign every shipped binary inside the extracted folder: the launcher (ProxiFyre.exe) AND the
+    # native engine (socksify.dll). Signing only the .exe left the DLL that actually performs the
+    # packet redirection unsigned, which undermines signature-verification / allow-listing policies.
+    $binaries = @("ProxiFyre.exe", "socksify.dll") |
+        ForEach-Object { Join-Path $extractPath $_ } |
+        Where-Object { Test-Path $_ }
+    foreach ($bin in $binaries) {
+        & signtool sign /fd sha1 /t http://timestamp.digicert.com /n "The Anti-Cloud Corporation" $bin
+        & signtool sign /as /td sha256 /fd sha256 /tr http://timestamp.digicert.com /n "The Anti-Cloud Corporation" $bin
+    }
 
     # Change to the directory of the folder to be zipped
     Push-Location $extractPath
