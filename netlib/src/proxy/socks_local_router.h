@@ -1535,6 +1535,14 @@ namespace proxy
                 }
             }
 
+            // An empty app pattern is the catch-all: match ANY process not excluded above. This
+            // restores the long-standing behavior (before matching was anchored) where a substring
+            // find("") matched every process, letting an appNames entry of "" act as a default /
+            // fallback proxy for all remaining traffic. Non-empty names keep the anchored matching
+            // above (so a short pattern still can't match an unrelated process).
+            if (app.empty())
+                return true;
+
             return (app.find(L'\\') != std::wstring::npos || app.find(L'/') != std::wstring::npos)
                     ? (process->path_name.find(app) != std::wstring::npos)
                     : name_matches(process->name, app);

@@ -202,17 +202,22 @@ namespace ProxiFyre
                     throw new InvalidOperationException(message);
                 }
 
-                // Drop null/blank application names so they are never marshalled
-                // to the unmanaged layer, where marshal_as<std::wstring> throws
-                // on a null String^.
+                // Drop null and whitespace-only application names (a null String^ throws in
+                // marshal_as<std::wstring>, and "   " is a typo that matches nothing), but PRESERVE
+                // an explicit empty string "": it is the catch-all that matches EVERY process (see
+                // match_app_name in the native router), so it must reach the unmanaged layer. A
+                // plain IsNullOrWhiteSpace would strip "" too and silently disable that catch-all.
                 if (proxy.AppNames == null)
                     proxy.AppNames = new List<string>();
                 else
-                    proxy.AppNames.RemoveAll(string.IsNullOrWhiteSpace);
+                    proxy.AppNames.RemoveAll(s => s == null || (s.Length > 0 && string.IsNullOrWhiteSpace(s)));
 
                 if (proxy.AppNames.Count == 0)
                     LoggerInstance.Warn(
                         $"Proxy '{proxy.Socks5ProxyEndpoint}' has no application names; it will not match any process.");
+                else if (proxy.AppNames.Contains(string.Empty))
+                    LoggerInstance.Info(
+                        $"Proxy '{proxy.Socks5ProxyEndpoint}' has an empty application name; it will match ALL processes (catch-all) except excluded ones.");
 
                 // Warn on unrecognized protocol tokens: SupportedProtocolsParse only counts
                 // "TCP"/"UDP" and ignores anything else, defaulting to BOTH only when neither
