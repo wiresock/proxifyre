@@ -1539,7 +1539,7 @@ namespace proxy
             // cannot match every process.
             for (const auto& excluded_entry : excluded_list_) {
                 if (!excluded_entry.empty() &&
-                    ((excluded_entry.find(L'\\') != std::wstring::npos || excluded_entry.find(L'/') != std::wstring::npos)
+                    ((excluded_entry.find_first_of(L"\\/") != std::wstring::npos)
                         ? (process->path_name.find(excluded_entry) != std::wstring::npos)
                         : (process->name.find(excluded_entry) != std::wstring::npos))
                     ) {
