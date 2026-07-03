@@ -59,6 +59,8 @@ LogLevel can have one of the following values which define the detail of the log
 The `excludes` section lets you define processes that should **bypass the proxy**.  
 This is useful when you want a global proxy setup but keep certain apps (like browsers, local dev tools, or games) unproxied.
 
+Unlike `appNames`, exclusion entries match by **substring** (a name is matched against the process's filename, a path-form entry against the full path) — so `chrome` also excludes `chrome_proxy.exe`. Exclusion is deliberately permissive so an app you meant to keep direct is not accidentally proxied.
+
 Example:
 
 ```json

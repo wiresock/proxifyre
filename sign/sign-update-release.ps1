@@ -20,10 +20,22 @@ foreach ($file in $files) {
     $extractPath = "./" + $file -replace ".zip", ""
     Expand-Archive -Path $downloadPath -DestinationPath $extractPath -Force
 
-    # Sign the executable inside the extracted folder
-    $exePath = $extractPath + "/ProxiFyre.exe"
-    & signtool sign /fd sha1 /t http://timestamp.digicert.com /n "The Anti-Cloud Corporation" $exePath
-    & signtool sign /as /td sha256 /fd sha256 /tr http://timestamp.digicert.com /n "The Anti-Cloud Corporation" $exePath
+    # Sign every shipped binary inside the extracted folder: the launcher (ProxiFyre.exe) AND the
+    # native engine (socksify.dll). Signing only the .exe left the DLL that actually performs the
+    # packet redirection unsigned, which undermines signature-verification / allow-listing policies.
+    # Fail LOUDLY: assert each expected binary exists and abort if signtool reports an error, so a
+    # missing/partially-signed artifact is never published as a "signed" release.
+    $expectedBinaries = @("ProxiFyre.exe", "socksify.dll")
+    foreach ($name in $expectedBinaries) {
+        $bin = Join-Path $extractPath $name
+        if (-not (Test-Path $bin)) {
+            throw "Expected binary '$name' not found in '$extractPath'; aborting signing of $file."
+        }
+        & signtool sign /fd sha1 /t http://timestamp.digicert.com /n "The Anti-Cloud Corporation" $bin
+        if ($LASTEXITCODE -ne 0) { throw "signtool (SHA-1) failed for '$bin' (exit $LASTEXITCODE)." }
+        & signtool sign /as /td sha256 /fd sha256 /tr http://timestamp.digicert.com /n "The Anti-Cloud Corporation" $bin
+        if ($LASTEXITCODE -ne 0) { throw "signtool (SHA-256 append) failed for '$bin' (exit $LASTEXITCODE)." }
+    }
 
     # Change to the directory of the folder to be zipped
     Push-Location $extractPath
