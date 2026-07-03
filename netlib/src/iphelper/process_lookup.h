@@ -799,15 +799,21 @@ namespace iphelper
         /// </remarks>
         void add_v4_mapped_tcp_sessions(tcp_hashtable_t& tcp_to_app)
         {
-            DWORD size = 0;
-            if (::GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET6,
-                TCP_TABLE_OWNER_MODULE_CONNECTIONS, 0) != ERROR_INSUFFICIENT_BUFFER || size == 0)
-                return;
-
+            // Grow-and-retry with a real buffer from the first call (mirrors initialize_tcp_table).
+            // Starting size >= sizeof(the table struct) also satisfies GetExtendedTcpTable's SAL
+            // precondition on *pdwSize, avoiding a spurious null-sizing-call analysis warning.
+            DWORD size = sizeof(MIB_TCP6TABLE_OWNER_MODULE);
             auto buffer = std::make_unique<char[]>(size);
-            if (::GetExtendedTcpTable(buffer.get(), &size, FALSE, AF_INET6,
-                TCP_TABLE_OWNER_MODULE_CONNECTIONS, 0) != NO_ERROR)
-                return;
+            for (;;)
+            {
+                const auto result = ::GetExtendedTcpTable(buffer.get(), &size, FALSE, AF_INET6,
+                    TCP_TABLE_OWNER_MODULE_CONNECTIONS, 0);
+                if (result == NO_ERROR)
+                    break;
+                if (result != ERROR_INSUFFICIENT_BUFFER)
+                    return;
+                buffer = std::make_unique<char[]>(size);
+            }
 
             auto* table = reinterpret_cast<PMIB_TCP6TABLE_OWNER_MODULE>(buffer.get());
             for (size_t i = 0; i < table->dwNumEntries; ++i)
@@ -839,15 +845,21 @@ namespace iphelper
         /// </summary>
         void add_v4_mapped_udp_endpoints(udp_hashtable_t& udp_to_app)
         {
-            DWORD size = 0;
-            if (::GetExtendedUdpTable(nullptr, &size, FALSE, AF_INET6,
-                UDP_TABLE_OWNER_MODULE, 0) != ERROR_INSUFFICIENT_BUFFER || size == 0)
-                return;
-
+            // Grow-and-retry with a real buffer from the first call (mirrors initialize_udp_table).
+            // Starting size >= sizeof(the table struct) also satisfies GetExtendedUdpTable's SAL
+            // precondition on *pdwSize, avoiding a spurious null-sizing-call analysis warning.
+            DWORD size = sizeof(MIB_UDP6TABLE_OWNER_MODULE);
             auto buffer = std::make_unique<char[]>(size);
-            if (::GetExtendedUdpTable(buffer.get(), &size, FALSE, AF_INET6,
-                UDP_TABLE_OWNER_MODULE, 0) != NO_ERROR)
-                return;
+            for (;;)
+            {
+                const auto result = ::GetExtendedUdpTable(buffer.get(), &size, FALSE, AF_INET6,
+                    UDP_TABLE_OWNER_MODULE, 0);
+                if (result == NO_ERROR)
+                    break;
+                if (result != ERROR_INSUFFICIENT_BUFFER)
+                    return;
+                buffer = std::make_unique<char[]>(size);
+            }
 
             auto* table = reinterpret_cast<PMIB_UDP6TABLE_OWNER_MODULE>(buffer.get());
             for (size_t i = 0; i < table->dwNumEntries; ++i)
