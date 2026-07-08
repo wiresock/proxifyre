@@ -76,12 +76,40 @@ namespace iphelper
         }
 
         /// <summary>
+        /// Validates SOCKET_ADDRESS for safe use: non-null pointer, length within
+        /// [sizeof(sockaddr) .. sizeof(SOCKADDR_STORAGE)], and family-appropriate
+        /// minimum size (sizeof(sockaddr_in) for AF_INET, sizeof(sockaddr_in6) for AF_INET6).
+        /// </summary>
+        /// <param name="address">SOCKET_ADDRESS to validate</param>
+        /// <returns>true if the address is safe to copy, false otherwise</returns>
+        [[nodiscard]] static bool is_valid_socket_address(const SOCKET_ADDRESS& address) noexcept
+        {
+            if (address.lpSockaddr == nullptr ||
+                address.iSockaddrLength < static_cast<int>(sizeof(sockaddr)) ||
+                static_cast<size_t>(address.iSockaddrLength) > sizeof(SOCKADDR_STORAGE))
+                return false;
+
+            switch (address.lpSockaddr->sa_family)
+            {
+            case AF_INET:
+                return address.iSockaddrLength >= static_cast<int>(sizeof(sockaddr_in));
+            case AF_INET6:
+                return address.iSockaddrLength >= static_cast<int>(sizeof(sockaddr_in6));
+            default:
+                return false;
+            }
+        }
+
+        /// <summary>
         /// Constructs ip_address_info from SOCKET_ADDRESS
         /// </summary>
         /// <param name="address"></param>
         explicit ip_address_info(const SOCKET_ADDRESS& address) : SOCKADDR_STORAGE()
         {
-            memcpy(this, address.lpSockaddr, address.iSockaddrLength);
+            if (is_valid_socket_address(address))
+            {
+                memcpy(this, address.lpSockaddr, address.iSockaddrLength);
+            }
         }
 
         /// <summary>
@@ -316,21 +344,24 @@ namespace iphelper
             auto* unicast_address = address->FirstUnicastAddress;
             while (unicast_address)
             {
-                unicast_address_list_.emplace_back(unicast_address->Address);
+                if (ip_address_info::is_valid_socket_address(unicast_address->Address))
+                    unicast_address_list_.emplace_back(unicast_address->Address);
                 unicast_address = unicast_address->Next;
             }
 
             auto* dns_address = address->FirstDnsServerAddress;
             while (dns_address)
             {
-                dns_server_address_list_.emplace_back(dns_address->Address);
+                if (ip_address_info::is_valid_socket_address(dns_address->Address))
+                    dns_server_address_list_.emplace_back(dns_address->Address);
                 dns_address = dns_address->Next;
             }
 
             auto* gateway_address = address->FirstGatewayAddress;
             while (gateway_address)
             {
-                gateway_address_list_.emplace_back(gateway_address->Address);
+                if (ip_address_info::is_valid_socket_address(gateway_address->Address))
+                    gateway_address_list_.emplace_back(gateway_address->Address);
                 gateway_address = gateway_address->Next;
             }
 
@@ -513,6 +544,25 @@ namespace iphelper
                     }
                 }
             return gateway_address_list_;
+        }
+
+        /// <summary>
+        /// Returns true if this adapter has at least one configured gateway of the given
+        /// address family (AF_INET or AF_INET6).
+        /// </summary>
+        /// <remarks>
+        /// Unlike <see cref="get_gateway_address_list"/>, this method does NOT trigger hardware
+        /// address resolution (<c>ResolveIpNetEntry2</c>) for Ethernet/Wi-Fi adapters. It only
+        /// inspects the gateway list populated at construction time, so it is safe to call on
+        /// hot paths that merely need to know whether an IPv4 or IPv6 default-route family is
+        /// configured - e.g. when selecting the default uplink for network-lock drop filters.
+        /// </remarks>
+        /// <param name="address_family">Address family to look for, typically <c>AF_INET</c> or <c>AF_INET6</c>.</param>
+        /// <returns>true if at least one gateway of that family is configured, false otherwise.</returns>
+        [[nodiscard]] bool has_gateway_of_family(const ADDRESS_FAMILY address_family) const noexcept
+        {
+            return std::ranges::any_of(gateway_address_list_,
+                [address_family](const ip_gateway_info& gw) noexcept { return gw.ss_family == address_family; });
         }
 
         /// <summary>
@@ -1083,10 +1133,14 @@ namespace iphelper
         }
 
         /// <summary>
-        /// Deletes routing table entries by MIB_IPFORWARD_ROW2 pointers
+        /// Deletes routing table entries by MIB_IPFORWARD_ROW2 pointers. Every row is attempted
+        /// regardless of individual failures so as much of the batch as possible gets removed,
+        /// but the thread-local GetLastError() is set to the *first* failing DeleteIpForwardEntry2
+        /// code (not the last), so callers can rely on "first failure wins" semantics.
         /// </summary>
         /// <param name="address">vector of MIB_IPFORWARD_ROW2 unique pointers</param>
-        /// <returns>true if successful, false otherwise</returns>
+        /// <returns>true if every delete succeeded, false otherwise (GetLastError() carries the
+        /// first failure's code in the false case)</returns>
         [[nodiscard]] static bool delete_routes(std::vector<std::unique_ptr<MIB_IPFORWARD_ROW2>> address)
         {
             auto status = true;
@@ -1095,10 +1149,13 @@ namespace iphelper
 
             std::ranges::for_each(address, [&status](auto&& a) noexcept
             {
-                if (const auto error_code = ::DeleteIpForwardEntry2(a.get()); NOERROR != error_code)
+                if (const auto error_code = ::DeleteIpForwardEntry2(a.get()); NO_ERROR != error_code)
                 {
-                    status = false;
-                    ::SetLastError(error_code);
+                    if (status) // only the first failing row records its error code
+                    {
+                        ::SetLastError(error_code);
+                        status = false;
+                    }
                 }
             });
 
@@ -1132,6 +1189,70 @@ namespace iphelper
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Aggregate status returned from delete_default_routes(). Separates the
+        /// "found nothing to delete" case from the "found rows but some deletes failed"
+        /// case, and surfaces the last observed DeleteIpForwardEntry2 error code without
+        /// forcing callers to consult thread-local GetLastError() (which may be clobbered
+        /// by unrelated calls between the sweep and the caller reading it).
+        /// </summary>
+        struct default_route_sweep_result  // NOLINT(clang-diagnostic-padded)
+        {
+            std::size_t deleted{ 0 };           ///< rows the sweep successfully removed
+            std::size_t failed{ 0 };            ///< rows that matched but whose DeleteIpForwardEntry2 failed
+            DWORD       last_error{ NO_ERROR }; ///< error code from the last failing DeleteIpForwardEntry2 call
+        };
+
+        /// <summary>
+        /// Deletes any default-route (prefix length 0) rows whose InterfaceLuid matches this
+        /// adapter's LUID. Narrower than reset_adapter_routes(): subnet routes and auto-generated
+        /// entries are preserved, so this is safe to call as a best-effort sweep on an adapter
+        /// that is still in active use.
+        /// </summary>
+        /// <returns>a default_route_sweep_result with per-row counts on success, or
+        /// std::nullopt when the forwarding table itself could not be queried (the
+        /// GetIpForwardTable2 error is propagated via SetLastError in that case).</returns>
+        [[nodiscard]] std::optional<default_route_sweep_result> delete_default_routes() const noexcept
+        {
+            PMIB_IPFORWARD_TABLE2 table = nullptr;
+
+            const auto error_code = GetIpForwardTable2(AF_UNSPEC, &table);
+            if (NO_ERROR != error_code)
+            {
+                SetLastError(error_code);
+                return std::nullopt;
+            }
+
+            default_route_sweep_result result{};
+            for (unsigned i = 0; i < table->NumEntries; ++i)
+            {
+                if (table->Table[i].DestinationPrefix.PrefixLength == 0 &&
+                    table->Table[i].InterfaceLuid == luid_)
+                {
+                    if (const auto delete_status = DeleteIpForwardEntry2(&table->Table[i]); delete_status == NO_ERROR)
+                    {
+                        ++result.deleted;
+                    }
+                    else
+                    {
+                        ++result.failed;
+                        result.last_error = delete_status;
+                    }
+                }
+            }
+
+            FreeMibTable(table);
+
+            // Normalise thread-local GetLastError() so ad-hoc callers that only inspect it see
+            // exactly what this sweep observed: either ERROR_SUCCESS on a clean run (including
+            // the common "nothing matched" case) or the last per-row delete failure code.
+            // Without the explicit success write, a stale unrelated error from earlier in the
+            // thread would linger and be misattributed to the sweep.
+            SetLastError(result.failed > 0 ? result.last_error : ERROR_SUCCESS);
+
+            return result;
         }
 
         /// <summary>
@@ -1445,6 +1566,9 @@ namespace iphelper
                 SetLastError(error_code);
                 return ret_val;
             }
+
+            // Pre-allocate to reduce heap reallocations during emplace_back
+            ret_val.reserve(mib_table->NumEntries);
 
             error_code = GetAdaptersAddresses(AF_UNSPEC,
                 GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
@@ -2047,7 +2171,8 @@ public:
                     dest_address.si_family = AF_INET;
                     dest_address.Ipv4.sin_family = AF_INET;
                     dest_address.Ipv4.sin_addr = ip_address;
-                    MIB_IPFORWARD_ROW2 forward_row{};
+                    MIB_IPFORWARD_ROW2 forward_row;
+                    InitializeIpForwardEntry(&forward_row);
 
                     if (const auto error_code = GetBestRoute2(nullptr, adapter.get_if_index(), nullptr, &dest_address, 0,
                         &forward_row, &best_route_address); NO_ERROR != error_code)
@@ -2078,7 +2203,8 @@ public:
                     dest_address.si_family = AF_INET6;
                     dest_address.Ipv6.sin6_family = AF_INET6;
                     dest_address.Ipv6.sin6_addr = ip_address;
-                    MIB_IPFORWARD_ROW2 forward_row{};
+                    MIB_IPFORWARD_ROW2 forward_row;
+                    InitializeIpForwardEntry(&forward_row);
 
                     if (const auto error_code = GetBestRoute2(nullptr, adapter.get_if_index(), nullptr, &dest_address, 0,
                         &forward_row, &best_route_address); NO_ERROR != error_code)

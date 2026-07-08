@@ -37,13 +37,13 @@ namespace ndisapi
         /// Number of successfully read packets in this block.
         uint32_t packets_success_{ 0 };
         /// Array of packet buffers.
-        std::array<intermediate_buffer, Size> packet_buffer_;
+        std::array<netlib::ndisapi::intermediate_buffer, Size> packet_buffer_;
         /// Array of pointers for batch reading packets.
-        std::array<intermediate_buffer*, Size> read_request_;
+        std::array<netlib::ndisapi::intermediate_buffer*, Size> read_request_;
         /// Vector of pointers to packets to be written to the adapter.
-        std::vector<intermediate_buffer*> write_adapter_request_;
+        std::vector<netlib::ndisapi::intermediate_buffer*> write_adapter_request_;
         /// Vector of pointers to packets to be written up to the protocol stack.
-        std::vector<intermediate_buffer*> write_mstcp_request_;
+        std::vector<netlib::ndisapi::intermediate_buffer*> write_mstcp_request_;
 
     public:
         /**
@@ -67,7 +67,7 @@ namespace ndisapi
          * @brief Returns the array of pointers for batch reading packets.
          * @return Const reference to the read pointer array.
          */
-        [[nodiscard]] const std::array<intermediate_buffer*, Size>& get_read_request() const
+        [[nodiscard]] const std::array<netlib::ndisapi::intermediate_buffer*, Size>& get_read_request() const
         {
             return read_request_;
         }
@@ -76,7 +76,7 @@ namespace ndisapi
          * @brief Returns the vector of pointers for writing packets to the adapter.
          * @return Reference to the write_adapter_request_ vector.
          */
-        [[nodiscard]] std::vector<intermediate_buffer*>& get_write_adapter_request()
+        [[nodiscard]] std::vector<netlib::ndisapi::intermediate_buffer*>& get_write_adapter_request()
         {
             return write_adapter_request_;
         }
@@ -85,7 +85,7 @@ namespace ndisapi
          * @brief Returns the vector of pointers for writing packets up to the protocol stack.
          * @return Reference to the write_mstcp_request_ vector.
          */
-        [[nodiscard]] std::vector<intermediate_buffer*>& get_write_mstcp_request()
+        [[nodiscard]] std::vector<netlib::ndisapi::intermediate_buffer*>& get_write_mstcp_request()
         {
             return write_mstcp_request_;
         }
@@ -95,7 +95,7 @@ namespace ndisapi
          * @param idx Index of the buffer.
          * @return Reference to the buffer at the specified index.
          */
-        intermediate_buffer& operator[](const std::size_t idx)
+        netlib::ndisapi::intermediate_buffer& operator[](const std::size_t idx)
         {
             return packet_buffer_[idx];
         }
@@ -105,7 +105,7 @@ namespace ndisapi
          * @param idx Index of the buffer.
          * @return Const reference to the buffer at the specified index.
          */
-        const intermediate_buffer& operator[](const std::size_t idx) const
+        const netlib::ndisapi::intermediate_buffer& operator[](const std::size_t idx) const
         {
             return packet_buffer_[idx];
         }
@@ -482,7 +482,7 @@ namespace ndisapi
         /// and a reference to the intermediate_buffer containing the packet data. The functor returns a
         /// packet_action struct that determines how the packet should be handled (e.g., passed, dropped, reverted).
         /// </remarks>
-        std::function<packet_action(HANDLE, intermediate_buffer&)> filter_outgoing_packet_ = nullptr;
+        std::function<packet_action(HANDLE, netlib::ndisapi::intermediate_buffer&)> filter_outgoing_packet_ = nullptr;
 
         /// <summary>incoming packet processing functor</summary>
         /// <remarks>
@@ -490,7 +490,7 @@ namespace ndisapi
         /// processing functor, it takes a handle to the adapter and a reference to the intermediate_buffer
         /// containing the packet data. It returns a packet_action struct to determine the packet's fate.
         /// </remarks>
-        std::function<packet_action(HANDLE, intermediate_buffer&)> filter_incoming_packet_ = nullptr;
+        std::function<packet_action(HANDLE, netlib::ndisapi::intermediate_buffer&)> filter_incoming_packet_ = nullptr;
 
         /// <summary>working thread running status</summary>
         /// <remarks>
@@ -974,7 +974,7 @@ namespace ndisapi
             {
                 std::ignore = packet_event_.wait(INFINITE);
                 std::ignore = packet_event_.reset_event();
-            } while (!ReadPacketsUnsorted(reinterpret_cast<PINTERMEDIATE_BUFFER*>(const_cast<intermediate_buffer**>(read_request.data())),
+            } while (!ReadPacketsUnsorted(reinterpret_cast<PINTERMEDIATE_BUFFER*>(const_cast<netlib::ndisapi::intermediate_buffer**>(read_request.data())),
                 (DWORD)read_request.size(),
                 reinterpret_cast<PDWORD>(&packet_block_ptr->get_packets_success())) &&
                 filter_state_ == filter_state::running);

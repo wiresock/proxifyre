@@ -40,8 +40,52 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
     // completes, leaving the matching cleanup to the destructor.
     struct winsock_cleanup_guard
     {
+        winsock_cleanup_guard() noexcept = default;
+
+        explicit winsock_cleanup_guard(const bool engaged) noexcept
+            : engaged(engaged)
+        {
+        }
+
+        ~winsock_cleanup_guard() noexcept
+        {
+            reset();
+        }
+
+        winsock_cleanup_guard(const winsock_cleanup_guard&) = delete;
+        winsock_cleanup_guard& operator=(const winsock_cleanup_guard&) = delete;
+
+        winsock_cleanup_guard(winsock_cleanup_guard&& other) noexcept
+            : engaged(std::exchange(other.engaged, false))
+        {
+        }
+
+        winsock_cleanup_guard& operator=(winsock_cleanup_guard&& other) noexcept
+        {
+            if (this != &other)
+            {
+                reset();
+                engaged = std::exchange(other.engaged, false);
+            }
+
+            return *this;
+        }
+
+        void release() noexcept
+        {
+            engaged = false;
+        }
+
+        void reset() noexcept
+        {
+            if (engaged)
+            {
+                engaged = false;
+                ::WSACleanup();
+            }
+        }
+
         bool engaged = true;
-        ~winsock_cleanup_guard() { if (engaged) ::WSACleanup(); }
     } winsock_guard;
 
     lock_ = std::make_unique<mutex_impl>();
@@ -131,7 +175,7 @@ socksify_unmanaged* socksify_unmanaged::get_instance(const log_level_mx log_leve
 bool socksify_unmanaged::start() const
 {
     using namespace std::string_literals;
-    std::lock_guard lock(lock_->lock);
+    std::scoped_lock lock(lock_->lock);
 
     if (!proxy_->start())
     {
@@ -150,7 +194,7 @@ bool socksify_unmanaged::start() const
 bool socksify_unmanaged::stop() const
 {
     using namespace std::string_literals;
-    std::lock_guard lock(lock_->lock);
+    std::scoped_lock lock(lock_->lock);
 
     if (!proxy_)
     {

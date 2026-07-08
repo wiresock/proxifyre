@@ -201,9 +201,9 @@ namespace proxy
             const log_level log_level = log_level::error,
             std::shared_ptr<std::ostream> log_stream = nullptr)
             : logger(log_level, std::move(log_stream)),
-            proxy_port_(proxy_port),
             completion_port_(completion_port),
-            query_remote_peer_(query_remote_peer_fn)
+            query_remote_peer_(query_remote_peer_fn),
+            proxy_port_(proxy_port)
         {
             if (!create_server_socket())
             {
@@ -900,7 +900,7 @@ namespace proxy
                 // via IPv4-mapped addresses (e.g. ::ffff:127.0.0.1). ProxiFyre's
                 // IPv6 proxy path targets the configured (often IPv4) SOCKS5 server
                 // through its v4-mapped form, so the socket must be dual-stack.
-                DWORD v6_only = 0;
+                constexpr DWORD v6_only = 0;
                 if (setsockopt(remote_socket, IPPROTO_IPV6, IPV6_V6ONLY,
                     reinterpret_cast<const char*>(&v6_only), sizeof(v6_only)) == SOCKET_ERROR)
                 {
@@ -939,7 +939,7 @@ namespace proxy
 
             // The client_service structure specifies the address family,
             // IP address, and port of the server to be connected to.
-            WSAEVENT tracked_event = WSA_INVALID_EVENT;
+            WSAEVENT tracked_event;
             {
                 std::scoped_lock lock(lock_);
 
@@ -1145,8 +1145,8 @@ namespace proxy
 
                 // WaitForMultipleObjects can return WAIT_FAILED (0xFFFFFFFF) -- e.g. when a handle
                 // in the array has become invalid. An INFINITE wait never returns WAIT_TIMEOUT, but
-                // guard against any out-of-range value: using it as a vector index below would be a
-                // wild out-of-bounds access. Log, back off briefly to avoid a hot spin if the
+                // guard against any out-of-range value: using it as a vector index below would be wild out-of-bounds access.
+                // Log, back off briefly to avoid a hot spin if the
                 // condition persists, and rebuild the wait set on the next iteration.
                 if (event_index == WAIT_FAILED || event_index >= wait_events.size())
                 {

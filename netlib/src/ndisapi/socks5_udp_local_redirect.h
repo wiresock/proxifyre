@@ -14,7 +14,7 @@ namespace ndisapi
     * @tparam T IP address type (net::ip_address_v4 or net::ip_address_v6).
     */
     template <net::ip_address T>
-    class socks5_udp_local_redirect : public netlib::log::logger<socks5_udp_local_redirect<T>>
+    class socks5_udp_local_redirect : public netlib::log::logger<socks5_udp_local_redirect<T>>  // NOLINT(clang-diagnostic-padded)
     {
         /// <summary>
         /// NOTE: All ports are in the network byte order
@@ -29,10 +29,6 @@ namespace ndisapi
         /// </summary>
         std::unordered_map<uint16_t, std::chrono::steady_clock::time_point> endpoints_;
         /// <summary>
-        /// Proxy port in network byte order.
-        /// </summary>
-        u_short proxy_port_{};
-        /// <summary>
         /// Mutex for synchronizing access to endpoints_.
         /// </summary>
         std::mutex lock_;
@@ -40,6 +36,10 @@ namespace ndisapi
         /// Thread for cleaning up timed-out UDP endpoints.
         /// </summary>
         std::thread cleanup_thread_;
+        /// <summary>
+        /// Proxy port in network byte order.
+        /// </summary>
+        u_short proxy_port_{};
         /// <summary>
         /// Termination flag for the cleanup_thread_.
         /// </summary>
@@ -59,7 +59,7 @@ namespace ndisapi
                     {
                         {
                             auto current_time = std::chrono::steady_clock::now();
-                            std::lock_guard lock(lock_);
+                            std::scoped_lock lock(lock_);
 
                             tools::generic::erase_if(endpoints_, endpoints_.begin(), endpoints_.end(),
                                 [&current_time, this](auto&& a)
@@ -203,7 +203,7 @@ namespace ndisapi
                     ip_header) +
                     sizeof(DWORD) * ip_header->ip_hl);
 
-                std::lock_guard lock(lock_);
+                std::scoped_lock lock(lock_);
 
                 if (const auto it = endpoints_.find(udp_header->th_sport); it
                     == endpoints_.cend())
@@ -234,7 +234,7 @@ namespace ndisapi
 
                 const auto* udp_header = static_cast<udphdr_ptr>(p_header);
 
-                std::lock_guard lock(lock_);
+                std::scoped_lock lock(lock_);
 
                 if (const auto it = endpoints_.find(udp_header->th_sport); it == endpoints_.cend())
                 {
@@ -288,7 +288,7 @@ namespace ndisapi
                 auto* udp_header = reinterpret_cast<udphdr*>(reinterpret_cast<unsigned char*>(ip_header) +
                     sizeof(DWORD) * ip_header->ip_hl);
 
-                std::lock_guard lock(lock_);
+                std::scoped_lock lock(lock_);
 
                 // existing connection
                 const auto it = endpoints_.find(udp_header->th_sport);
@@ -378,7 +378,7 @@ namespace ndisapi
 
                 auto* udp_header = static_cast<udphdr_ptr>(p_header);
 
-                std::lock_guard lock(lock_);
+                std::scoped_lock lock(lock_);
 
                 const auto it = endpoints_.find(udp_header->th_sport);
 
@@ -484,7 +484,7 @@ namespace ndisapi
                 auto* udp_header = reinterpret_cast<udphdr*>(reinterpret_cast<unsigned char*>(ip_header) +
                     sizeof(DWORD) * ip_header->ip_hl);
 
-                std::lock_guard lock(lock_);
+                std::scoped_lock lock(lock_);
 
                 const auto it = endpoints_.find(udp_header->th_dport);
 
@@ -571,7 +571,7 @@ namespace ndisapi
 
                 auto* udp_header = static_cast<udphdr_ptr>(p_header);
 
-                std::lock_guard lock(lock_);
+                std::scoped_lock lock(lock_);
 
                 const auto it = endpoints_.find(udp_header->th_dport);
 

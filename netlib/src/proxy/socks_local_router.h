@@ -58,10 +58,10 @@ namespace proxy
          *        IPv6 mappers share a single definition.
          */
         template <typename AddrT>
-        struct tcp_mapper_entry_t
+        struct tcp_mapper_entry_t  // NOLINT(clang-diagnostic-padded)
         {
-            net::ip_endpoint<AddrT> endpoint;
             std::chrono::steady_clock::time_point created_at;
+            net::ip_endpoint<AddrT> endpoint;
         };
 
         using tcp_mapper_entry = tcp_mapper_entry_t<net::ip_address_v4>;
@@ -250,7 +250,7 @@ namespace proxy
          * This queue is used to store buffers that need to be processed by the process resolution thread.
          * Access to this queue is synchronized using process_resolve_buffer_mutex_ and process_resolve_buffer_queue_cv_.
          */
-        std::queue<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> process_resolve_buffer_queue_;
+        std::queue<netlib::ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> process_resolve_buffer_queue_;
 
         /**
          * @brief Mutex to guard access to the process_resolve_buffer_queue_.
@@ -325,7 +325,7 @@ namespace proxy
          *         later re-injection (and therefore dropped from the current pass)
          *         or dropped outright due to overload / allocation failure.
          */
-        packet_filter::packet_action enqueue_for_deferred_resolve(ndisapi::intermediate_buffer& buffer)
+        packet_filter::packet_action enqueue_for_deferred_resolve(netlib::ndisapi::intermediate_buffer& buffer)
         {
             {
                 std::scoped_lock lock(process_resolve_buffer_mutex_);
@@ -344,7 +344,7 @@ namespace proxy
                 }
             }
 
-            if (auto allocated_buffer = ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
+            if (auto allocated_buffer = netlib::ndisapi::intermediate_buffer_pool::instance().allocate(buffer))
             {
                 bool pushed = false;
                 {
@@ -481,7 +481,7 @@ namespace proxy
             // Initialize packet filter
             packet_filter_ = std::make_unique<packet_filter>(
                 nullptr,
-                [this](HANDLE, ndisapi::intermediate_buffer& buffer)
+                [this](HANDLE, netlib::ndisapi::intermediate_buffer& buffer)
                 {
                     auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
                     const auto destination_mac = net::mac_address(ethernet_header->h_dest);
@@ -1031,13 +1031,13 @@ namespace proxy
         {
             using tcp_server_t = tcp_proxy_server<socks5_tcp_proxy_socket<AddrT>>;
             using udp_server_t = socks5_local_udp_proxy_server<socks5_udp_proxy_socket<AddrT>>;
-            using tcp_negotiate_t = typename tcp_server_t::negotiate_context_t;
-            using udp_negotiate_t = typename udp_server_t::negotiate_context_t;
+            using tcp_negotiate_t = tcp_server_t::negotiate_context_t;
+            using udp_negotiate_t = udp_server_t::negotiate_context_t;
 
             auto tcp_server = (protocols == both || protocols == tcp)
                 ? std::make_unique<tcp_server_t>(
                     0, io_port_,
-                    [this, upstream, cred_pair](const AddrT address, const uint16_t port)
+                    [this, upstream, cred_pair](const AddrT address, const uint16_t port)  // NOLINT(clang-diagnostic-padded)
                         -> std::tuple<AddrT, uint16_t, std::unique_ptr<tcp_negotiate_t>>
                     {
                         auto& mapper = tcp_mapper_for<AddrT>();
@@ -1082,7 +1082,7 @@ namespace proxy
             auto udp_server = (protocols == both || protocols == udp)
                 ? std::make_unique<udp_server_t>(
                     0, io_port_,
-                    [this, upstream, cred_pair](const AddrT address, const uint16_t port)
+                    [this, upstream, cred_pair](const AddrT address, const uint16_t port)  // NOLINT(clang-diagnostic-padded)
                         -> std::tuple<AddrT, uint16_t, std::unique_ptr<udp_negotiate_t>>
                     {
                         auto& mapper = udp_mapper_for<AddrT>();
@@ -1262,11 +1262,8 @@ namespace proxy
                         socks_udp_proxy_server_v6.reset();
                     };
 
-                    if (!start_listener(socks_tcp_proxy_server_v6, "IPv6", "TCP"))
-                    {
-                        disable_ipv6_listeners();
-                    }
-                    else if (!start_listener(socks_udp_proxy_server_v6, "IPv6", "UDP"))
+                    if (!start_listener(socks_tcp_proxy_server_v6, "IPv6", "TCP") ||
+                        !start_listener(socks_udp_proxy_server_v6, "IPv6", "UDP"))
                     {
                         disable_ipv6_listeners();
                     }
@@ -1750,7 +1747,7 @@ namespace proxy
          *         - packet_action::revert: packet should be reverted (redirected)
          *         - packet_action::pass: packet should be passed through
          */
-        std::optional<packet_filter::packet_action> process_udp_packet(ndisapi::intermediate_buffer& buffer, const bool postponed)
+        std::optional<packet_filter::packet_action> process_udp_packet(netlib::ndisapi::intermediate_buffer& buffer, const bool postponed)
         {
             auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
             auto* const ip_header = reinterpret_cast<iphdr_ptr>(ethernet_header + 1);
@@ -1847,7 +1844,7 @@ namespace proxy
          *         - packet_action::revert: packet should be reverted (redirected)
          *         - packet_action::pass: packet should be passed through
          */
-        std::optional<packet_filter::packet_action> process_tcp_packet(ndisapi::intermediate_buffer& buffer, const bool postponed)
+        std::optional<packet_filter::packet_action> process_tcp_packet(netlib::ndisapi::intermediate_buffer& buffer, const bool postponed)
         {
             auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
             auto* const ip_header = reinterpret_cast<iphdr_ptr>(ethernet_header + 1);
@@ -1897,10 +1894,9 @@ namespace proxy
                 {
                     std::scoped_lock lock(tcp_mapper_lock_);
                     tcp_mapper_[ntohs(tcp_header->th_sport)] =
-                        tcp_mapper_entry{
+                        tcp_mapper_entry{std::chrono::steady_clock::now(),
                             net::ip_endpoint(net::ip_address_v4(ip_header->ip_dst),
-                                ntohs(tcp_header->th_dport)),
-                            std::chrono::steady_clock::now()
+                                ntohs(tcp_header->th_dport))
                         };
 
                     NETLIB_LOG(log_level::info,
@@ -1938,7 +1934,7 @@ namespace proxy
          * @param destination_mac Destination MAC, used to skip broadcast/multicast UDP.
          * @return The packet action to apply.
          */
-        packet_filter::packet_action handle_ipv6_filter(ndisapi::intermediate_buffer& buffer,
+        packet_filter::packet_action handle_ipv6_filter(netlib::ndisapi::intermediate_buffer& buffer,
                                                         const net::mac_address& destination_mac)
         {
             log_packet_to_pcap(buffer);
@@ -1957,7 +1953,7 @@ namespace proxy
                 // traffic is passed through UNPROXIED, so a proxied app's fragmented IPv6
                 // egress leaks its real source address. Warn once so the limitation is
                 // visible at runtime (see README, IPv6 fragmentation note).
-                static std::atomic_flag fragment_passthrough_warned;
+                static std::atomic_flag fragment_passthrough_warned;  // NOLINT(clang-diagnostic-unique-object-duplication)
                 if (!fragment_passthrough_warned.test_and_set(std::memory_order_relaxed))
                 {
                     NETLIB_LOG(log_level::warning,
@@ -2002,7 +1998,7 @@ namespace proxy
          * proxy-port lookup, and redirect objects. See process_udp_packet() for the
          * postponed/return-value contract.
          */
-        std::optional<packet_filter::packet_action> process_udp_packet_v6(ndisapi::intermediate_buffer& buffer, const bool postponed)
+        std::optional<packet_filter::packet_action> process_udp_packet_v6(netlib::ndisapi::intermediate_buffer& buffer, const bool postponed)
         {
             auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
             auto* const ip_header = reinterpret_cast<ipv6hdr_ptr>(ethernet_header + 1);
@@ -2092,7 +2088,7 @@ namespace proxy
          * proxy-port lookup, and redirect objects. See process_tcp_packet() for the
          * postponed/return-value contract.
          */
-        std::optional<packet_filter::packet_action> process_tcp_packet_v6(ndisapi::intermediate_buffer& buffer, const bool postponed)
+        std::optional<packet_filter::packet_action> process_tcp_packet_v6(netlib::ndisapi::intermediate_buffer& buffer, const bool postponed)
         {
             auto* const ethernet_header = reinterpret_cast<ether_header_ptr>(buffer.m_IBuffer);
             auto* const ip_header = reinterpret_cast<ipv6hdr_ptr>(ethernet_header + 1);
@@ -2150,9 +2146,9 @@ namespace proxy
                     std::scoped_lock lock(tcp_mapper_v6_lock_);
                     tcp_mapper_v6_[ntohs(tcp_header->th_sport)] =
                         tcp_mapper_entry_v6{
+                            std::chrono::steady_clock::now(),
                             net::ip_endpoint(net::ip_address_v6(ip_header->ip6_dst),
-                                ntohs(tcp_header->th_dport)),
-                            std::chrono::steady_clock::now()
+                                ntohs(tcp_header->th_dport))
                         };
 
                     NETLIB_LOG(log_level::info,
@@ -2199,7 +2195,7 @@ namespace proxy
          * @param packet_queue Reference to a vector of intermediate_buffer pointers to be sent.
          * @return true if the packets were successfully sent to the adapters, false otherwise.
          */
-        bool send_packets_to_adapters(std::vector<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr>& packet_queue) const
+        bool send_packets_to_adapters(std::vector<netlib::ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr>& packet_queue) const
         {
             DWORD packets_success = 0;
             return packet_filter_->SendPacketsToAdaptersUnsorted(
@@ -2219,7 +2215,7 @@ namespace proxy
          * @param packet_queue Reference to a vector of intermediate_buffer pointers to be sent.
          * @return true if the packets were successfully sent to MSTCP, false otherwise.
          */
-        bool send_packets_to_mstcp(std::vector<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr>& packet_queue) const
+        bool send_packets_to_mstcp(std::vector<netlib::ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr>& packet_queue) const
         {
             DWORD packets_success = 0;
             return packet_filter_->SendPacketsToMstcpUnsorted(
@@ -2256,9 +2252,9 @@ namespace proxy
         void process_resolve_thread_proc()
         {
             // Use local (non-static) containers to avoid static initialization order issues and data races
-            std::queue<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> local_queue;
-            std::vector<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> to_adapters;
-            std::vector<ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> to_mstcp;
+            std::queue<netlib::ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> local_queue;
+            std::vector<netlib::ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> to_adapters;
+            std::vector<netlib::ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> to_mstcp;
 
             // Run the tcp_mapper_ sweep at most once per maintenance interval, even
             // under heavy resolver activity. The interval is half the TTL so an
