@@ -14,7 +14,7 @@ namespace ndisapi
      * @tparam T IP address type (net::ip_address_v4 or net::ip_address_v6).
      */
     template <net::ip_address T>
-    class tcp_local_redirect : public netlib::log::logger<tcp_local_redirect<T>>
+    class tcp_local_redirect : public netlib::log::logger<tcp_local_redirect<T>>  // NOLINT(clang-diagnostic-padded)
     {
         using log_level = netlib::log::log_level;
         using logger = netlib::log::logger<tcp_local_redirect>;
@@ -27,11 +27,6 @@ namespace ndisapi
         std::unordered_map<net::ip_endpoint<T>, timestamp_endpoint> redirected_connections_;
 
         /**
-         * @brief Proxy port in network byte order.
-         */
-        u_short proxy_port_{};
-
-        /**
          * @brief Mutex for synchronizing access to redirected_connections_.
          */
         std::mutex lock_;
@@ -40,6 +35,11 @@ namespace ndisapi
          * @brief Thread for cleaning up timed-out TCP connections.
          */
         std::thread cleanup_thread_;
+
+        /**
+         * @brief Proxy port in network byte order.
+         */
+        u_short proxy_port_{};
 
         /**
          * @brief Termination flag for the cleanup_thread_.

@@ -1,3 +1,5 @@
+// ReSharper disable CppClangTidyClangDiagnosticComma
+// ReSharper disable CppExpressionWithoutSideEffects
 #pragma once
 
 namespace proxy
@@ -162,7 +164,7 @@ namespace proxy
                         (ident_resp_.method == 0xFF))
                     {
                         // SOCKS v5 identification or authentication failed
-                        tcp_proxy_socket<T>::close_client<true>(true, false);
+                        tcp_proxy_socket<T>::close_client<true>(true, false);  // NOLINT(bugprone-chained-comparison)
                     }
                     else
                     {
@@ -182,7 +184,7 @@ namespace proxy
                                 // [SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but USERNAME exceeds maximum possible length
                                 )
                             {
-                                tcp_proxy_socket<T>::close_client<true>(true, false);
+                                tcp_proxy_socket<T>::close_client<true>(true, false);  // NOLINT(bugprone-chained-comparison)
                             }
                             else
                             {
@@ -200,7 +202,7 @@ namespace proxy
                                         &io_context_send_negotiate_.wsa_buf,
                                         &io_context_send_negotiate_) == SOCKET_ERROR)
                                     {
-                                        tcp_proxy_socket<T>::close_client<true>(false, false);
+                                        tcp_proxy_socket<T>::close_client<true>(false, false);  // NOLINT(bugprone-chained-comparison)
                                         return;
                                     }
 
@@ -212,7 +214,7 @@ namespace proxy
                                         &io_context_recv_negotiate_.wsa_buf,
                                         &io_context_recv_negotiate_) == SOCKET_ERROR)
                                     {
-                                        tcp_proxy_socket<T>::close_client<true>(true, false);
+                                        tcp_proxy_socket<T>::close_client<true>(true, false);  // NOLINT(bugprone-chained-comparison)
                                     }
                                 }
                             }
@@ -240,7 +242,7 @@ namespace proxy
                     if (ident_resp_.method != 0)
                     {
                         // SOCKS v5 identification or authentication failed
-                        tcp_proxy_socket<T>::close_client<true>(true, false);
+                        tcp_proxy_socket<T>::close_client<true>(true, false);  // NOLINT(bugprone-chained-comparison)
                     }
                     else
                     {
@@ -258,7 +260,7 @@ namespace proxy
                         (connect_response_header_.reply != 0))
                     {
                         // SOCKS v5 connect failed
-                        tcp_proxy_socket<T>::close_client<true>(true, false);
+                        tcp_proxy_socket<T>::close_client<true>(true, false);  // NOLINT(bugprone-chained-comparison)
                         return;
                     }
 
@@ -295,7 +297,7 @@ namespace proxy
                         break;
 
                     default:
-                        tcp_proxy_socket<T>::close_client<true>(true, false);
+                        tcp_proxy_socket<T>::close_client<true>(true, false); // NOLINT(bugprone-chained-comparison)
                         break;
                     }
                 }
@@ -341,7 +343,7 @@ namespace proxy
             unsigned char address_type{};
         };
 
-        void reset_overlapped(per_io_context_t& io_context) noexcept
+        static void reset_overlapped(per_io_context_t& io_context) noexcept
         {
             io_context.Internal = 0;
             io_context.InternalHigh = 0;
@@ -361,8 +363,8 @@ namespace proxy
                 &io_context_recv_negotiate_.wsa_buf,
                 &io_context_recv_negotiate_) == SOCKET_ERROR)
             {
-                // Only reached from process_receive_negotiate_complete, which holds lock_.
-                tcp_proxy_socket<T>::close_client<true>(true, false);
+                // Called only from process_receive_negotiate_complete while lock_ is held.
+                tcp_proxy_socket<T>::close_client<true>(true, false);  // NOLINT(bugprone-chained-comparison)
                 return false;
             }
 
@@ -420,8 +422,8 @@ namespace proxy
                 &io_context_send_negotiate_.wsa_buf,
                 &io_context_send_negotiate_) == SOCKET_ERROR)
             {
-                // Only reached from process_receive_negotiate_complete, which holds lock_.
-                tcp_proxy_socket<T>::close_client<true>(false, false);
+                // Called only from process_receive_negotiate_complete while lock_ is held.
+                tcp_proxy_socket<T>::close_client<true>(false, false); // NOLINT(bugprone-chained-comparison)
                 return;
             }
 
@@ -464,13 +466,6 @@ namespace proxy
         }
 
     private:
-
-        socks5_state current_state_{ socks5_state::pre_login };
-        socks5_ident_req<2> ident_req_{};
-        socks5_ident_resp ident_resp_{};
-        socks5_req<address_type_t> connect_request_;
-        socks5_resp_header connect_response_header_{};
-        std::array<unsigned char, 1 + socks5_username_max_length + sizeof(unsigned short)> connect_response_tail_{};
         unsigned char* connect_reply_buffer_{ nullptr };
         ULONG connect_reply_expected_{ 0 };
         ULONG connect_reply_received_{ 0 };
@@ -478,7 +473,13 @@ namespace proxy
         // split the 2 bytes across completions; without accumulating, a 1-byte read would be
         // parsed as a complete reply against stale ident_resp_ contents.
         ULONG ident_resp_received_{ 0 };
+        socks5_state current_state_{ socks5_state::pre_login };
+        socks5_ident_req<2> ident_req_{};
+        socks5_ident_resp ident_resp_{};
+        socks5_req<address_type_t> connect_request_;
+        socks5_resp_header connect_response_header_{};
         socks5_username_auth username_auth_{};
+        std::array<unsigned char, 1 + socks5_username_max_length + sizeof(unsigned short)> connect_response_tail_{};
 
     protected:
         /**

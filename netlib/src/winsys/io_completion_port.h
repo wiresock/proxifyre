@@ -249,7 +249,7 @@ namespace netlib::winsys
         /// then wait for the count to reach zero -- guaranteeing no worker is (or can start)
         /// executing the handler once unregister_handler() returns.
         /// </summary>
-        struct handler_state
+        struct handler_state  // NOLINT(clang-diagnostic-padded)
         {
             std::function<callback_t> callback;
             std::atomic<int32_t> in_flight{ 0 };

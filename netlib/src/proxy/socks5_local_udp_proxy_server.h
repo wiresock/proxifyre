@@ -20,7 +20,7 @@ namespace proxy
      * @tparam T Proxy socket implementation type.
      */
     template <typename T>
-    class socks5_local_udp_proxy_server : public netlib::log::logger<socks5_local_udp_proxy_server<T>>
+    class socks5_local_udp_proxy_server : public netlib::log::logger<socks5_local_udp_proxy_server<T>>  // NOLINT(clang-diagnostic-padded)
     {
     public:
         /**
@@ -43,7 +43,7 @@ namespace proxy
          * Alias for the negotiation context type defined by the proxy socket implementation (T).
          * Used to store authentication and session information for SOCKS5 negotiation.
          */
-        using negotiate_context_t = typename T::negotiate_context_t;
+        using negotiate_context_t = T::negotiate_context_t;
 
         /**
          * @brief Address type alias.
@@ -51,7 +51,7 @@ namespace proxy
          * Alias for the address type defined by the proxy socket implementation (T).
          * Represents an IPv4 or IPv6 address, depending on the template parameter.
          */
-        using address_type_t = typename T::address_type_t;
+        using address_type_t = T::address_type_t;
 
         /**
          * @brief Per-I/O context type alias.
@@ -59,7 +59,7 @@ namespace proxy
          * Alias for the per-I/O context type defined by the proxy socket implementation (T).
          * Used for managing asynchronous I/O operations.
          */
-        using per_io_context_t = typename T::per_io_context_t;
+        using per_io_context_t = T::per_io_context_t;
 
         /**
          * @brief Query remote peer function signature.
@@ -113,21 +113,6 @@ namespace proxy
         std::map<uint16_t, std::shared_ptr<T>> proxy_sockets_;
 
         /**
-         * @brief Indicates whether the server is terminating.
-         *
-         * Set to true when the server is stopping or has stopped.
-         */
-        std::atomic_bool end_server_{ true }; // set to true on proxy termination
-
-        /**
-         * @brief Counts the number of IOCP operations currently executing in the lambda.
-         *
-         * Incremented when entering the lambda, decremented when exiting.
-         * Used during shutdown to ensure no operations are in-flight before destroying the object.
-         */
-        std::atomic<int32_t> active_iocp_operations_{ 0 };
-
-        /**
          * @brief UDP server socket handle.
          *
          * The main socket used to receive and send UDP packets for the proxy server.
@@ -160,19 +145,14 @@ namespace proxy
         SOCKADDR_STORAGE recv_from_sa_{};
 
         /**
-         * @brief Size of the sender address structure.
-         */
-        INT recv_from_sa_size_{ sizeof(SOCKADDR_STORAGE) };
-
-        /**
-         * @brief Local UDP port number the proxy server is bound to.
-         */
-        uint16_t proxy_port_;
-
-        /**
          * @brief Reference to the I/O completion port used for asynchronous operations.
          */
         netlib::winsys::io_completion_port& completion_port_;
+
+        /**
+         * @brief Function to query remote peer information for a given local address and port.
+         */
+        std::function<query_remote_peer_t> query_remote_peer_;
 
         /**
          * @brief Completion key associated with the server socket in the I/O completion port.
@@ -180,9 +160,29 @@ namespace proxy
         ULONG_PTR completion_key_{ 0 };
 
         /**
-         * @brief Function to query remote peer information for a given local address and port.
+         * @brief Size of the sender address structure.
          */
-        std::function<query_remote_peer_t> query_remote_peer_;
+        INT recv_from_sa_size_{ sizeof(SOCKADDR_STORAGE) };
+
+        /**
+         * @brief Counts the number of IOCP operations currently executing in the lambda.
+         *
+         * Incremented when entering the lambda, decremented when exiting.
+         * Used during shutdown to ensure no operations are in-flight before destroying the object.
+         */
+        std::atomic<int32_t> active_iocp_operations_{ 0 };
+
+        /**
+         * @brief Local UDP port number the proxy server is bound to.
+         */
+        uint16_t proxy_port_;
+
+        /**
+         * @brief Indicates whether the server is terminating.
+         *
+         * Set to true when the server is stopping or has stopped.
+         */
+        std::atomic_bool end_server_{ true }; // set to true on proxy termination
 
     public:
         /**
@@ -204,9 +204,9 @@ namespace proxy
             const log_level log_level = log_level::error,
             std::shared_ptr<std::ostream> log_stream = nullptr)
             : logger(log_level, std::move(log_stream)),
-            proxy_port_(proxy_port),
             completion_port_(completion_port),
-            query_remote_peer_(query_remote_peer_fn)
+            query_remote_peer_(query_remote_peer_fn),
+            proxy_port_(proxy_port)
         {
             if (!create_server_socket())
             {
@@ -538,7 +538,7 @@ namespace proxy
             // the map does NOT destroy them: each socket's recv io_context holds a self-reference,
             // so the destructor would never run and the handle/armed recv would leak.
             {
-                std::lock_guard lock(lock_);
+                std::scoped_lock lock(lock_);
                 if (!proxy_sockets_.empty())
                 {
                     NETLIB_INFO("Cancelling I/O on {} proxy sockets before draining", proxy_sockets_.size());
@@ -569,7 +569,7 @@ namespace proxy
             {
                 bool drained = true;
                 {
-                    std::lock_guard lock(lock_);
+                    std::scoped_lock lock(lock_);
                     for (auto& entry : proxy_sockets_)
                     {
                         if (entry.second && entry.second->outstanding_io() != 0)
@@ -635,7 +635,7 @@ namespace proxy
             // leak those sessions instead (a bounded, shutdown-only leak) rather than risk a UAF.
             if (drained_ok)
             {
-                std::lock_guard lock(lock_);
+                std::scoped_lock lock(lock_);
                 for (auto& entry : proxy_sockets_)
                 {
                     if (entry.second)
@@ -920,7 +920,7 @@ namespace proxy
                 FD_ZERO(&error_set);
                 FD_SET(s, &error_set);
 
-                timeval tv{};
+                timeval tv;
                 tv.tv_sec = static_cast<long>(timeout_ms / 1000);
                 tv.tv_usec = static_cast<long>((timeout_ms % 1000) * 1000);
 
@@ -1148,7 +1148,7 @@ namespace proxy
                 getsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
                     reinterpret_cast<char*>(&original_timeout), &original_timeout_size);
 
-                const auto restore_timeout = [s, original_timeout]
+                const auto restore_timeout = [s, original_timeout]  // NOLINT(clang-diagnostic-padded)
                 {
                     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
                         reinterpret_cast<const char*>(&original_timeout), sizeof(original_timeout));
@@ -1600,7 +1600,7 @@ namespace proxy
          *
          * @param it Valid iterator into proxy_sockets_ for the failed session.
          */
-        void cleanup_failed_proxy_socket(const typename decltype(proxy_sockets_)::iterator it)
+        void cleanup_failed_proxy_socket(const decltype(proxy_sockets_)::iterator it)
         {
             if (it->second)
             {
@@ -1638,7 +1638,7 @@ namespace proxy
             while (end_server_ == false)
             {
                 {
-                    std::lock_guard lock(lock_);
+                    std::scoped_lock lock(lock_);
 
                     for (auto it = proxy_sockets_.begin(); it != proxy_sockets_.end();)
                     {

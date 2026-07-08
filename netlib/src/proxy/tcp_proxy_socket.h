@@ -245,21 +245,21 @@ namespace proxy
         per_io_context_t io_context_send_to_remote_{ proxy_io_operation::relay_io_write, nullptr, false };
 
         /**
-         * @brief Set on the first is_ready_for_removal() pass that sees both sockets closed,
-         *        so the next pass (a full cleanup cycle later) releases the self-references.
-         *        The grace lets any still-queued IOCP completion drain first.
-         */
-        bool removal_armed_ = false;
-
-        /**
          * @brief Count of overlapped I/O operations posted on this socket that have not yet
          *        completed. Incremented (io_posted) immediately before each WSARecv/WSASend and
          *        decremented (io_completed) once per completion, and on a synchronous post
          *        failure. is_ready_for_removal() releases the self-references only when this is
          *        zero -- a genuine "no completion can still reference our io_context members"
          *        guarantee rather than a wall-clock grace.
-         */
+        */
         std::atomic<long> outstanding_io_{ 0 };
+
+        /**
+         * @brief Set on the first is_ready_for_removal() pass that sees both sockets closed,
+         *        so the next pass (a full cleanup cycle later) releases the self-references.
+         *        The grace lets any still-queued IOCP completion drain first.
+         */
+        bool removal_armed_ = false;
 
         /**
          * @brief Indicates whether Nagle's algorithm is disabled for the remote socket.

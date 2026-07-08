@@ -11,7 +11,7 @@ namespace iphelper
      * including process ID, name, executable path, and device path. All string fields are
      * automatically converted to uppercase for consistent matching.
      */
-    struct network_process
+    struct network_process  // NOLINT(clang-diagnostic-padded)
     {
         /**
          * @brief Default constructor.
@@ -29,10 +29,10 @@ namespace iphelper
          *       device path is computed from the provided path.
          */
         network_process(const unsigned long id, std::wstring name, std::wstring path)
-            : id(id),
-            name(std::move(name)),
+            : name(std::move(name)),
             path_name(std::move(path)),
-            device_path_name(convert_to_device_path(path_name))
+            device_path_name(convert_to_device_path(path_name)),
+            id(id)
         {
             this->name = to_upper(this->name);
             this->path_name = to_upper(this->path_name);
@@ -108,10 +108,10 @@ namespace iphelper
             return upper_case;
         }
 
-        unsigned long id{};                 ///< Process ID
         std::wstring name;                  ///< Process name (uppercase)
         std::wstring path_name;             ///< Full path to executable (uppercase)
         std::wstring device_path_name;      ///< Device path version of path_name (uppercase)
+        unsigned long id{};                 ///< Process ID
         std::optional<uint16_t> tcp_proxy_port = std::nullopt; // Optional TCP proxy port if the process is associated with a proxy
         std::optional<uint16_t> udp_proxy_port = std::nullopt; // Optional UDP proxy port if the process is associated with a proxy
         // These cache flags can be set from match_app_name()/packet handlers running on
@@ -782,9 +782,7 @@ namespace iphelper
         /// </summary>
         static bool is_unspecified_v6_address(const UCHAR(&addr)[16]) noexcept
         {
-            for (int i = 0; i < 16; ++i)
-                if (addr[i] != 0) return false;
-            return true;
+            return std::ranges::all_of(addr, [](const unsigned char i) { return i == 0; });
         }
 
         /// <summary>

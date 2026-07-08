@@ -75,7 +75,7 @@ namespace proxy
             memcpy(username_reserved, username.data(), username.length());
 
             *password_length_ptr = static_cast<unsigned char>(password.length());
-            memcpy(password_ptr, password.data(), password.length());
+            memcpy(password_ptr, password.data(), password.length());  // NOLINT(bugprone-not-null-terminated-result)
 
             return (3 + static_cast<int>(username.length()) + static_cast<int>(password.length()));
         }

@@ -195,7 +195,7 @@ namespace net
             if (len > 0)
             {
                 const auto p8 = reinterpret_cast<const uint8_t*>(p16);
-                sum += ntohs(static_cast<uint16_t>(*p8) << 8); /* RFC says pad last byte */
+                sum += ntohs(static_cast<uint16_t>(*p8) << 8); /* RFC says pad last byte */  // NOLINT(clang-diagnostic-implicit-int-conversion)
             }
 
             return sum;
