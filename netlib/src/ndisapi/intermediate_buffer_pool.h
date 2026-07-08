@@ -65,11 +65,13 @@ namespace netlib::ndisapi
         /// </summary>
         /// <returns>A unique_ptr to the allocated intermediate_buffer object, or nullptr if allocation fails.</returns>
         intermediate_buffer_ptr allocate() {
-            std::scoped_lock lock(instance().mutex_);
+            std::scoped_lock lock(mutex_);
             intermediate_buffer* raw_ptr;
 
             try {
                 raw_ptr = pool_.construct(); // This might throw
+                if (raw_ptr == nullptr)
+                    return nullptr;
                 std::fill_n(reinterpret_cast<char*>(raw_ptr), offsetof(_INTERMEDIATE_BUFFER, m_IBuffer), 0);
             }
             catch (...) {
