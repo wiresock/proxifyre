@@ -3153,7 +3153,7 @@ namespace proxy
             // redirect also captures IPv4-mapped destinations (::ffff:a.b.c.d) that a
             // dual-stack app opens to a v4 LAN host, the IPv4 private/link-local/multicast
             // ranges are also exempted in their v4-mapped form so bypassLan covers them.
-            static constexpr std::array<const char*, 9> local_ranges{ {
+            static constexpr std::array<const char*, 10> local_ranges{ {
                 "::1/128",                  // Loopback
                 "fe80::/10",                // Link-local unicast
                 "fc00::/7",                 // Unique local addresses (ULA)
@@ -3162,7 +3162,8 @@ namespace proxy
                 "::ffff:172.16.0.0/108",    // IPv4-mapped 172.16.0.0/12 (private)
                 "::ffff:192.168.0.0/112",   // IPv4-mapped 192.168.0.0/16 (private)
                 "::ffff:169.254.0.0/112",   // IPv4-mapped 169.254.0.0/16 (link-local)
-                "::ffff:127.0.0.0/104"      // IPv4-mapped loopback
+                "::ffff:127.0.0.0/104",     // IPv4-mapped loopback
+                "::ffff:224.0.0.0/100"      // IPv4-mapped 224.0.0.0/4 (multicast)
             } };
 
             for (const auto* const cidr : local_ranges)

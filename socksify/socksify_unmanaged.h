@@ -81,7 +81,7 @@ public:
      * @param start Whether to start the proxy immediately.
      * @param login Optional username for authentication.
      * @param password Optional password for authentication.
-     * @return A handle (LONG_PTR) to the proxy instance, or 0 on failure.
+     * @return A handle (LONG_PTR) to the proxy instance, or -1 on failure.
      */
     [[nodiscard]] LONG_PTR add_socks5_proxy(
         const std::string& endpoint,
