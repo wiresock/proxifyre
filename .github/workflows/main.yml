@@ -21,10 +21,12 @@ jobs:
       contents: write
     steps:
       - name: Checkout from GitHub
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
       - name: Add msbuild to PATH
-        uses: microsoft/setup-msbuild@v1
+        uses: microsoft/setup-msbuild@v3
+        with:
+          vs-version: '[17.0,18.0)'
 
       - name: Install vcpkg
         shell: bash
@@ -77,7 +79,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout from GitHub
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
