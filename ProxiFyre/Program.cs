@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Security.Principal;
 using Topshelf;
 using LogLevel = Socksifier.LogLevel;
 
@@ -92,7 +93,8 @@ namespace ProxiFyre
                 // Add the defined SOCKS5 proxies
                 var proxy = _socksify.AddSocks5Proxy(appSettings.Socks5ProxyEndpoint, appSettings.Username,
                     appSettings.Password, appSettings.SupportedProtocolsParse,
-                    true); // Assuming the AddSocks5Proxy method supports a list of protocols
+                    appSettings.SupportedAddressFamiliesParse,
+                    true);
 
                 if (proxy.ToInt64() == -1)
                 {
@@ -104,11 +106,14 @@ namespace ProxiFyre
                 var protocols = appSettings.SupportedProtocols != null && appSettings.SupportedProtocols.Count > 0
                     ? string.Join(", ", appSettings.SupportedProtocols)
                     : "TCP, UDP";
+                var addressFamilies = appSettings.SupportedAddressFamilies != null && appSettings.SupportedAddressFamilies.Count > 0
+                    ? string.Join(", ", appSettings.SupportedAddressFamilies)
+                    : "IPv4, IPv6";
                 foreach (var appName in appSettings.AppNames)
                     // Associate the defined application names to the proxies
                     if (_socksify.AssociateProcessNameToProxy(appName, proxy) && _logLevel >= LogLevel.Info)
                         LoggerInstance.Info(
-                            $"Successfully associated {appName} to {appSettings.Socks5ProxyEndpoint} SOCKS5 proxy with protocols {protocols}!");
+                            $"Successfully associated {appName} to {appSettings.Socks5ProxyEndpoint} SOCKS5 proxy with protocols {protocols} and address families {addressFamilies}!");
             }
 
             foreach (var excludedEntry in serviceSettings.ExcludedList)
@@ -246,6 +251,31 @@ namespace ProxiFyre
                             $"{string.Join(", ", unknownProtocols)}. Only \"TCP\" and \"UDP\" are recognized; " +
                             "unrecognized tokens are ignored (a proxy with no recognized protocol defaults to both).");
                 }
+
+                if (proxy.SupportedAddressFamilies != null)
+                {
+                    if (proxy.SupportedAddressFamilies.Count == 0)
+                    {
+                        var message = $"Proxy '{proxy.Socks5ProxyEndpoint}' has an empty " +
+                                      "\"supportedAddressFamilies\" array. Omit the setting to enable both " +
+                                      "families, or specify \"IPv4\", \"IPv6\", or both.";
+                        LoggerInstance.Error(message);
+                        throw new InvalidOperationException(message);
+                    }
+
+                    var unknownAddressFamilies = proxy.SupportedAddressFamilies
+                        .Where(f => !string.Equals(f, "IPv4", StringComparison.OrdinalIgnoreCase) &&
+                                    !string.Equals(f, "IPv6", StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+                    if (unknownAddressFamilies.Count > 0)
+                    {
+                        var values = string.Join(", ", unknownAddressFamilies.Select(f => f ?? "<null>"));
+                        var message = $"Proxy '{proxy.Socks5ProxyEndpoint}' lists unrecognized address " +
+                                      $"family/families: {values}. Only \"IPv4\" and \"IPv6\" are valid.";
+                        LoggerInstance.Error(message);
+                        throw new InvalidOperationException(message);
+                    }
+                }
             }
 
             // Drop null/blank excluded entries for the same reason.
@@ -291,14 +321,16 @@ namespace ProxiFyre
         //            "socks5ProxyEndpoint": "158.101.205.51:1080",
         //            "username": "username1",
         //            "password": "password1",
-        //            "supportedProtocols": ["TCP", "UDP"]
+        //            "supportedProtocols": ["TCP", "UDP"],
+        //            "supportedAddressFamilies": ["IPv4", "IPv6"]
         //        },
         //        {
         //            "appNames": ["firefox", "firefox_dev"],
         //            "socks5ProxyEndpoint": "159.101.205.52:1080",
         //            "username": "username2",
         //            "password": "password2",
-        //            "supportedProtocols": ["TCP"]
+        //            "supportedProtocols": ["TCP"],
+        //            "supportedAddressFamilies": ["IPv4"]
         //        }
         //    ],
         //    "excludes": [
@@ -366,13 +398,16 @@ namespace ProxiFyre
             /// <param name="username">Username for proxy authentication.</param>
             /// <param name="password">Password for proxy authentication.</param>
             /// <param name="supportedProtocols">List of supported protocols (e.g., TCP, UDP).</param>
-            public AppSettings(List<string> appNames, string socks5ProxyEndpoint, string username, string password, List<string> supportedProtocols)
+            /// <param name="supportedAddressFamilies">List of supported destination address families (e.g., IPv4, IPv6).</param>
+            public AppSettings(List<string> appNames, string socks5ProxyEndpoint, string username, string password,
+                List<string> supportedProtocols, List<string> supportedAddressFamilies = null)
             {
                 AppNames = appNames;
                 Socks5ProxyEndpoint = socks5ProxyEndpoint;
                 Username = username;
                 Password = password;
                 SupportedProtocols = supportedProtocols;
+                SupportedAddressFamilies = supportedAddressFamilies;
             }
 
             /// <summary>
@@ -401,6 +436,11 @@ namespace ProxiFyre
             public List<string> SupportedProtocols { get; }
 
             /// <summary>
+            /// Gets the list of supported destination address families (e.g., IPv4, IPv6).
+            /// </summary>
+            public List<string> SupportedAddressFamilies { get; }
+
+            /// <summary>
             /// Gets the supported protocols as an enum value.
             /// </summary>
             public SupportedProtocolsEnum SupportedProtocolsParse
@@ -417,6 +457,36 @@ namespace ProxiFyre
                         : SupportedProtocolsEnum.BOTH;
                 }
             }
+
+            /// <summary>
+            /// Gets the supported destination address families as an enum value.
+            /// </summary>
+            public SupportedAddressFamiliesEnum SupportedAddressFamiliesParse
+            {
+                get
+                {
+                    if (SupportedAddressFamilies == null)
+                        return SupportedAddressFamiliesEnum.BOTH;
+
+                    var supportsIPv4 = ContainsAddressFamily("IPv4");
+                    var supportsIPv6 = ContainsAddressFamily("IPv6");
+                    if (supportsIPv4 && supportsIPv6)
+                        return SupportedAddressFamiliesEnum.BOTH;
+                    if (supportsIPv4)
+                        return SupportedAddressFamiliesEnum.IPv4;
+                    if (supportsIPv6)
+                        return SupportedAddressFamiliesEnum.IPv6;
+
+                    throw new InvalidOperationException(
+                        "supportedAddressFamilies must contain IPv4, IPv6, or both.");
+                }
+            }
+
+            private bool ContainsAddressFamily(string value)
+            {
+                return SupportedAddressFamilies != null &&
+                    SupportedAddressFamilies.Any(f => string.Equals(f, value, StringComparison.OrdinalIgnoreCase));
+            }
         }
     }
 
@@ -425,6 +495,21 @@ namespace ProxiFyre
     /// </summary>
     internal class Program
     {
+        private static bool IsElevated()
+        {
+            try
+            {
+                using (var identity = WindowsIdentity.GetCurrent())
+                {
+                    return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         /// <summary>
         /// Main method. Configures and runs the ProxiFyre service using Topshelf.
         /// </summary>
@@ -446,6 +531,20 @@ namespace ProxiFyre
                                      || command == "uninstall"
                                      || command == "start"
                                      || command == "stop";
+
+            var isHelpCommand = command == "help"
+                                || command == "--help"
+                                || command == "-h"
+                                || command == "/?";
+
+            if (!isLifecycleCommand && !isHelpCommand && !IsElevated())
+            {
+                Console.Error.WriteLine(
+                    "ProxiFyre must run with administrator privileges so process ownership, " +
+                    "application exclusions, and packet redirection remain reliable. Start it from " +
+                    "an Administrator console or install and start the Windows service.");
+                return 5; // ERROR_ACCESS_DENIED
+            }
 
             var originalOut = Console.Out;
             var originalError = Console.Error;

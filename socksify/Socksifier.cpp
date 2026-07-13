@@ -205,10 +205,11 @@ void Socksifier::Socksifier::SetBypassLan()
 /// <param name="username">The username for authentication.</param>
 /// <param name="password">The password for authentication.</param>
 /// <param name="protocols">The supported protocols.</param>
+/// <param name="addressFamilies">The supported destination address families.</param>
 /// <param name="start">Whether to start the proxy immediately.</param>
 /// <returns>A handle to the proxy instance, or -1 on failure.</returns>
 IntPtr Socksifier::Socksifier::AddSocks5Proxy(String^ endpoint, String^ username, String^ password,
-    SupportedProtocolsEnum protocols, const bool start)
+    SupportedProtocolsEnum protocols, SupportedAddressFamiliesEnum addressFamilies, const bool start)
 {
     if (!unmanaged_ptr_)
         return static_cast<IntPtr>(-1);
@@ -226,11 +227,25 @@ IntPtr Socksifier::Socksifier::AddSocks5Proxy(String^ endpoint, String^ username
         break;
     }
 
+    auto address_families_mx = supported_address_families_mx::both;
+    switch (addressFamilies)
+    {
+    case SupportedAddressFamiliesEnum::IPv4:
+        address_families_mx = supported_address_families_mx::ipv4;
+        break;
+    case SupportedAddressFamiliesEnum::IPv6:
+        address_families_mx = supported_address_families_mx::ipv6;
+        break;
+    default:
+        break;
+    }
+
     if (username != nullptr && password != nullptr)
     {
         return static_cast<IntPtr>(unmanaged_ptr_->add_socks5_proxy(
             msclr::interop::marshal_as<std::string>(endpoint),
             protocols_mx,
+            address_families_mx,
             start,
             msclr::interop::marshal_as<std::string>(username),
             msclr::interop::marshal_as<std::string>(password)
@@ -238,7 +253,22 @@ IntPtr Socksifier::Socksifier::AddSocks5Proxy(String^ endpoint, String^ username
     }
 
     return static_cast<IntPtr>(unmanaged_ptr_->add_socks5_proxy(
-        msclr::interop::marshal_as<std::string>(endpoint), protocols_mx, start));
+        msclr::interop::marshal_as<std::string>(endpoint), protocols_mx, address_families_mx, start));
+}
+
+/// <summary>
+/// Adds a SOCKS5 proxy with both IPv4 and IPv6 destinations enabled.
+/// </summary>
+/// <param name="endpoint">The SOCKS5 proxy endpoint.</param>
+/// <param name="username">The username for authentication.</param>
+/// <param name="password">The password for authentication.</param>
+/// <param name="protocols">The supported protocols.</param>
+/// <param name="start">Whether to start the proxy immediately.</param>
+/// <returns>A handle to the proxy instance, or -1 on failure.</returns>
+IntPtr Socksifier::Socksifier::AddSocks5Proxy(String^ endpoint, String^ username, String^ password,
+    SupportedProtocolsEnum protocols, const bool start)
+{
+    return AddSocks5Proxy(endpoint, username, password, protocols, SupportedAddressFamiliesEnum::BOTH, start);
 }
 
 /// <summary>

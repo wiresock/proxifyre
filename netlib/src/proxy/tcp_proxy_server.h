@@ -1161,16 +1161,44 @@ namespace proxy
                 {
                     std::scoped_lock lock(lock_);
 
-                    WSACloseEvent(wait_events[event_index]);
-
                     // Extract socket handles before creating the shared_ptr
                     // so we can clean them up if initialization fails
                     auto local_socket = std::get<1>(sock_array_events_[event_index]);
                     auto remote_socket = std::get<2>(sock_array_events_[event_index]);
                     auto negotiate_ctx = std::move(std::get<3>(sock_array_events_[event_index]));
 
+                    // An FD_CONNECT event reports completion, not necessarily success. Retrieve
+                    // its error before handing the socket to the SOCKS5 session; otherwise a failed
+                    // connect is promoted to a live proxy socket.
+                    int connect_error = 0;
+                    WSANETWORKEVENTS network_events{};
+                    if (WSAEnumNetworkEvents(remote_socket, wait_events[event_index], &network_events) == SOCKET_ERROR)
+                    {
+                        connect_error = WSAGetLastError();
+                    }
+                    else if ((network_events.lNetworkEvents & FD_CONNECT) == 0)
+                    {
+                        connect_error = WSAEINVAL;
+                    }
+                    else
+                    {
+                        connect_error = network_events.iErrorCode[FD_CONNECT_BIT];
+                    }
+
+                    WSACloseEvent(wait_events[event_index]);
+
                     // Remove from tracking array first - we own the resources now
                     sock_array_events_.erase(sock_array_events_.begin() + event_index);
+
+                    if (connect_error != 0)
+                    {
+                        NETLIB_WARNING("connect_to_remote_host_thread: remote connect failed: {}", connect_error);
+                        shutdown(local_socket, SD_BOTH);
+                        closesocket(local_socket);
+                        shutdown(remote_socket, SD_BOTH);
+                        closesocket(remote_socket);
+                        continue;
+                    }
 
                     try
                     {

@@ -49,6 +49,19 @@ enum class supported_protocols_mx : uint8_t
 };
 
 /**
+ * @brief Specifies the supported destination address families for proxying.
+ */
+enum class supported_address_families_mx : uint8_t
+{
+    /// <summary>IPv4 destinations only.</summary>
+    ipv4 = 0,
+    /// <summary>IPv6 destinations only.</summary>
+    ipv6 = 1,
+    /// <summary>Both IPv4 and IPv6 destinations.</summary>
+    both = 2
+};
+
+/**
  * @brief Enumerates the types of events that can occur in the proxy gateway.
  */
 enum class event_type_mx : uint32_t
