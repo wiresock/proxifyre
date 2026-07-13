@@ -401,12 +401,34 @@ namespace ndisapi
         {
             STATIC_FILTER static_filter{};
             to_static_filter(filter, static_filter);
-            if (AddStaticFilterBack(&static_filter))
+
+            // Allocate/copy the userspace representation before mutating the
+            // driver table. Otherwise a bad_alloc from emplace_back would leave
+            // a driver rule that this object cannot subsequently address/remove.
+            filters_.emplace_back(filter);
+            try
             {
-                filters_.emplace_back(filter);
-                return true;
+                if (AddStaticFilterBack(&static_filter))
+                    return true;
             }
+
+            catch (...)
+            {
+                filters_.pop_back();
+                throw;
+            }
+
+            filters_.pop_back();
             return false;
+        }
+
+        /// <summary>
+        /// Returns the number of filters tracked in userspace and installed in
+        /// the driver table.
+        /// </summary>
+        [[nodiscard]] size_t size() const noexcept
+        {
+            return filters_.size();
         }
 
         /// <summary>

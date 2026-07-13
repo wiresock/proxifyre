@@ -86,6 +86,19 @@ namespace Socksifier
     };
 
     /// <summary>
+    /// Specifies the supported destination address families for proxying.
+    /// </summary>
+    public enum class SupportedAddressFamiliesEnum
+    {
+        /// <summary>IPv4 destinations only.</summary>
+        IPv4,
+        /// <summary>IPv6 destinations only.</summary>
+        IPv6,
+        /// <summary>Both IPv4 and IPv6 destinations.</summary>
+        BOTH
+    };
+
+    /// <summary>
     /// Represents a single log entry for Socksifier events.
     /// </summary>
     public ref class LogEntry sealed
@@ -251,6 +264,19 @@ namespace Socksifier
 
         /// <summary>
         /// Adds a SOCKS5 proxy to the gateway.
+        /// </summary>
+        /// <param name="endpoint">The proxy endpoint (IP:Port).</param>
+        /// <param name="username">The username for authentication.</param>
+        /// <param name="password">The password for authentication.</param>
+        /// <param name="protocols">The supported protocols.</param>
+        /// <param name="addressFamilies">The supported destination address families.</param>
+        /// <param name="start">Whether to start the proxy immediately.</param>
+        /// <returns>A handle to the proxy instance.</returns>
+        IntPtr AddSocks5Proxy(String^ endpoint, String^ username, String^ password, SupportedProtocolsEnum protocols,
+            SupportedAddressFamiliesEnum addressFamilies, bool start);
+
+        /// <summary>
+        /// Adds a SOCKS5 proxy to the gateway with both IPv4 and IPv6 destinations enabled.
         /// </summary>
         /// <param name="endpoint">The proxy endpoint (IP:Port).</param>
         /// <param name="username">The username for authentication.</param>

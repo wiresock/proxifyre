@@ -49,6 +49,61 @@ namespace proxy
          */
         using s5_udp_proxy_server_v6 = socks5_local_udp_proxy_server<socks5_udp_proxy_socket<net::ip_address_v6>>;
 
+    public:
+        enum supported_protocols : uint8_t
+        {
+            tcp,
+            udp,
+            both
+        };
+
+        enum supported_address_families : uint8_t
+        {
+            ipv4,
+            ipv6,
+            all
+        };
+
+        struct resolved_proxy_endpoint
+        {
+            std::optional<net::ip_endpoint<net::ip_address_v4>> ipv4;
+            std::optional<net::ip_endpoint<net::ip_address_v6>> ipv6;
+        };
+
+    private:
+        enum class proxy_port_action : uint8_t
+        {
+            none,
+            proxy,
+            block
+        };
+
+        struct proxy_port_result
+        {
+            proxy_port_action action{ proxy_port_action::none };
+            uint16_t port{};  // NOLINT(clang-diagnostic-padded)
+        };
+
+        static bool protocol_supports_tcp(const supported_protocols protocols) noexcept
+        {
+            return protocols == supported_protocols::both || protocols == supported_protocols::tcp;
+        }
+
+        static bool protocol_supports_udp(const supported_protocols protocols) noexcept
+        {
+            return protocols == supported_protocols::both || protocols == supported_protocols::udp;
+        }
+
+        static bool family_supports_ipv4(const supported_address_families families) noexcept
+        {
+            return families == supported_address_families::all || families == supported_address_families::ipv4;
+        }
+
+        static bool family_supports_ipv6(const supported_address_families families) noexcept
+        {
+            return families == supported_address_families::all || families == supported_address_families::ipv6;
+        }
+
         /**
          * @brief Entry stored in the TCP source-port mappers: redirected destination
          *        endpoint and the steady-clock timestamp at which the mapping was
@@ -84,6 +139,16 @@ namespace proxy
          *        entries indefinitely.
          */
         static constexpr std::chrono::seconds tcp_mapper_entry_ttl_{ 30 };
+
+        /**
+         * @brief Maximum age for an uncommitted UDP source-port authorization.
+         *
+         * Unlike TCP, UDP setup may fail after the first redirected datagram while
+         * establishing the SOCKS5 control connection and UDP ASSOCIATE. Keeping the
+         * authorization until setup commits permits a retry; the TTL prevents stale
+         * source-port reuse from authorizing an unrelated later socket.
+         */
+        static constexpr std::chrono::seconds udp_mapper_entry_ttl_{ 30 };
 
         /**
          * @brief Maximum number of packets that may be queued for deferred process
@@ -123,8 +188,8 @@ namespace proxy
         /**
          * @brief Stores the set of UDP ports being mapped.
          */
-        std::unordered_set<uint16_t> udp_mapper_;
-        std::unordered_set<uint16_t> udp_mapper_v6_;
+        std::unordered_map<uint16_t, std::chrono::steady_clock::time_point> udp_mapper_;
+        std::unordered_map<uint16_t, std::chrono::steady_clock::time_point> udp_mapper_v6_;
 
         /**
          * @brief Mutex to synchronize access to the TCP port mapping.
@@ -160,6 +225,16 @@ namespace proxy
          *        IPv4 and IPv6 proxy pair.
          */
         std::vector<std::pair<std::unique_ptr<s5_tcp_proxy_server_v6>, std::unique_ptr<s5_udp_proxy_server_v6>>> proxy_servers_v6_;
+
+        /**
+         * @brief Configured protocol support for each proxy, index-aligned with proxy_servers_.
+         */
+        std::vector<supported_protocols> proxy_protocols_;
+
+        /**
+         * @brief Configured destination address-family support for each proxy, index-aligned with proxy_servers_.
+         */
+        std::vector<supported_address_families> proxy_address_families_;
 
         /**
          * @brief Maps proxy indexes to their corresponding process names (sorted by proxy ID).
@@ -430,13 +505,6 @@ namespace proxy
         }
 
     public:
-        enum supported_protocols : uint8_t
-        {
-            tcp,
-            udp,
-            both
-        };
-
         /**
          * The socks_local_router class constructor, used to set up a local router to handle SOCKS traffic.
          * It creates instances of `tcp_local_redirect`, `socks5_udp_local_redirect` and `queued_packet_filter`
@@ -734,8 +802,8 @@ namespace proxy
 
                 // Start the IPv6 proxies (index-aligned with proxy_servers_). IPv6
                 // listeners are optional: if the OS/socket stack rejects either half
-                // of the pair, disable that IPv6 slot so later packet handling falls
-                // back to pass-through instead of redirecting to a dead local port.
+                // of the pair, disable that IPv6 slot so later packet handling blocks
+                // matched traffic instead of redirecting to a dead local port.
                 for (auto& [tcp, udp] : proxy_servers_v6_)
                 {
                     // Disable this IPv6 slot by moving its servers out of the shared
@@ -1090,11 +1158,18 @@ namespace proxy
 
                         if (const auto it = mapper.find(port); it != mapper.end())
                         {
+                            if (std::chrono::steady_clock::now() - it->second > udp_mapper_entry_ttl_)
+                            {
+                                NETLIB_LOG(log_level::warning,
+                                    "UDP Redirect entry for port {} was stale (age exceeded TTL); discarding.",
+                                    port);
+                                mapper.erase(it);
+                                return std::make_tuple(AddrT{}, 0, nullptr);
+                            }
+
                             NETLIB_LOG(log_level::info,
                                 "UDP Redirect entry was found for the {} : {}",
                                 std::string{ address }, port);
-
-                            mapper.erase(it);
 
                             return std::make_tuple(upstream.ip, upstream.port,
                                 std::make_unique<udp_negotiate_t>(
@@ -1104,7 +1179,13 @@ namespace proxy
                         }
 
                         return std::make_tuple(AddrT{}, 0, nullptr);
-                    }, log_level_, log_stream_)
+                    }, log_level_, log_stream_,
+                    [this]([[maybe_unused]] const AddrT address, const uint16_t port)
+                    {
+                        auto& mapper = udp_mapper_for<AddrT>();
+                        std::scoped_lock lock(udp_mapper_lock_for<AddrT>());
+                        mapper.erase(port);
+                    })
                 : nullptr;
 
             return { std::move(tcp_server), std::move(udp_server) };
@@ -1116,6 +1197,7 @@ namespace proxy
          * @param endpoint string representing the endpoint of the SOCKS5 proxy server.
          * @param protocols enum representing the protocols to be proxied.
          * @param cred_pair optional pair of strings representing username and password for authentication.
+         * @param address_families enum representing the destination address family/families to be proxied.
          * @param start boolean flag to start the proxy server after creating it.
          * @return an optional value containing the index of the added proxy server if successful, std::nullopt otherwise.
          */
@@ -1123,6 +1205,7 @@ namespace proxy
             const std::string& endpoint,
             const supported_protocols protocols,
             const std::optional<std::pair<std::string, std::string>>& cred_pair,
+            const supported_address_families address_families = supported_address_families::all,
             const bool start = false
         )
         {
@@ -1141,6 +1224,25 @@ namespace proxy
                 return {};
             }
 
+            const auto ipv4_destinations_enabled = family_supports_ipv4(address_families);
+            const auto ipv6_destinations_enabled = family_supports_ipv6(address_families);
+
+            if (!ipv4_destinations_enabled && !ipv6_destinations_enabled)
+            {
+                NETLIB_LOG(log_level::error,
+                    "Failed to add SOCKS5 proxy {}: no destination address families are enabled.",
+                    endpoint);
+                return {};
+            }
+
+            if (!proxy_endpoint->ipv4)
+            {
+                NETLIB_LOG(log_level::error,
+                    "Failed to add SOCKS5 proxy {}: the proxy endpoint must resolve to an IPv4 address.",
+                    endpoint);
+                return {};
+            }
+
             // Serialize the lifecycle-state mutations (filter list, proxy
             // construction/start, and proxy_servers_ insertion) against
             // start()/stop() so that this function cannot register/start a
@@ -1148,31 +1250,6 @@ namespace proxy
             // otherwise leave a running proxy that the cleanup snapshot of
             // proxy_servers_ has already missed) or with stop().
             std::scoped_lock lifecycle_lock(lifecycle_mutex_);
-
-            // Construct filter objects for the TCP and UDP traffic to and from the proxy server
-            // These filters are used to decide which packets to pass or drop
-            // They are configured to match packets based on their source/destination IP and port numbers
-            // and their protocol (TCP or UDP)
-            auto create_filter = [](const uint8_t protocol, const ndisapi::direction_t direction,
-                const net::ip_address_v4& address, const uint16_t port)
-            {
-                ndisapi::filter<net::ip_address_v4> filter;
-                filter.set_protocol(protocol)
-                    .set_direction(direction)
-                    .set_action(ndisapi::action_t::pass)
-                    .set_dest_address(net::ip_subnet{ address, net::ip_address_v4{"255.255.255.255"} })
-                    .set_dest_port(std::make_pair(port, port));
-                return filter;
-            };
-
-            const auto tcp_out_filter = create_filter(IPPROTO_TCP, ndisapi::direction_t::out, proxy_endpoint.value().ip,
-                                                      proxy_endpoint.value().port);
-            const auto tcp_in_filter = create_filter(IPPROTO_TCP, ndisapi::direction_t::in, proxy_endpoint.value().ip,
-                                                     proxy_endpoint.value().port);
-            const auto udp_out_filter = create_filter(IPPROTO_UDP, ndisapi::direction_t::out, proxy_endpoint.value().ip,
-                                                      proxy_endpoint.value().port);
-            const auto udp_in_filter = create_filter(IPPROTO_UDP, ndisapi::direction_t::in, proxy_endpoint.value().ip,
-                                                     proxy_endpoint.value().port);
 
             // NOTE: the static PASS filters for the upstream endpoint are installed only AFTER
             // the proxy pair is successfully built and (optionally) started -- see below, just
@@ -1184,46 +1261,87 @@ namespace proxy
                 // Create the IPv4 proxy-server pair first; this is the historical,
                 // required path. The IPv6 pair is best-effort below so IPv4 proxy
                 // registration still works on hosts where IPv6 sockets are disabled.
-                auto [socks_tcp_proxy_server, socks_udp_proxy_server] =
-                    build_proxy_pair<net::ip_address_v4>(proxy_endpoint.value(), protocols, cred_pair);
+                std::unique_ptr<s5_tcp_proxy_server> socks_tcp_proxy_server;
+                std::unique_ptr<s5_udp_proxy_server> socks_udp_proxy_server;
+
+                if (ipv4_destinations_enabled)
+                {
+                    auto proxy_pair_v4 = build_proxy_pair<net::ip_address_v4>(*proxy_endpoint->ipv4, protocols, cred_pair);
+                    socks_tcp_proxy_server = std::move(proxy_pair_v4.first);
+                    socks_udp_proxy_server = std::move(proxy_pair_v4.second);
+                }
 
                 std::unique_ptr<s5_tcp_proxy_server_v6> socks_tcp_proxy_server_v6;
                 std::unique_ptr<s5_udp_proxy_server_v6> socks_udp_proxy_server_v6;
+                std::optional<net::ip_endpoint<net::ip_address_v6>> upstream_v6;
 
-                try
+                if (ipv6_destinations_enabled)
                 {
-                    // The IPv6 path connects to the IPv4-mapped form of the configured
-                    // upstream over a dual-stack socket, so existing IPv4 SOCKS5
-                    // endpoints (e.g. 127.0.0.1:1080) keep working while IPv6
-                    // destinations are proxied instead of leaking.
-                    // Build the IPv4-mapped IPv6 form of the configured (IPv4) upstream
-                    // directly from its octets rather than via "::ffff:" + string parsing,
-                    // which would silently yield :: on a parse failure under NDEBUG.
-                    in6_addr mapped_upstream{};
-                    mapped_upstream.u.Byte[10] = 0xff;
-                    mapped_upstream.u.Byte[11] = 0xff;
-                    const in_addr upstream_v4 = proxy_endpoint.value().ip;
-                    memcpy(&mapped_upstream.u.Byte[12], &upstream_v4, sizeof(upstream_v4));
-                    const net::ip_endpoint<net::ip_address_v6> upstream_v6{
-                        net::ip_address_v6{ mapped_upstream },
-                        proxy_endpoint.value().port
-                    };
+                    try
+                    {
+                        // Use one deterministic upstream transport for both listener families.
+                        // AF_INET6 listeners reach the proxy's A record through an IPv4-mapped
+                        // address on their dual-stack sockets. This avoids silently selecting a
+                        // potentially unroutable AAAA record merely because the destination is IPv6.
+                        in6_addr mapped_upstream{};
+                        mapped_upstream.u.Byte[10] = 0xff;
+                        mapped_upstream.u.Byte[11] = 0xff;
+                        const in_addr upstream_v4 = proxy_endpoint->ipv4->ip;
+                        memcpy(&mapped_upstream.u.Byte[12], &upstream_v4, sizeof(upstream_v4));
+                        upstream_v6 = net::ip_endpoint<net::ip_address_v6>{
+                            net::ip_address_v6{ mapped_upstream },
+                            proxy_endpoint->ipv4->port
+                        };
 
-                    auto proxy_pair_v6 = build_proxy_pair<net::ip_address_v6>(upstream_v6, protocols, cred_pair);
-                    socks_tcp_proxy_server_v6 = std::move(proxy_pair_v6.first);
-                    socks_udp_proxy_server_v6 = std::move(proxy_pair_v6.second);
+                        auto proxy_pair_v6 = build_proxy_pair<net::ip_address_v6>(*upstream_v6, protocols, cred_pair);
+                        socks_tcp_proxy_server_v6 = std::move(proxy_pair_v6.first);
+                        socks_udp_proxy_server_v6 = std::move(proxy_pair_v6.second);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        NETLIB_LOG(log_level::warning,
+                            "IPv6 SOCKS5 proxy listeners for {} are disabled: {}",
+                            endpoint, e.what());
+                    }
+                    catch (...)
+                    {
+                        NETLIB_LOG(log_level::warning,
+                            "IPv6 SOCKS5 proxy listeners for {} are disabled: unknown error",
+                            endpoint);
+                    }
                 }
-                catch (const std::exception& e)
+
+                const auto has_requested_listeners = [protocols](const auto& tcp_server, const auto& udp_server) noexcept
                 {
-                    NETLIB_LOG(log_level::warning,
-                        "IPv6 SOCKS5 proxy listeners for {} are disabled: {}",
-                        endpoint, e.what());
-                }
-                catch (...)
+                    return (!protocol_supports_tcp(protocols) || tcp_server) &&
+                        (!protocol_supports_udp(protocols) || udp_server);
+                };
+
+                if (ipv4_destinations_enabled &&
+                    !has_requested_listeners(socks_tcp_proxy_server, socks_udp_proxy_server))
                 {
-                    NETLIB_LOG(log_level::warning,
-                        "IPv6 SOCKS5 proxy listeners for {} are disabled: unknown error",
+                    NETLIB_LOG(log_level::error,
+                        "Failed to add SOCKS5 proxy {}: IPv4 destination listeners were not created.",
                         endpoint);
+                    return {};
+                }
+
+                if (ipv6_destinations_enabled &&
+                    !has_requested_listeners(socks_tcp_proxy_server_v6, socks_udp_proxy_server_v6))
+                {
+                    if (!ipv4_destinations_enabled)
+                    {
+                        NETLIB_LOG(log_level::error,
+                            "Failed to add SOCKS5 proxy {}: IPv6 destination listeners were not created.",
+                            endpoint);
+                        return {};
+                    }
+
+                    NETLIB_LOG(log_level::warning,
+                        "IPv6 destination proxying for {} is disabled because IPv6 listeners were not created.",
+                        endpoint);
+                    socks_tcp_proxy_server_v6.reset();
+                    socks_udp_proxy_server_v6.reset();
                 }
 
                 if (start) // optionally start proxies
@@ -1248,8 +1366,11 @@ namespace proxy
                         return true;
                     };
 
-                    if (!start_listener(socks_tcp_proxy_server, "IPv4", "TCP")) return {};
-                    if (!start_listener(socks_udp_proxy_server, "IPv4", "UDP")) return {};
+                    if (ipv4_destinations_enabled)
+                    {
+                        if (!start_listener(socks_tcp_proxy_server, "IPv4", "TCP")) return {};
+                        if (!start_listener(socks_udp_proxy_server, "IPv4", "UDP")) return {};
+                    }
 
                     const auto disable_ipv6_listeners = [&]
                     {
@@ -1262,30 +1383,129 @@ namespace proxy
                         socks_udp_proxy_server_v6.reset();
                     };
 
-                    if (!start_listener(socks_tcp_proxy_server_v6, "IPv6", "TCP") ||
-                        !start_listener(socks_udp_proxy_server_v6, "IPv6", "UDP"))
+                    if (ipv6_destinations_enabled &&
+                        (!start_listener(socks_tcp_proxy_server_v6, "IPv6", "TCP") ||
+                        !start_listener(socks_udp_proxy_server_v6, "IPv6", "UDP")))
                     {
+                        if (!ipv4_destinations_enabled)
+                            return {};
+
                         disable_ipv6_listeners();
                     }
                 }
 
-                // Install the static PASS filters for the upstream endpoint only NOW that the
-                // proxy pair has been successfully built and (if requested) started. add_filter_back
-                // commits immediately to the driver, so installing earlier leaked orphaned filters
-                // on every failure path (build_proxy_pair throwing, or a required listener failing
-                // to start and returning {}). Kept under lifecycle_lock and outside lock_, mirroring
-                // the original lock scope.
-                if (protocols == both || protocols == udp)
+                // Reserve every index-aligned vector before touching the driver
+                // filter table. Once these reserves succeed, publishing the proxy
+                // pair below consists only of noexcept moves/copies.
                 {
-                    static_filters_.add_filter_back(tcp_out_filter);
-                    static_filters_.add_filter_back(tcp_in_filter);
-                    static_filters_.add_filter_back(udp_out_filter);
-                    static_filters_.add_filter_back(udp_in_filter);
+                    std::scoped_lock lock(lock_);
+                    proxy_servers_.reserve(proxy_servers_.size() + 1);
+                    proxy_servers_v6_.reserve(proxy_servers_v6_.size() + 1);
+                    proxy_protocols_.reserve(proxy_protocols_.size() + 1);
+                    proxy_address_families_.reserve(proxy_address_families_.size() + 1);
                 }
-                else if (protocols == tcp)
+
+                // Install PASS filters only for upstream addresses selected by
+                // listeners that survived construction/start. Inbound filters match
+                // the proxy as the packet source; outbound filters match it as the
+                // destination.
+                const auto install_upstream_filters = [this, protocols](const auto& upstream) -> bool  // NOLINT(clang-diagnostic-padded)
                 {
-                    static_filters_.add_filter_back(tcp_out_filter);
-                    static_filters_.add_filter_back(tcp_in_filter);
+                    using address_t = std::remove_cvref_t<decltype(upstream.ip)>;
+                    const auto mask = []
+                    {
+                        if constexpr (std::is_same_v<address_t, net::ip_address_v4>)
+                            return net::ip_address_v4{ "255.255.255.255" };
+                        else
+                            return net::ip_address_v6{ "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff" };
+                    }();
+                    const net::ip_subnet<address_t> subnet{ upstream.ip, mask };
+
+                    const auto create_filter = [&subnet, &upstream](const uint8_t protocol,
+                                                                    const ndisapi::direction_t direction,
+                                                                    const bool match_configured_port)
+                    {
+                        ndisapi::filter<address_t> filter;
+                        filter.set_protocol(protocol)
+                            .set_direction(direction)
+                            .set_action(ndisapi::action_t::pass);
+
+                        if (direction == ndisapi::direction_t::in)
+                        {
+                            filter.set_source_address(subnet);
+                            if (match_configured_port)
+                                filter.set_source_port(std::make_pair(upstream.port, upstream.port));
+                        }
+                        else
+                        {
+                            filter.set_dest_address(subnet);
+                            if (match_configured_port)
+                                filter.set_dest_port(std::make_pair(upstream.port, upstream.port));
+                        }
+
+                        return filter;  // NOLINT(clang-diagnostic-nrvo)
+                    };
+
+                    const auto first_filter_position = static_filters_.size();
+                    const auto rollback = [this, first_filter_position]
+                    {
+                        while (static_filters_.size() > first_filter_position)
+                        {
+                            if (!static_filters_.remove_filter(static_cast<uint32_t>(first_filter_position)))
+                            {
+                                NETLIB_LOG(log_level::error,
+                                    "Failed to roll back an upstream PASS filter at position {}.",
+                                    first_filter_position);
+                                break;
+                            }
+                        }
+                    };
+
+                    try
+                    {
+                        const auto add_filter = [this, &rollback](const auto& filter)
+                        {
+                            if (static_filters_.add_filter_back(filter))
+                                return true;
+
+                            rollback();
+                            return false;
+                        };
+
+                        if (!add_filter(create_filter(IPPROTO_TCP, ndisapi::direction_t::out, true)) ||
+                            !add_filter(create_filter(IPPROTO_TCP, ndisapi::direction_t::in, true)))
+                            return false;
+
+                        if (protocol_supports_udp(protocols))
+                        {
+                            // UDP ASSOCIATE may return a relay port unrelated to the
+                            // configured SOCKS5 port. Exempt the proxy host's UDP traffic
+                            // by address so relay packets cannot be captured recursively.
+                            if (!add_filter(create_filter(IPPROTO_UDP, ndisapi::direction_t::out, false)) ||
+                                !add_filter(create_filter(IPPROTO_UDP, ndisapi::direction_t::in, false)))
+                                return false;
+                        }
+
+                        return true;
+                    }
+                    catch (...)
+                    {
+                        rollback();
+                        throw;
+                    }
+                };
+
+                const bool has_ipv4_listeners = socks_tcp_proxy_server || socks_udp_proxy_server;
+                const bool has_ipv6_listeners = socks_tcp_proxy_server_v6 || socks_udp_proxy_server_v6;
+
+                if ((has_ipv4_listeners || has_ipv6_listeners) && proxy_endpoint->ipv4)
+                {
+                    if (!install_upstream_filters(*proxy_endpoint->ipv4))
+                    {
+                        NETLIB_LOG(log_level::error,
+                            "Failed to install upstream PASS filters for SOCKS5 proxy {}.", endpoint);
+                        return {};
+                    }
                 }
 
                 // Lock the mutex to safely add the proxy servers to the shared data
@@ -1293,20 +1513,12 @@ namespace proxy
                 // so they stay index-aligned (the returned index addresses both).
                 std::scoped_lock lock(lock_);
 
-                // Reserve capacity on BOTH vectors up front so the two appends below
-                // are exception-atomic: reserve() is the only step here that can throw
-                // (std::bad_alloc on reallocation), while the subsequent emplace_back of
-                // moved unique_ptrs is noexcept once capacity is guaranteed. If either
-                // reserve throws, neither vector has grown, preserving the index-alignment
-                // invariant (a half-completed append would otherwise permanently skew the
-                // vectors and silently leave IPv6 unproxied for later proxies).
-                proxy_servers_.reserve(proxy_servers_.size() + 1);
-                proxy_servers_v6_.reserve(proxy_servers_v6_.size() + 1);
-
                 proxy_servers_.emplace_back(
                     std::move(socks_tcp_proxy_server), std::move(socks_udp_proxy_server));
                 proxy_servers_v6_.emplace_back(
                     std::move(socks_tcp_proxy_server_v6), std::move(socks_udp_proxy_server_v6));
+                proxy_protocols_.push_back(protocols);
+                proxy_address_families_.push_back(address_families);
 
                 return proxy_servers_.size() - 1; // Return the index of the added proxy server
             }
@@ -1317,6 +1529,19 @@ namespace proxy
             }
 
             return {}; // Return nullopt in case of error or exception
+        }
+
+        /**
+         * Backwards-compatible overload that enables both IPv4 and IPv6 destinations.
+         */
+        std::optional<size_t> add_socks5_proxy(
+            const std::string& endpoint,
+            const supported_protocols protocols,
+            const std::optional<std::pair<std::string, std::string>>& cred_pair,
+            const bool start
+        )
+        {
+            return add_socks5_proxy(endpoint, protocols, cred_pair, supported_address_families::all, start);
         }
 
         /**
@@ -1384,67 +1609,97 @@ namespace proxy
         }
 
         /**
-         * Parses a string to construct a network endpoint, consisting of an IPv4 address and a port number.
-         * The format of the string is expected to be "IP:PORT".
-         * @param endpoint The string representation of the network endpoint.
-         * @return A std::optional containing a net::ip_endpoint<net::ip_address_v4> object if parsing is successful,
-         *         or an empty std::optional otherwise.
+         * Resolves a proxy endpoint into the first usable address of each family.
+         * Hostnames use AF_UNSPEC so an A record can be found even when DNS returns
+         * AAAA first. Proxy registration currently requires that IPv4 result; the
+         * IPv6 result is retained for diagnostics/future native-IPv6 upstream support.
          */
-        static std::optional<net::ip_endpoint<net::ip_address_v4>> parse_endpoint(const std::string& endpoint)
+        static std::optional<resolved_proxy_endpoint> parse_endpoint(const std::string& endpoint)
         {
-            net::ip_endpoint<net::ip_address_v4> result_endpoint;
+            std::string host;
+            std::string service;
 
-            // Locate the ':' character in the string. This separates the IP address and port.
-            if (const auto pos = endpoint.find(':'); pos != std::string::npos)
+            if (endpoint.starts_with('['))
             {
-                // Extract and validate the IP address.
-                auto [result_v4, address_v4] = net::ip_address_v4::from_string(endpoint.substr(0, pos));
-
-                // Extract and validate the port number.
-                if (auto [p, ec] = std::from_chars(endpoint.data() + pos + 1, endpoint.data() + endpoint.size(),
-                                                   result_endpoint.port); ec == std::errc())
+                const auto closing_bracket = endpoint.find(']');
+                if (closing_bracket == std::string::npos || closing_bracket == 1 ||
+                    closing_bracket + 2 >= endpoint.size() || endpoint[closing_bracket + 1] != ':')
                 {
-                    if (result_v4)
-                    {
-                        // If the IP address is valid, assign it to the result endpoint.
-                        result_endpoint.ip = address_v4;
-                    }
-                    else
-                    {
-                        // If the IP address is not valid, resolve it using the getaddrinfo function.
-                        addrinfo* resulted_address_info = nullptr;
-                        addrinfo hints{};
+                    return {};
+                }
 
-                        ZeroMemory(&hints, sizeof(hints));
-                        hints.ai_family = AF_INET;
-                        hints.ai_socktype = SOCK_STREAM;
-                        hints.ai_protocol = IPPROTO_TCP;
+                host = endpoint.substr(1, closing_bracket - 1);
+                service = endpoint.substr(closing_bracket + 2);
+            }
+            else
+            {
+                const auto separator = endpoint.rfind(':');
+                if (separator == std::string::npos || separator == 0 || separator + 1 >= endpoint.size() ||
+                    endpoint.find(':') != separator)
+                {
+                    return {};
+                }
 
-                        if (const auto ret_val = getaddrinfo(endpoint.substr(0, pos).c_str(),
-                                                             std::to_string(result_endpoint.port).c_str(), &hints,
-                                                             &resulted_address_info); ret_val == 0)
-                        {
-                            for (const auto* ptr = resulted_address_info; ptr != nullptr; ptr = ptr->ai_next)
-                            {
-                                if (ptr->ai_family == AF_INET)
-                                {
-                                    const auto* const ipv4 = reinterpret_cast<sockaddr_in*>(ptr->ai_addr);
-                                    result_endpoint.ip = net::ip_address_v4(ipv4->sin_addr);
-                                    break;
-                                }
-                            }
-                            freeaddrinfo(resulted_address_info);
-                        }
+                host = endpoint.substr(0, separator);
+                service = endpoint.substr(separator + 1);
+            }
+
+            uint16_t port = 0;
+            const auto [parsed_to, parse_error] =
+                std::from_chars(service.data(), service.data() + service.size(), port);
+            if (parse_error != std::errc() || parsed_to != service.data() + service.size() || port == 0)
+            {
+                return {};
+            }
+
+            addrinfo hints{};
+            hints.ai_family = AF_UNSPEC;
+            hints.ai_socktype = SOCK_STREAM;
+            hints.ai_protocol = IPPROTO_TCP;
+
+            addrinfo* addresses = nullptr;
+            if (getaddrinfo(host.c_str(), service.c_str(), &hints, &addresses) != 0)
+            {
+                return {};
+            }
+
+            resolved_proxy_endpoint result;
+            for (const auto* address = addresses; address != nullptr; address = address->ai_next)
+            {
+                if (!result.ipv4 && address->ai_family == AF_INET &&
+                    address->ai_addrlen >= static_cast<int>(sizeof(sockaddr_in)))
+                {
+                    const auto* const socket_address = reinterpret_cast<const sockaddr_in*>(address->ai_addr);
+                    const net::ip_address_v4 ip{ socket_address->sin_addr };
+                    if (ip != net::ip_address_v4{})
+                    {
+                        result.ipv4 = net::ip_endpoint<net::ip_address_v4>{ ip, port };
                     }
+                }
+                else if (!result.ipv6 && address->ai_family == AF_INET6 &&
+                    address->ai_addrlen >= static_cast<int>(sizeof(sockaddr_in6)))
+                {
+                    const auto* const socket_address = reinterpret_cast<const sockaddr_in6*>(address->ai_addr);
+                    const net::ip_address_v6 ip{ socket_address->sin6_addr };
+                    if (ip != net::ip_address_v6{})
+                    {
+                        result.ipv6 = net::ip_endpoint<net::ip_address_v6>{ ip, port };
+                    }
+                }
+
+                if (result.ipv4 && result.ipv6)
+                {
+                    break;
                 }
             }
 
-            // If the IP address is not default, return the result endpoint.
-            if (result_endpoint.ip != net::ip_address_v4{})
-                return result_endpoint;
+            freeaddrinfo(addresses);
+            if (!result.ipv4 && !result.ipv6)
+            {
+                return {};
+            }
 
-            // Otherwise, return an empty std::optional.
-            return {};
+            return result;
         }
 
     private:
@@ -1564,7 +1819,7 @@ namespace proxy
          * @return A std::optional containing the TCP port number if the process name is found,
          *         or an empty std::optional otherwise.
          */
-        std::optional<uint16_t> get_proxy_port_tcp(const std::shared_ptr<iphelper::network_process>& process)
+        proxy_port_result get_proxy_port_tcp(const std::shared_ptr<iphelper::network_process>& process)
         {
             if (!process) return {};
 
@@ -1574,9 +1829,19 @@ namespace proxy
             {
                 if (match_app_name(process_pattern, process))
                 {
-                    return proxy_id < proxy_servers_.size() && proxy_servers_[proxy_id].first
-                        ? std::optional(proxy_servers_[proxy_id].first->proxy_port())
-                        : std::nullopt;
+                    if (proxy_id >= proxy_protocols_.size() || !protocol_supports_tcp(proxy_protocols_[proxy_id]))
+                        return {};
+
+                    if (proxy_id < proxy_address_families_.size() &&
+                        !family_supports_ipv4(proxy_address_families_[proxy_id]))
+                    {
+                        return { proxy_port_action::block, 0 };
+                    }
+
+                    if (proxy_id < proxy_servers_.size() && proxy_servers_[proxy_id].first)
+                        return { proxy_port_action::proxy, proxy_servers_[proxy_id].first->proxy_port() };
+
+                    return { proxy_port_action::block, 0 };
                 }
             }
 
@@ -1589,7 +1854,7 @@ namespace proxy
          * @return A std::optional containing the UDP port number if the process name is found,
          *         or an empty std::optional otherwise.
          */
-        std::optional<uint16_t> get_proxy_port_udp(const std::shared_ptr<iphelper::network_process>& process)
+        proxy_port_result get_proxy_port_udp(const std::shared_ptr<iphelper::network_process>& process)
         {
             if (!process) return {};
 
@@ -1600,9 +1865,19 @@ namespace proxy
             {
                 if (match_app_name(process_pattern, process))
                 {
-                    return proxy_id < proxy_servers_.size() && proxy_servers_[proxy_id].second
-                        ? std::optional(proxy_servers_[proxy_id].second->proxy_port())
-                        : std::nullopt;
+                    if (proxy_id >= proxy_protocols_.size() || !protocol_supports_udp(proxy_protocols_[proxy_id]))
+                        return {};
+
+                    if (proxy_id < proxy_address_families_.size() &&
+                        !family_supports_ipv4(proxy_address_families_[proxy_id]))
+                    {
+                        return { proxy_port_action::block, 0 };
+                    }
+
+                    if (proxy_id < proxy_servers_.size() && proxy_servers_[proxy_id].second)
+                        return { proxy_port_action::proxy, proxy_servers_[proxy_id].second->proxy_port() };
+
+                    return { proxy_port_action::block, 0 };
                 }
             }
 
@@ -1654,7 +1929,7 @@ namespace proxy
          * kept index-aligned with proxy_servers_, so the same proxy_to_names_ mapping
          * selects the matching IPv6 proxy.
          */
-        std::optional<uint16_t> get_proxy_port_tcp_v6(const std::shared_ptr<iphelper::network_process>& process)
+        proxy_port_result get_proxy_port_tcp_v6(const std::shared_ptr<iphelper::network_process>& process)
         {
             if (!process) return {};
 
@@ -1664,9 +1939,19 @@ namespace proxy
             {
                 if (match_app_name(process_pattern, process))
                 {
-                    return proxy_id < proxy_servers_v6_.size() && proxy_servers_v6_[proxy_id].first
-                        ? std::optional(proxy_servers_v6_[proxy_id].first->proxy_port())
-                        : std::nullopt;
+                    if (proxy_id >= proxy_protocols_.size() || !protocol_supports_tcp(proxy_protocols_[proxy_id]))
+                        return {};
+
+                    if (proxy_id < proxy_address_families_.size() &&
+                        !family_supports_ipv6(proxy_address_families_[proxy_id]))
+                    {
+                        return { proxy_port_action::block, 0 };
+                    }
+
+                    if (proxy_id < proxy_servers_v6_.size() && proxy_servers_v6_[proxy_id].first)
+                        return { proxy_port_action::proxy, proxy_servers_v6_[proxy_id].first->proxy_port() };
+
+                    return { proxy_port_action::block, 0 };
                 }
             }
 
@@ -1676,7 +1961,7 @@ namespace proxy
         /**
          * IPv6 counterpart of get_proxy_port_udp(). See get_proxy_port_tcp_v6().
          */
-        std::optional<uint16_t> get_proxy_port_udp_v6(const std::shared_ptr<iphelper::network_process>& process)
+        proxy_port_result get_proxy_port_udp_v6(const std::shared_ptr<iphelper::network_process>& process)
         {
             if (!process) return {};
 
@@ -1686,9 +1971,19 @@ namespace proxy
             {
                 if (match_app_name(process_pattern, process))
                 {
-                    return proxy_id < proxy_servers_v6_.size() && proxy_servers_v6_[proxy_id].second
-                        ? std::optional(proxy_servers_v6_[proxy_id].second->proxy_port())
-                        : std::nullopt;
+                    if (proxy_id >= proxy_protocols_.size() || !protocol_supports_udp(proxy_protocols_[proxy_id]))
+                        return {};
+
+                    if (proxy_id < proxy_address_families_.size() &&
+                        !family_supports_ipv6(proxy_address_families_[proxy_id]))
+                    {
+                        return { proxy_port_action::block, 0 };
+                    }
+
+                    if (proxy_id < proxy_servers_v6_.size() && proxy_servers_v6_[proxy_id].second)
+                        return { proxy_port_action::proxy, proxy_servers_v6_[proxy_id].second->proxy_port() };
+
+                    return { proxy_port_action::block, 0 };
                 }
             }
 
@@ -1794,25 +2089,43 @@ namespace proxy
             if (process->excluded || process->bypass_udp)
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
 
-            if (const auto port = process->udp_proxy_port ? process->udp_proxy_port : get_proxy_port_udp(process); port.has_value())
+            const auto proxy_lookup = process->udp_proxy_port
+                ? proxy_port_result{ proxy_port_action::proxy, process->udp_proxy_port.value() }
+                : get_proxy_port_udp(process);
+
+            if (proxy_lookup.action == proxy_port_action::proxy)
             {
-                if (udp_redirect_->is_new_endpoint(buffer))
-                {
-                    std::scoped_lock lock(udp_mapper_lock_);
-                    udp_mapper_.insert(ntohs(udp_header->th_sport));
+                const auto is_new_endpoint = udp_redirect_->is_new_endpoint(buffer);
+                const auto source_address = net::ip_address_v4(ip_header->ip_src);
+                const auto source_port = ntohs(udp_header->th_sport);
+                const auto destination_address = net::ip_address_v4(ip_header->ip_dst);
+                const auto destination_port = ntohs(udp_header->th_dport);
 
-                    NETLIB_LOG(log_level::info,
-                        "Redirecting UDP {} : {} -> {} : {}",
-                        net::ip_address_v4(ip_header->ip_src), ntohs(udp_header->th_sport),
-                        net::ip_address_v4(ip_header->ip_dst), ntohs(udp_header->th_dport));
-                }
-
-                if (udp_redirect_->process_client_to_server_packet(buffer, htons(port.value())))
+                if (udp_redirect_->process_client_to_server_packet(buffer, htons(proxy_lookup.port)))
                 {
+                    // Refresh authorization for every datagram that was actually redirected. A
+                    // SOCKS5 relay expires sooner than the redirect endpoint, so the next packet
+                    // must be able to authorize recreation even when the endpoint is not new.
+                    {
+                        std::scoped_lock lock(udp_mapper_lock_);
+                        udp_mapper_.insert_or_assign(source_port, std::chrono::steady_clock::now());
+                    }
+
+                    if (is_new_endpoint)
+                    {
+                        NETLIB_LOG(log_level::info,
+                            "Redirecting UDP {} : {} -> {} : {}",
+                            source_address, source_port, destination_address, destination_port);
+                    }
+
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
 
+            }
+            else if (proxy_lookup.action == proxy_port_action::block)
+            {
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
             }
             else
             {
@@ -1887,7 +2200,11 @@ namespace proxy
             if (process->excluded || process->bypass_tcp)
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
 
-            if (const auto port = process->tcp_proxy_port ? process->tcp_proxy_port : get_proxy_port_tcp(process); port.has_value())
+            const auto proxy_lookup = process->tcp_proxy_port
+                ? proxy_port_result{ proxy_port_action::proxy, process->tcp_proxy_port.value() }
+                : get_proxy_port_tcp(process);
+
+            if (proxy_lookup.action == proxy_port_action::proxy)
             {
                 // If this is a SYN packet (connection initiation), map the source port to the destination endpoint
                 if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
@@ -1906,11 +2223,15 @@ namespace proxy
                 }
 
                 // Attempt to process the packet for client-to-server redirection
-                if (tcp_redirect_->process_client_to_server_packet(buffer, htons(port.value())))
+                if (tcp_redirect_->process_client_to_server_packet(buffer, htons(proxy_lookup.port)))
                 {
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
+            }
+            else if (proxy_lookup.action == proxy_port_action::block)
+            {
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
             }
             else
             {
@@ -2053,24 +2374,44 @@ namespace proxy
             if (process->excluded || process->bypass_udp)
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
 
-            if (const auto port = process->udp_proxy_port ? process->udp_proxy_port : get_proxy_port_udp_v6(process); port.has_value())
+            const auto proxy_lookup = get_proxy_port_udp_v6(process);
+
+            if (proxy_lookup.action == proxy_port_action::proxy)
             {
-                if (udp_redirect_v6_->is_new_endpoint(buffer))
-                {
-                    std::scoped_lock lock(udp_mapper_v6_lock_);
-                    udp_mapper_v6_.insert(ntohs(udp_header->th_sport));
+                const auto is_new_endpoint = udp_redirect_v6_->is_new_endpoint(buffer);
+                const auto source_address = std::string{ net::ip_address_v6{ip_header->ip6_src} };
+                const auto source_port = ntohs(udp_header->th_sport);
+                const auto destination_address = std::string{ net::ip_address_v6{ip_header->ip6_dst} };
+                const auto destination_port = ntohs(udp_header->th_dport);
 
-                    NETLIB_LOG(log_level::info,
-                        "Redirecting UDP6 {} : {} -> {} : {}",
-                        std::string{ net::ip_address_v6{ip_header->ip6_src} }, ntohs(udp_header->th_sport),
-                        std::string{ net::ip_address_v6{ip_header->ip6_dst} }, ntohs(udp_header->th_dport));
-                }
-
-                if (udp_redirect_v6_->process_client_to_server_packet(buffer, htons(port.value())))
+                if (udp_redirect_v6_->process_client_to_server_packet(buffer, htons(proxy_lookup.port)))
                 {
+                    {
+                        std::scoped_lock lock(udp_mapper_v6_lock_);
+                        udp_mapper_v6_.insert_or_assign(source_port, std::chrono::steady_clock::now());
+                    }
+
+                    if (is_new_endpoint)
+                    {
+                        NETLIB_LOG(log_level::info,
+                            "Redirecting UDP6 {} : {} -> {} : {}",
+                            source_address, source_port, destination_address, destination_port);
+                    }
+
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
+            }
+            else if (proxy_lookup.action == proxy_port_action::block)
+            {
+                static std::atomic_flag warned = ATOMIC_FLAG_INIT; // NOLINT(clang-diagnostic-exit-time-destructors, clang-diagnostic-unique-object-duplication)
+                if (!warned.test_and_set(std::memory_order_relaxed))
+                {
+                    NETLIB_LOG(log_level::warning,
+                        "Blocking IPv6 UDP traffic for a matched process because the selected proxy does not support IPv6 destinations.");
+                }
+
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
             }
             else
             {
@@ -2138,7 +2479,9 @@ namespace proxy
             if (process->excluded || process->bypass_tcp)
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
 
-            if (const auto port = process->tcp_proxy_port ? process->tcp_proxy_port : get_proxy_port_tcp_v6(process); port.has_value())
+            const auto proxy_lookup = get_proxy_port_tcp_v6(process);
+
+            if (proxy_lookup.action == proxy_port_action::proxy)
             {
                 // If this is a SYN packet (connection initiation), map the source port to the destination endpoint
                 if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
@@ -2158,11 +2501,22 @@ namespace proxy
                 }
 
                 // Attempt to process the packet for client-to-server redirection
-                if (tcp_redirect_v6_->process_client_to_server_packet(buffer, htons(port.value())))
+                if (tcp_redirect_v6_->process_client_to_server_packet(buffer, htons(proxy_lookup.port)))
                 {
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
+            }
+            else if (proxy_lookup.action == proxy_port_action::block)
+            {
+                static std::atomic_flag warned = ATOMIC_FLAG_INIT; // NOLINT(clang-diagnostic-exit-time-destructors, clang-diagnostic-unique-object-duplication)
+                if (!warned.test_and_set(std::memory_order_relaxed))
+                {
+                    NETLIB_LOG(log_level::warning,
+                        "Blocking IPv6 TCP traffic for a matched process because the selected proxy does not support IPv6 destinations.");
+                }
+
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
             }
             else
             {
@@ -2256,8 +2610,8 @@ namespace proxy
             std::vector<netlib::ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> to_adapters;
             std::vector<netlib::ndisapi::intermediate_buffer_pool::intermediate_buffer_ptr> to_mstcp;
 
-            // Run the tcp_mapper_ sweep at most once per maintenance interval, even
-            // under heavy resolver activity. The interval is half the TTL so an
+            // Run the source-port mapper sweeps at most once per maintenance interval,
+            // even under heavy resolver activity. The interval is half the TTL so an
             // entry is evicted within at most 1.5 * TTL of becoming stale, and the
             // condition variable below uses the same period as its wait timeout so
             // the sweep still runs when the deferred-resolve queue stays empty.
@@ -2269,8 +2623,8 @@ namespace proxy
             {
                 {
                     std::unique_lock lock(process_resolve_buffer_mutex_);
-                    // Timed wait so we still run periodic maintenance (tcp_mapper_
-                    // TTL eviction) when no packets are being deferred. Also wake
+                    // Timed wait so we still run periodic mapper TTL eviction when no
+                    // packets are being deferred. Also wake
                     // early for maintenance-only notifications so throttled
                     // alloc-failure/drop diagnostics are not delayed until the next
                     // timeout when no packet was actually queued, but only once
@@ -2300,12 +2654,9 @@ namespace proxy
                     std::swap(process_resolve_buffer_queue_, local_queue);
                 }
 
-                // Evict stale tcp_mapper_ entries whose SYN was redirected but never
-                // produced a local proxy connection (e.g. peer RST, timeout, app gave
-                // up). Without this sweep such entries would leak indefinitely since
-                // the only other removal site is the SOCKS5 negotiate callback. The
-                // sweep is rate-limited to maintenance_interval to bound CPU cost
-                // when the resolver loop runs frequently under sustained load.
+                // Evict stale source-port entries whose redirected traffic never
+                // completed local proxy setup. The sweep is rate-limited to
+                // maintenance_interval to bound CPU cost under sustained load.
                 if (const auto now = std::chrono::steady_clock::now();
                     now - last_sweep >= maintenance_interval)
                 {
@@ -2333,6 +2684,39 @@ namespace proxy
                             if (now - it->second.created_at > tcp_mapper_entry_ttl_)
                             {
                                 it = tcp_mapper_v6_.erase(it);
+                            }
+                            else
+                            {
+                                ++it;
+                            }
+                        }
+                    }
+
+                    // UDP authorizations remain present while SOCKS5 TCP connect and
+                    // UDP ASSOCIATE are in progress so a failed attempt can be retried.
+                    // Age out authorizations that never reach the commit callback.
+                    {
+                        std::scoped_lock lock(udp_mapper_lock_);
+                        for (auto it = udp_mapper_.begin(); it != udp_mapper_.end();)
+                        {
+                            if (now - it->second > udp_mapper_entry_ttl_)
+                            {
+                                it = udp_mapper_.erase(it);
+                            }
+                            else
+                            {
+                                ++it;
+                            }
+                        }
+                    }
+
+                    {
+                        std::scoped_lock lock(udp_mapper_v6_lock_);
+                        for (auto it = udp_mapper_v6_.begin(); it != udp_mapper_v6_.end();)
+                        {
+                            if (now - it->second > udp_mapper_entry_ttl_)
+                            {
+                                it = udp_mapper_v6_.erase(it);
                             }
                             else
                             {
@@ -2466,6 +2850,11 @@ namespace proxy
                             {
                                 to_mstcp.push_back(std::move(buffer_ptr));
                             }
+                            else if (result && result->action == packet_filter::packet_action::action_type::drop)
+                            {
+                                // Drop is a valid deferred result when a matched
+                                // proxy intentionally blocks this address family.
+                            }
                             else
                             {
                                 // Invariant: a postponed packet always yields a result. If a
@@ -2485,6 +2874,11 @@ namespace proxy
                             else if (result && result->action == packet_filter::packet_action::action_type::revert)
                             {
                                 to_mstcp.push_back(std::move(buffer_ptr));
+                            }
+                            else if (result && result->action == packet_filter::packet_action::action_type::drop)
+                            {
+                                // Drop is a valid deferred result when a matched
+                                // proxy intentionally blocks this address family.
                             }
                             else
                             {
@@ -2515,6 +2909,11 @@ namespace proxy
                         {
                             to_mstcp.push_back(std::move(buffer_ptr));
                         }
+                        else if (result && result->action == packet_filter::packet_action::action_type::drop)
+                        {
+                            // Drop is a valid deferred result when a matched
+                            // proxy intentionally blocks this address family.
+                        }
                         else
                         {
                             // Should always have a result for postponed packets; if not,
@@ -2533,6 +2932,11 @@ namespace proxy
                         else if (result && result->action == packet_filter::packet_action::action_type::revert)
                         {
                             to_mstcp.push_back(std::move(buffer_ptr));
+                        }
+                        else if (result && result->action == packet_filter::packet_action::action_type::drop)
+                        {
+                            // Drop is a valid deferred result when a matched
+                            // proxy intentionally blocks this address family.
                         }
                         else
                         {
@@ -2749,7 +3153,7 @@ namespace proxy
             // redirect also captures IPv4-mapped destinations (::ffff:a.b.c.d) that a
             // dual-stack app opens to a v4 LAN host, the IPv4 private/link-local/multicast
             // ranges are also exempted in their v4-mapped form so bypassLan covers them.
-            static constexpr std::array<const char*, 9> local_ranges{ {
+            static constexpr std::array<const char*, 10> local_ranges{ {
                 "::1/128",                  // Loopback
                 "fe80::/10",                // Link-local unicast
                 "fc00::/7",                 // Unique local addresses (ULA)
@@ -2758,7 +3162,8 @@ namespace proxy
                 "::ffff:172.16.0.0/108",    // IPv4-mapped 172.16.0.0/12 (private)
                 "::ffff:192.168.0.0/112",   // IPv4-mapped 192.168.0.0/16 (private)
                 "::ffff:169.254.0.0/112",   // IPv4-mapped 169.254.0.0/16 (link-local)
-                "::ffff:127.0.0.0/104"      // IPv4-mapped loopback
+                "::ffff:127.0.0.0/104",     // IPv4-mapped loopback
+                "::ffff:224.0.0.0/100"      // IPv4-mapped 224.0.0.0/4 (multicast)
             } };
 
             for (const auto* const cidr : local_ranges)

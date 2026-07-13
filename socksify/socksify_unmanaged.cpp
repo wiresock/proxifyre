@@ -236,6 +236,7 @@ void socksify_unmanaged::set_bypass_lan() const
  * @brief Adds a SOCKS5 proxy to the gateway.
  * @param endpoint The proxy endpoint in "IP:Port" format.
  * @param protocol The supported protocol(s) for the proxy.
+ * @param address_family The supported destination address family/families.
  * @param start Whether to start the proxy immediately.
  * @param login Optional username for authentication.
  * @param password Optional password for authentication.
@@ -244,6 +245,7 @@ void socksify_unmanaged::set_bypass_lan() const
 LONG_PTR socksify_unmanaged::add_socks5_proxy(
     const std::string& endpoint,
     const supported_protocols_mx protocol,
+    const supported_address_families_mx address_family,
     const bool start,
     const std::string& login,
     const std::string& password) const
@@ -270,12 +272,40 @@ LONG_PTR socksify_unmanaged::add_socks5_proxy(
         break;
     }
 
-    if (const auto result = proxy_->add_socks5_proxy(endpoint, protocols, cred, start); result)
+    proxy::socks_local_router::supported_address_families address_families =
+        proxy::socks_local_router::supported_address_families::all;
+    switch (address_family)
+    {
+    case supported_address_families_mx::ipv4:
+        address_families = proxy::socks_local_router::supported_address_families::ipv4;
+        break;
+    case supported_address_families_mx::ipv6:
+        address_families = proxy::socks_local_router::supported_address_families::ipv6;
+        break;
+    case supported_address_families_mx::both:
+        address_families = proxy::socks_local_router::supported_address_families::all;
+        break;
+    }
+
+    if (const auto result = proxy_->add_socks5_proxy(endpoint, protocols, cred, address_families, start); result)
     {
         return static_cast<LONG_PTR>(result.value());
     }
 
     return -1;
+}
+
+/**
+ * @brief Adds a SOCKS5 proxy with both IPv4 and IPv6 destinations enabled.
+ */
+LONG_PTR socksify_unmanaged::add_socks5_proxy(
+    const std::string& endpoint,
+    const supported_protocols_mx protocol,
+    const bool start,
+    const std::string& login,
+    const std::string& password) const
+{
+    return add_socks5_proxy(endpoint, protocol, supported_address_families_mx::both, start, login, password);
 }
 
 /**

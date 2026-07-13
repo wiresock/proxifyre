@@ -30,6 +30,7 @@ The application uses a configuration file named `app-config.json`. This JSON fil
 - **username**: A string that specifies the username for the proxy (optional).
 - **password**: A string that specifies the password for the proxy (optional).
 - **supportedProtocols**: An array of strings specifying the supported protocols (e.g., `"TCP"`, `"UDP"`).
+- **supportedAddressFamilies**: An array containing `"IPv4"`, `"IPv6"`, or both. If omitted, both are enabled. An explicit empty array or any other value is rejected as a configuration error.
 - **excludes** *(new in v2.1.1)*: An array of application names or paths to exclude from proxy routing.
 - **bypassLan** *(new in v2.2.0)*: A boolean to bypass proxy for local network traffic (default: `false`).
 
@@ -54,10 +55,26 @@ LogLevel can have one of the following values which define the detail of the log
 
 ---
 
+### supportedAddressFamilies
+
+Use `supportedAddressFamilies` when a SOCKS5 proxy cannot relay every destination address family. For example, an IPv4-only proxy should be configured with:
+
+```json
+"supportedAddressFamilies": ["IPv4"]
+```
+
+For a matched application, unsupported destination families are blocked instead of being passed through directly or sent to a SOCKS path that cannot complete. This prevents IPv6 leaks and lets browsers fall back to IPv4 when the proxy only supports IPv4 destinations.
+
+If the field is omitted, ProxiFyre assumes both IPv4 and IPv6 destinations are supported, preserving the previous behavior.
+
+---
+
 ### Excludes (new in v2.1.1)
 
 The `excludes` section lets you define processes that should **bypass the proxy**.  
 This is useful when you want a global proxy setup but keep certain apps (like browsers, local dev tools, or games) unproxied.
+
+When using a catch-all proxy entry (`"appNames": [""]`) together with another VPN, exclude the VPN's carrier process. Otherwise ProxiFyre can capture the VPN's outer tunnel packets, causing the proxy connection to recursively depend on itself and eventually time out.
 
 Unlike `appNames`, exclusion entries match by **substring** (a name is matched against the process's filename, a path-form entry against the full path) — so `chrome` also excludes `chrome_proxy.exe`. Exclusion is deliberately permissive so an app you meant to keep direct is not accidentally proxied.
 
@@ -72,7 +89,8 @@ Example:
       "socks5ProxyEndpoint": "oracle.sshvpn.me:1080",
       "username": "username1",
       "password": "password1",
-      "supportedProtocols": ["TCP", "UDP"]
+      "supportedProtocols": ["TCP", "UDP"],
+      "supportedAddressFamilies": ["IPv4", "IPv6"]
     }
   ],
   "excludes": [
@@ -105,7 +123,8 @@ Example:
     {
       "appNames": ["chrome", "firefox"],
       "socks5ProxyEndpoint": "127.0.0.1:1080",
-      "supportedProtocols": ["TCP", "UDP"]
+      "supportedProtocols": ["TCP", "UDP"],
+      "supportedAddressFamilies": ["IPv4", "IPv6"]
     }
   ]
 }
@@ -131,12 +150,14 @@ If the SOCKS5 proxy does not support authorization, you can skip the `username` 
      "socks5ProxyEndpoint": "158.101.205.51:1080",
      "username": "username1",
      "password": "password1",
-     "supportedProtocols": ["TCP", "UDP"]
+     "supportedProtocols": ["TCP", "UDP"],
+     "supportedAddressFamilies": ["IPv4", "IPv6"]
    },
    {
      "appNames": ["firefox", "firefox_dev"],
      "socks5ProxyEndpoint": "127.0.0.1:8080",
-     "supportedProtocols": ["TCP"]
+     "supportedProtocols": ["TCP"],
+     "supportedAddressFamilies": ["IPv4"]
    }
  ],
  "excludes": [
@@ -191,7 +212,7 @@ Please ensure you download the correct installer to avoid any installation issue
 
 ### Running the Application
 
-4. **Run the Application**: Navigate to the directory where you extracted the software. Find the main application executable (`ProxiFyre.exe`) and run it. It's recommended to run the application as an administrator to ensure all functionalities work as expected.
+4. **Run the Application**: Navigate to the directory where you extracted the software. Start `ProxiFyre.exe` from an Administrator console. Administrative privileges are required for reliable process ownership, exclusions, and packet redirection; interactive startup exits with an error when it is not elevated.
 
 ⚠️ **Firewall Note**: If ProxiFyre does not appear to work, check Windows Firewall. ProxiFyre needs to accept and initiate network connections.
 
