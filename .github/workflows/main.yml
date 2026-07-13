@@ -16,7 +16,7 @@ jobs:
             build_configuration: 'Release'
           - platform: 'ARM64'
             build_configuration: 'Release'
-    runs-on: windows-latest
+    runs-on: windows-2022
     permissions:
       contents: write
     steps:
