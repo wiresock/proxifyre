@@ -5,6 +5,14 @@ Signs and transactionally replaces the ProxiFyre release archives.
 .PARAMETER VersionTag
 Release version without the leading "v", for example "2.3.0".
 
+.PARAMETER DryRun
+Runs the complete local download, signing, repacking, and verification pipeline
+without uploading or deleting any GitHub release assets.
+
+.PARAMETER DryRunOutputDirectory
+Optional directory for verified dry-run archives. When omitted, a unique
+directory is created under the system temporary directory.
+
 .EXAMPLE
 .\sign-update-release.ps1 -VersionTag 2.3.0
 
@@ -15,6 +23,11 @@ binaries, uploads the signed archives, and then removes the unsigned archives.
 .\sign-update-release.ps1 -VersionTag 2.3.0 -WhatIf
 
 Checks authentication and source assets without signing or changing the release.
+
+.EXAMPLE
+.\sign-update-release.ps1 -VersionTag 2.3.0 -DryRun -DryRunOutputDirectory .\signed-v2.3.0
+
+Builds and verifies signed archives locally without changing the GitHub release.
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "High")]
 param (
@@ -25,11 +38,19 @@ param (
         }
         $true
     })]
-    [string]$VersionTag
+    [string]$VersionTag,
+
+    [switch]$DryRun,
+
+    [string]$DryRunOutputDirectory
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if (-not [string]::IsNullOrWhiteSpace($DryRunOutputDirectory) -and -not $DryRun) {
+    throw "-DryRunOutputDirectory can only be used together with -DryRun."
+}
 
 $owner = "wiresock"
 $repository = "ProxiFyre"
@@ -70,7 +91,7 @@ function Get-RelativeFileSet {
         [string]$RootPath
     )
 
-    $root = (Resolve-Path -LiteralPath $RootPath).Path.TrimEnd([char[]]"\/")
+    $root = [IO.Path]::GetFullPath($RootPath).TrimEnd([char[]]"\/")
     return @(
         Get-ChildItem -LiteralPath $root -File -Recurse -Force |
             ForEach-Object {
@@ -100,7 +121,7 @@ function Get-CurrentReleaseAssets {
         Get-GitHubReleaseAsset `
             -OwnerName $script:owner `
             -RepositoryName $script:repository `
-            -Release $script:release.id
+            -ReleaseId $script:release.id
     )
 }
 
@@ -117,7 +138,7 @@ function Remove-SigningWorkspace {
         return
     }
 
-    $resolvedWorkspace = (Resolve-Path -LiteralPath $WorkspacePath).Path
+    $resolvedWorkspace = [IO.Path]::GetFullPath($WorkspacePath)
     $resolvedTempRoot = [IO.Path]::GetFullPath($TempRoot).TrimEnd([char[]]"\/") + [IO.Path]::DirectorySeparatorChar
     $workspaceName = Split-Path -Leaf $resolvedWorkspace
 
@@ -140,6 +161,7 @@ if (-not (Get-Module -ListAvailable PowerShellForGitHub)) {
     throw "The PowerShellForGitHub module is not installed."
 }
 Import-Module PowerShellForGitHub -ErrorAction Stop
+$webRequestSupportsBasicParsing = (Get-Command Invoke-WebRequest).Parameters.ContainsKey("UseBasicParsing")
 
 # Resolve the release and all source assets before doing any signing work. This
 # verifies GitHub authentication and prevents local work for an incomplete release.
@@ -177,13 +199,42 @@ foreach ($architecture in $architectures) {
     }
 }
 
-$operation = "sign, verify, and replace the three ZIP assets for $releaseTag"
-if (-not $PSCmdlet.ShouldProcess("$owner/$repository release $releaseTag", $operation)) {
+$operation = if ($DryRun) {
+    "download, sign, repack, and verify the three ZIP assets locally"
+}
+else {
+    "sign, verify, and replace the three ZIP assets for $releaseTag"
+}
+$operationTarget = if ($DryRun) {
+    "local dry-run workspace for $releaseTag"
+}
+else {
+    "$owner/$repository release $releaseTag"
+}
+
+# WhatIf remains a lightweight authenticated preflight. DryRun intentionally
+# continues through the complete local signing pipeline without remote mutation.
+if ($WhatIfPreference) {
+    [void]$PSCmdlet.ShouldProcess($operationTarget, $operation)
+    return
+}
+if (-not $DryRun -and -not $PSCmdlet.ShouldProcess($operationTarget, $operation)) {
     return
 }
 
 $tempRoot = [IO.Path]::GetTempPath()
 $workspace = Join-Path $tempRoot "ProxiFyre-sign-$VersionTag-$([guid]::NewGuid().ToString('N'))"
+$dryRunOutputPath = $null
+if ($DryRun) {
+    if ([string]::IsNullOrWhiteSpace($DryRunOutputDirectory)) {
+        $dryRunOutputPath = Join-Path $tempRoot "ProxiFyre-dry-run-$VersionTag-$([guid]::NewGuid().ToString('N'))"
+    }
+    else {
+        $dryRunOutputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+            $DryRunOutputDirectory
+        )
+    }
+}
 New-Item -ItemType Directory -Path $workspace | Out-Null
 
 try {
@@ -195,7 +246,14 @@ try {
         $verifyPath = Join-Path $workspace "$([IO.Path]::GetFileNameWithoutExtension($artifact.SignedName))-verify"
         $signedPath = Join-Path $workspace $artifact.SignedName
 
-        Invoke-WebRequest -Uri $artifact.DownloadUrl -OutFile $downloadPath -UseBasicParsing
+        $webRequestParameters = @{
+            Uri     = $artifact.DownloadUrl
+            OutFile = $downloadPath
+        }
+        if ($webRequestSupportsBasicParsing) {
+            $webRequestParameters.UseBasicParsing = $true
+        }
+        Invoke-WebRequest @webRequestParameters
         if ([int64](Get-Item -LiteralPath $downloadPath).Length -ne $artifact.OriginalLength) {
             throw "Downloaded asset '$($artifact.OriginalName)' has an unexpected size."
         }
@@ -249,6 +307,38 @@ try {
         $artifact.SignedLength = [int64](Get-Item -LiteralPath $signedPath).Length
     }
 
+    if ($DryRun) {
+        if (Test-Path -LiteralPath $dryRunOutputPath) {
+            if (-not (Test-Path -LiteralPath $dryRunOutputPath -PathType Container)) {
+                throw "Dry-run output path '$dryRunOutputPath' is not a directory."
+            }
+            if (@(Get-ChildItem -LiteralPath $dryRunOutputPath -Force).Count -ne 0) {
+                throw "Dry-run output directory '$dryRunOutputPath' must be empty."
+            }
+        }
+        else {
+            New-Item -ItemType Directory -Path $dryRunOutputPath | Out-Null
+        }
+
+        foreach ($artifact in $artifacts) {
+            $outputPath = Join-Path $dryRunOutputPath $artifact.SignedName
+            Copy-Item -LiteralPath $artifact.SignedPath -Destination $outputPath
+
+            $outputLength = [int64](Get-Item -LiteralPath $outputPath).Length
+            $sourceHash = (Get-FileHash -LiteralPath $artifact.SignedPath -Algorithm SHA256).Hash
+            $outputHash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash
+            if ($outputLength -ne $artifact.SignedLength -or $outputHash -ne $sourceHash) {
+                throw "Dry-run output verification failed for '$($artifact.SignedName)'."
+            }
+
+            Write-Host "Verified dry-run archive: $outputPath (SHA256 $outputHash)"
+        }
+
+        Write-Host "Dry run completed without modifying GitHub release $releaseTag."
+        Write-Host "Verified archives are available at '$dryRunOutputPath'."
+        return
+    }
+
     # Re-check source asset IDs after signing so a concurrent release edit cannot
     # cause this run to replace assets different from those it downloaded.
     $currentAssets = Get-CurrentReleaseAssets
@@ -270,7 +360,7 @@ try {
             Remove-GitHubReleaseAsset `
                 -OwnerName $owner `
                 -RepositoryName $repository `
-                -Asset ([int64]$asset.id) `
+                -AssetId ([int64]$asset.id) `
                 -Force
         }
     }
@@ -280,7 +370,7 @@ try {
         New-GitHubReleaseAsset `
             -OwnerName $owner `
             -RepositoryName $repository `
-            -Release ([int64]$release.id) `
+            -ReleaseId ([int64]$release.id) `
             -Path $artifact.SignedPath | Out-Null
     }
 
@@ -307,7 +397,7 @@ try {
         Remove-GitHubReleaseAsset `
             -OwnerName $owner `
             -RepositoryName $repository `
-            -Asset $artifact.OriginalAssetId `
+            -AssetId $artifact.OriginalAssetId `
             -Force
     }
 
