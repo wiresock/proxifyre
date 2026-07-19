@@ -2,6 +2,39 @@
 
 namespace proxy
 {
+    /**
+     * @brief Transport used to reach an upstream SOCKS5 proxy.
+     */
+    enum class socks5_transport : uint8_t
+    {
+        tcp = 0,
+        tls = 1
+    };
+
+    /**
+     * @brief TLS options for SOCKS5-over-TLS upstream connections.
+     */
+    struct socks5_tls_options
+    {
+        std::string server_name;
+        std::string pinned_cert_sha256;
+        bool allow_invalid_certificate = false;
+    };
+
+    /**
+     * @brief Full upstream connection options for a SOCKS5 proxy.
+     */
+    struct socks5_upstream_options
+    {
+        socks5_transport transport = socks5_transport::tcp;
+        socks5_tls_options tls;
+
+        [[nodiscard]] bool is_tls() const noexcept
+        {
+            return transport == socks5_transport::tls;
+        }
+    };
+
 #pragma pack(push,1) // Ensure tightly packed structures for protocol compliance
 
     // Constants defining SOCKS5 protocol specifics
@@ -154,6 +187,16 @@ namespace proxy
         }
 
         /**
+         * @brief Constructor for anonymous SOCKS5 negotiation with upstream transport options.
+         */
+        socks5_negotiate_context(const T& remote_address, uint16_t remote_port,
+            socks5_upstream_options upstream_options)
+            : negotiate_context<T>(remote_address, remote_port),
+            upstream_options(std::move(upstream_options))
+        {
+        }
+
+        /**
          * @brief Constructor for negotiation with optional auth parameters.
          */
         socks5_negotiate_context(const T& remote_srv_address, uint16_t remote_srv_port,
@@ -161,6 +204,19 @@ namespace proxy
             : negotiate_context<T>(remote_srv_address, remote_srv_port),
             socks5_username(std::move(socks5_username)),
             socks5_password(std::move(socks5_password))
+        {
+        }
+
+        /**
+         * @brief Constructor for negotiation with optional auth and upstream transport options.
+         */
+        socks5_negotiate_context(const T& remote_srv_address, uint16_t remote_srv_port,
+            std::optional<std::string> socks5_username, std::optional<std::string> socks5_password,
+            socks5_upstream_options upstream_options)
+            : negotiate_context<T>(remote_srv_address, remote_srv_port),
+            socks5_username(std::move(socks5_username)),
+            socks5_password(std::move(socks5_password)),
+            upstream_options(std::move(upstream_options))
         {
         }
 
@@ -177,5 +233,6 @@ namespace proxy
 
         std::optional<std::string> socks5_username{ std::nullopt }; ///< Optional username
         std::optional<std::string> socks5_password{ std::nullopt }; ///< Optional password
+        socks5_upstream_options upstream_options{}; ///< Upstream SOCKS transport options
     };
 }

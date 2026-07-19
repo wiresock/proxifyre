@@ -114,6 +114,230 @@ namespace proxy
         }
 
         /**
+         * @brief Starts plain SOCKS5 negotiation or the native SOCKS5-over-TLS path.
+         */
+        bool start() override
+        {
+            auto* const negotiate_context_ptr = dynamic_cast<negotiate_context_t*>(
+                tcp_proxy_socket<T>::negotiate_ctx_.get());
+            if (negotiate_context_ptr == nullptr || !negotiate_context_ptr->upstream_options.is_tls())
+            {
+                return tcp_proxy_socket<T>::start();
+            }
+
+            return start_tls_transport(*negotiate_context_ptr);
+        }
+
+        void process_receive_buffer_complete(const uint32_t io_size, per_io_context_t* io_context) override
+        {
+            if (!tls_relay_active_.load(std::memory_order_acquire))
+            {
+                tcp_proxy_socket<T>::process_receive_buffer_complete(io_size, io_context);
+                return;
+            }
+
+            NETLIB_DEBUG(
+                "SOCKS5Tls relay received {} bytes from the {} socket",
+                io_size,
+                io_context->is_local ? "local" : "upstream");
+
+            std::scoped_lock lock(tcp_proxy_socket<T>::lock_);
+            tcp_proxy_socket<T>::timestamp_ = std::chrono::steady_clock::now();
+
+            if (tcp_proxy_socket<T>::connection_status_ == connection_status::client_completed)
+            {
+                if (io_context->is_local)
+                {
+                    tcp_proxy_socket<T>::local_recv_buf_.len = 0;
+                }
+                else
+                {
+                    tcp_proxy_socket<T>::remote_recv_buf_.len = 0;
+                }
+                return;
+            }
+
+            if (io_context->is_local)
+            {
+                tcp_proxy_socket<T>::local_recv_buf_.len = 0;
+                if (tcp_proxy_socket<T>::remote_send_buf_.len != 0)
+                {
+                    NETLIB_ERROR("SOCKS5Tls relay invariant failed: overlapping sends to the upstream proxy");
+                    tcp_proxy_socket<T>::close_client<true>(true, true);
+                    return;
+                }
+
+                if (!tls_stream_->encrypt(
+                    tcp_proxy_socket<T>::from_local_to_remote_buffer_.data(),
+                    io_size,
+                    tls_encrypted_send_buffer_))
+                {
+                    NETLIB_WARNING("SOCKS5Tls relay encryption failed: {}", tls_stream_->last_error());
+                    tcp_proxy_socket<T>::close_client<true>(true, true);
+                    return;
+                }
+
+                if (!post_tls_remote_send_locked())
+                {
+                    tcp_proxy_socket<T>::close_client<true>(false, false);
+                }
+                return;
+            }
+
+            tcp_proxy_socket<T>::remote_recv_buf_.len = 0;
+            if (tcp_proxy_socket<T>::local_send_buf_.len != 0)
+            {
+                NETLIB_ERROR("SOCKS5Tls relay invariant failed: overlapping sends to the local client");
+                tcp_proxy_socket<T>::close_client<true>(true, false);
+                return;
+            }
+
+            const auto decrypt_result = tls_stream_->decrypt_available(
+                tcp_proxy_socket<T>::from_remote_to_local_buffer_.data(),
+                io_size,
+                tls_plaintext_send_buffer_);
+            if (decrypt_result == schannel_tls_stream::decrypt_status::failed)
+            {
+                NETLIB_WARNING("SOCKS5Tls relay decryption failed: {}", tls_stream_->last_error());
+                tcp_proxy_socket<T>::close_client<true>(true, false);
+                return;
+            }
+
+            if (decrypt_result == schannel_tls_stream::decrypt_status::closed)
+            {
+                tls_remote_closed_ = true;
+                tcp_proxy_socket<T>::connection_status_ = connection_status::client_completed;
+            }
+
+            if (!tls_plaintext_send_buffer_.empty())
+            {
+                if (!post_tls_local_send_locked())
+                {
+                    tcp_proxy_socket<T>::close_client<true>(false, true);
+                }
+                return;
+            }
+
+            if (tls_remote_closed_)
+            {
+                close_tls_after_drain_locked();
+                return;
+            }
+
+            if (!post_tls_remote_receive_locked())
+            {
+                tcp_proxy_socket<T>::close_client<true>(true, false);
+            }
+        }
+
+        void process_send_buffer_complete(const uint32_t io_size, per_io_context_t* io_context) override
+        {
+            if (!tls_relay_active_.load(std::memory_order_acquire))
+            {
+                tcp_proxy_socket<T>::process_send_buffer_complete(io_size, io_context);
+                return;
+            }
+
+            NETLIB_DEBUG(
+                "SOCKS5Tls relay sent {} bytes to the {} socket",
+                io_size,
+                io_context->is_local ? "local" : "upstream");
+
+            std::scoped_lock lock(tcp_proxy_socket<T>::lock_);
+            tcp_proxy_socket<T>::timestamp_ = std::chrono::steady_clock::now();
+
+            auto& send_buffer = io_context->is_local
+                ? tcp_proxy_socket<T>::local_send_buf_
+                : tcp_proxy_socket<T>::remote_send_buf_;
+            if (io_size == 0 || io_size > send_buffer.len)
+            {
+                NETLIB_WARNING(
+                    "SOCKS5Tls relay received an invalid send completion ({} of {} bytes)",
+                    io_size,
+                    send_buffer.len);
+                tcp_proxy_socket<T>::close_client<true>(false, io_context->is_local);
+                return;
+            }
+
+            send_buffer.buf += io_size;
+            send_buffer.len -= io_size;
+            if (send_buffer.len != 0)
+            {
+                reset_overlapped(io_context->is_local
+                    ? tcp_proxy_socket<T>::io_context_send_to_local_
+                    : tcp_proxy_socket<T>::io_context_send_to_remote_);
+                const auto socket = io_context->is_local
+                    ? tcp_proxy_socket<T>::local_socket_
+                    : tcp_proxy_socket<T>::remote_socket_;
+                if (this->post_send(socket, &send_buffer, io_context) == SOCKET_ERROR)
+                {
+                    tcp_proxy_socket<T>::close_client<true>(false, io_context->is_local);
+                }
+                return;
+            }
+
+            send_buffer.buf = nullptr;
+            if (io_context->is_local)
+            {
+                tls_plaintext_send_buffer_.clear();
+            }
+            else
+            {
+                tls_encrypted_send_buffer_.clear();
+            }
+
+            if (tcp_proxy_socket<T>::connection_status_ == connection_status::client_completed)
+            {
+                close_tls_after_drain_locked();
+                return;
+            }
+
+            const auto receive_posted = io_context->is_local
+                ? post_tls_remote_receive_locked()
+                : post_tls_local_receive_locked();
+            if (!receive_posted)
+            {
+                tcp_proxy_socket<T>::close_client<true>(true, !io_context->is_local);
+            }
+        }
+
+        void on_peer_read_shutdown(const bool is_local) override
+        {
+            if (!tls_relay_active_.load(std::memory_order_acquire))
+            {
+                tcp_proxy_socket<T>::on_peer_read_shutdown(is_local);
+                return;
+            }
+
+            std::scoped_lock lock(tcp_proxy_socket<T>::lock_);
+            if (tcp_proxy_socket<T>::connection_status_ == connection_status::client_completed)
+            {
+                return;
+            }
+
+            tcp_proxy_socket<T>::timestamp_ = std::chrono::steady_clock::now();
+            tcp_proxy_socket<T>::connection_status_ = connection_status::client_completed;
+            if (is_local)
+            {
+                tcp_proxy_socket<T>::local_recv_buf_.len = 0;
+            }
+            else
+            {
+                tcp_proxy_socket<T>::remote_recv_buf_.len = 0;
+            }
+
+            const auto socket = is_local
+                ? tcp_proxy_socket<T>::local_socket_
+                : tcp_proxy_socket<T>::remote_socket_;
+            if (socket != static_cast<SOCKET>(INVALID_SOCKET) && shutdown(socket, SD_RECEIVE) == SOCKET_ERROR)
+            {
+                NETLIB_DEBUG("SOCKS5Tls relay shutdown(SD_RECEIVE) failed: {}", WSAGetLastError());
+            }
+
+            close_tls_after_drain_locked();
+        }
+
+        /**
          * @brief Handles completion of a SOCKS5 negotiation receive operation.
          *
          * This method is invoked when a negotiation-related receive operation completes on the remote socket.
@@ -160,8 +384,8 @@ namespace proxy
 
                     current_state_ = socks5_state::login_responded;
 
-                    if ((ident_resp_.version != 5) ||
-                        (ident_resp_.method == 0xFF))
+                    if ((ident_resp_.version != socks5_protocol_version) ||
+                        (ident_resp_.method != 0x00 && ident_resp_.method != 0x02))
                     {
                         // SOCKS v5 identification or authentication failed
                         tcp_proxy_socket<T>::close_client<true>(true, false);  // NOLINT(bugprone-chained-comparison)
@@ -239,7 +463,7 @@ namespace proxy
 
                     current_state_ = socks5_state::password_responded;
 
-                    if (ident_resp_.method != 0)
+                    if (ident_resp_.version != socks5_username_auth_version || ident_resp_.method != 0)
                     {
                         // SOCKS v5 identification or authentication failed
                         tcp_proxy_socket<T>::close_client<true>(true, false);  // NOLINT(bugprone-chained-comparison)
@@ -257,6 +481,7 @@ namespace proxy
                     }
 
                     if ((connect_response_header_.version != socks5_protocol_version) ||
+                        (connect_response_header_.reserved != 0) ||
                         (connect_response_header_.reply != 0))
                     {
                         // SOCKS v5 connect failed
@@ -309,6 +534,11 @@ namespace proxy
                     }
 
                     const auto domain_length = connect_response_tail_[0];
+                    if (domain_length == 0)
+                    {
+                        tcp_proxy_socket<T>::close_client<true>(true, false);
+                        return;
+                    }
                     if (!start_connect_reply_receive(
                         socks5_state::connect_reply_tail,
                         connect_response_tail_.data() + 1,
@@ -335,6 +565,60 @@ namespace proxy
         }
 
     private:
+        class socket_send_timeout_guard
+        {
+        public:
+            explicit socket_send_timeout_guard(const SOCKET socket) noexcept
+                : socket_(socket)
+            {
+                int option_size = static_cast<int>(sizeof(original_timeout_));
+                if (getsockopt(socket_, SOL_SOCKET, SO_SNDTIMEO,
+                    reinterpret_cast<char*>(&original_timeout_), &option_size) == SOCKET_ERROR)
+                {
+                    error_ = WSAGetLastError();
+                    return;
+                }
+
+                constexpr DWORD timeout_ms = 5000;
+                if (setsockopt(socket_, SOL_SOCKET, SO_SNDTIMEO,
+                    reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) == SOCKET_ERROR)
+                {
+                    error_ = WSAGetLastError();
+                    return;
+                }
+
+                configured_ = true;
+            }
+
+            socket_send_timeout_guard(const socket_send_timeout_guard&) = delete;
+            socket_send_timeout_guard& operator=(const socket_send_timeout_guard&) = delete;
+
+            ~socket_send_timeout_guard()
+            {
+                if (configured_)
+                {
+                    setsockopt(socket_, SOL_SOCKET, SO_SNDTIMEO,
+                        reinterpret_cast<const char*>(&original_timeout_), sizeof(original_timeout_));
+                }
+            }
+
+            [[nodiscard]] bool configured() const noexcept
+            {
+                return configured_;
+            }
+
+            [[nodiscard]] int error() const noexcept
+            {
+                return error_;
+            }
+
+        private:
+            SOCKET socket_{ INVALID_SOCKET };
+            DWORD original_timeout_ = 0;
+            int error_ = 0;
+            bool configured_ = false;
+        };
+
         struct socks5_resp_header
         {
             unsigned char version = socks5_protocol_version;
@@ -342,6 +626,382 @@ namespace proxy
             unsigned char reserved{};
             unsigned char address_type{};
         };
+
+        [[nodiscard]] bool start_tls_transport(negotiate_context_t& negotiate_context)
+        {
+            if (tcp_proxy_socket<T>::is_disable_nagle_)
+            {
+                const int enabled = 1;
+                if (setsockopt(tcp_proxy_socket<T>::remote_socket_, IPPROTO_TCP, TCP_NODELAY,
+                    reinterpret_cast<const char*>(&enabled), sizeof(enabled)) == SOCKET_ERROR)
+                {
+                    NETLIB_WARNING("SOCKS5Tls failed to set TCP_NODELAY: {}", WSAGetLastError());
+                }
+            }
+
+            // WSAEventSelect makes the connect socket non-blocking. TLS setup is deliberately
+            // synchronous and bounded, after which the socket returns to overlapped IOCP I/O.
+            if (WSAEventSelect(tcp_proxy_socket<T>::remote_socket_, nullptr, 0) == SOCKET_ERROR)
+            {
+                NETLIB_WARNING("SOCKS5Tls failed to detach the connect event: {}", WSAGetLastError());
+                tcp_proxy_socket<T>::close_client(false, false);
+                return false;
+            }
+
+            u_long blocking_mode = 0;
+            if (ioctlsocket(tcp_proxy_socket<T>::remote_socket_, FIONBIO, &blocking_mode) == SOCKET_ERROR)
+            {
+                NETLIB_WARNING("SOCKS5Tls failed to restore blocking setup mode: {}", WSAGetLastError());
+                tcp_proxy_socket<T>::close_client(false, false);
+                return false;
+            }
+
+            socket_send_timeout_guard send_timeout{ tcp_proxy_socket<T>::remote_socket_ };
+            if (!send_timeout.configured())
+            {
+                NETLIB_WARNING("SOCKS5Tls failed to configure the setup send timeout: {}", send_timeout.error());
+                tcp_proxy_socket<T>::close_client(false, false);
+                return false;
+            }
+
+            tls_stream_ = std::make_unique<schannel_tls_stream>(
+                tcp_proxy_socket<T>::remote_socket_,
+                negotiate_context.upstream_options.tls);
+            if (!tls_stream_->handshake())
+            {
+                NETLIB_WARNING("SOCKS5Tls handshake failed: {}", tls_stream_->last_error());
+                tcp_proxy_socket<T>::close_client(false, false);
+                return false;
+            }
+
+            if (!perform_tls_socks5_connect(negotiate_context))
+            {
+                NETLIB_WARNING("SOCKS5Tls CONNECT negotiation failed: {}", tls_negotiation_error_);
+                tcp_proxy_socket<T>::close_client(false, false);
+                return false;
+            }
+
+            return start_tls_data_relay();
+        }
+
+        [[nodiscard]] bool perform_tls_socks5_connect(const negotiate_context_t& negotiate_context)
+        {
+            const auto fail = [this](std::string error)
+            {
+                tls_negotiation_error_ = std::move(error);
+                return false;
+            };
+            const auto send_tls = [this, &fail](const void* const data, const int length)
+            {
+                return tls_stream_->send_all(data, length)
+                    ? true
+                    : fail(tls_stream_->last_error());
+            };
+            const auto recv_tls = [this, &fail](void* const data, const int length)
+            {
+                return tls_stream_->recv_exact(data, length)
+                    ? true
+                    : fail(tls_stream_->last_error());
+            };
+
+            const auto has_username = negotiate_context.socks5_username.has_value();
+            const auto has_password = negotiate_context.socks5_password.has_value();
+            if (has_username != has_password)
+            {
+                return fail("SOCKS5 username and password must be configured together.");
+            }
+            if (has_username && (negotiate_context.socks5_username->empty() ||
+                negotiate_context.socks5_username->size() > socks5_username_max_length ||
+                negotiate_context.socks5_password->empty() ||
+                negotiate_context.socks5_password->size() > socks5_username_max_length))
+            {
+                return fail("SOCKS5 username and password must each contain between 1 and 255 bytes.");
+            }
+
+            socks5_ident_req<2> ident_request{};
+            ident_request.methods[0] = 0x00;
+            auto ident_request_size = sizeof(socks5_ident_req<1>);
+            if (has_username)
+            {
+                ident_request.number_of_methods = 2;
+                ident_request.methods[1] = 0x02;
+                ident_request_size = sizeof(ident_request);
+            }
+            else
+            {
+                ident_request.number_of_methods = 1;
+            }
+
+            socks5_ident_resp ident_response{};
+            if (!send_tls(&ident_request, static_cast<int>(ident_request_size)) ||
+                !recv_tls(&ident_response, sizeof(ident_response)))
+            {
+                return false;
+            }
+            if (ident_response.version != socks5_protocol_version)
+            {
+                return fail("The upstream returned an invalid SOCKS5 method-selection version.");
+            }
+            if (ident_response.method != 0x00 && ident_response.method != 0x02)
+            {
+                return fail("The upstream selected an unsupported SOCKS5 authentication method.");
+            }
+
+            if (ident_response.method == 0x02)
+            {
+                if (!has_username)
+                {
+                    return fail("The upstream requires SOCKS5 username/password authentication.");
+                }
+
+                socks5_username_auth username_auth{};
+                const auto auth_size = username_auth.init(
+                    *negotiate_context.socks5_username,
+                    *negotiate_context.socks5_password);
+                socks5_ident_resp auth_response{};
+                if (auth_size == 0 ||
+                    !send_tls(&username_auth, static_cast<int>(auth_size)) ||
+                    !recv_tls(&auth_response, sizeof(auth_response)))
+                {
+                    return false;
+                }
+                if (auth_response.version != socks5_username_auth_version || auth_response.method != 0)
+                {
+                    return fail("The upstream rejected SOCKS5 username/password authentication.");
+                }
+            }
+
+            socks5_req<address_type_t> connect_request{
+                socks5_protocol_version,
+                1,
+                0,
+                address_type_t::af_type == AF_INET ? static_cast<unsigned char>(1) : static_cast<unsigned char>(4),
+                negotiate_context.remote_address,
+                htons(negotiate_context.remote_port)
+            };
+
+            socks5_resp_header response_header{};
+            if (!send_tls(&connect_request, sizeof(connect_request)) ||
+                !recv_tls(&response_header, sizeof(response_header)))
+            {
+                return false;
+            }
+            if (response_header.version != socks5_protocol_version || response_header.reserved != 0)
+            {
+                return fail("The upstream returned an invalid SOCKS5 CONNECT response header.");
+            }
+            if (response_header.reply != 0)
+            {
+                return fail("The upstream rejected SOCKS5 CONNECT with reply code " +
+                    std::to_string(response_header.reply) + ".");
+            }
+
+            std::array<unsigned char, socks5_username_max_length + sizeof(unsigned short)> response_tail{};
+            switch (response_header.address_type)
+            {
+            case 1:
+                return recv_tls(response_tail.data(), 4 + sizeof(unsigned short));
+            case 4:
+                return recv_tls(response_tail.data(), 16 + sizeof(unsigned short));
+            case 3:
+            {
+                unsigned char domain_length = 0;
+                if (!recv_tls(&domain_length, sizeof(domain_length)))
+                {
+                    return false;
+                }
+                if (domain_length == 0)
+                {
+                    return fail("The upstream returned an empty SOCKS5 bound domain name.");
+                }
+                return recv_tls(
+                    response_tail.data(),
+                    static_cast<int>(domain_length + sizeof(unsigned short)));
+            }
+            default:
+                return fail("The upstream returned an unsupported SOCKS5 bound address type.");
+            }
+        }
+
+        [[nodiscard]] bool start_tls_data_relay()
+        {
+            std::scoped_lock lock(tcp_proxy_socket<T>::lock_);
+            tls_relay_active_.store(true, std::memory_order_release);
+
+            const auto decrypt_result = tls_stream_->decrypt_available(
+                nullptr,
+                0,
+                tls_plaintext_send_buffer_);
+            if (decrypt_result == schannel_tls_stream::decrypt_status::failed)
+            {
+                NETLIB_WARNING("SOCKS5Tls failed to process buffered data: {}", tls_stream_->last_error());
+                tcp_proxy_socket<T>::close_client<true>(true, false);
+                return false;
+            }
+            if (decrypt_result == schannel_tls_stream::decrypt_status::closed)
+            {
+                tls_remote_closed_ = true;
+                tcp_proxy_socket<T>::connection_status_ = connection_status::client_completed;
+            }
+
+            if (tcp_proxy_socket<T>::connection_status_ != connection_status::client_completed &&
+                !post_tls_local_receive_locked())
+            {
+                tcp_proxy_socket<T>::close_client<true>(true, true);
+                return false;
+            }
+
+            if (!tls_plaintext_send_buffer_.empty())
+            {
+                NETLIB_DEBUG(
+                    "SOCKS5Tls relay has {} bytes of setup read-ahead",
+                    tls_plaintext_send_buffer_.size());
+                if (!post_tls_local_send_locked())
+                {
+                    tcp_proxy_socket<T>::close_client<true>(false, true);
+                    return false;
+                }
+                return true;
+            }
+
+            if (tls_remote_closed_)
+            {
+                close_tls_after_drain_locked();
+                return false;
+            }
+
+            if (!post_tls_remote_receive_locked())
+            {
+                tcp_proxy_socket<T>::close_client<true>(true, false);
+                return false;
+            }
+
+            NETLIB_INFO("SOCKS5Tls TCP CONNECT relay established");
+            return true;
+        }
+
+        [[nodiscard]] bool post_tls_local_receive_locked()
+        {
+            reset_overlapped(tcp_proxy_socket<T>::io_context_recv_from_local_);
+            tcp_proxy_socket<T>::local_recv_buf_.buf =
+                tcp_proxy_socket<T>::from_local_to_remote_buffer_.data();
+            tcp_proxy_socket<T>::local_recv_buf_.len = static_cast<ULONG>(
+                tcp_proxy_socket<T>::from_local_to_remote_buffer_.size());
+            if (this->post_recv(
+                tcp_proxy_socket<T>::local_socket_,
+                &this->local_recv_buf_,
+                &this->io_context_recv_from_local_) == SOCKET_ERROR)
+            {
+                tcp_proxy_socket<T>::local_recv_buf_.len = 0;
+                NETLIB_WARNING("SOCKS5Tls failed to post a local receive: {}", WSAGetLastError());
+                return false;
+            }
+            NETLIB_DEBUG("SOCKS5Tls relay posted a local receive");
+            return true;
+        }
+
+        [[nodiscard]] bool post_tls_remote_receive_locked()
+        {
+            reset_overlapped(tcp_proxy_socket<T>::io_context_recv_from_remote_);
+            tcp_proxy_socket<T>::remote_recv_buf_.buf =
+                tcp_proxy_socket<T>::from_remote_to_local_buffer_.data();
+            tcp_proxy_socket<T>::remote_recv_buf_.len = static_cast<ULONG>(
+                tcp_proxy_socket<T>::from_remote_to_local_buffer_.size());
+            if (this->post_recv(
+                tcp_proxy_socket<T>::remote_socket_,
+                &this->remote_recv_buf_,
+                &this->io_context_recv_from_remote_) == SOCKET_ERROR)
+            {
+                tcp_proxy_socket<T>::remote_recv_buf_.len = 0;
+                NETLIB_WARNING("SOCKS5Tls failed to post an upstream receive: {}", WSAGetLastError());
+                return false;
+            }
+            NETLIB_DEBUG("SOCKS5Tls relay posted an upstream receive");
+            return true;
+        }
+
+        [[nodiscard]] bool post_tls_local_send_locked()
+        {
+            if (tls_plaintext_send_buffer_.empty())
+            {
+                return false;
+            }
+
+            reset_overlapped(tcp_proxy_socket<T>::io_context_send_to_local_);
+            tcp_proxy_socket<T>::local_send_buf_.buf = tls_plaintext_send_buffer_.data();
+            tcp_proxy_socket<T>::local_send_buf_.len = static_cast<ULONG>(tls_plaintext_send_buffer_.size());
+            if (this->post_send(
+                tcp_proxy_socket<T>::local_socket_,
+                &this->local_send_buf_,
+                &this->io_context_send_to_local_) == SOCKET_ERROR)
+            {
+                tcp_proxy_socket<T>::local_send_buf_.len = 0;
+                NETLIB_WARNING("SOCKS5Tls failed to post a local send: {}", WSAGetLastError());
+                return false;
+            }
+            NETLIB_DEBUG(
+                "SOCKS5Tls relay posted {} plaintext bytes to the local socket",
+                tcp_proxy_socket<T>::local_send_buf_.len);
+            return true;
+        }
+
+        [[nodiscard]] bool post_tls_remote_send_locked()
+        {
+            if (tls_encrypted_send_buffer_.empty())
+            {
+                return false;
+            }
+
+            reset_overlapped(tcp_proxy_socket<T>::io_context_send_to_remote_);
+            tcp_proxy_socket<T>::remote_send_buf_.buf = tls_encrypted_send_buffer_.data();
+            tcp_proxy_socket<T>::remote_send_buf_.len = static_cast<ULONG>(tls_encrypted_send_buffer_.size());
+            if (this->post_send(
+                tcp_proxy_socket<T>::remote_socket_,
+                &this->remote_send_buf_,
+                &this->io_context_send_to_remote_) == SOCKET_ERROR)
+            {
+                tcp_proxy_socket<T>::remote_send_buf_.len = 0;
+                NETLIB_WARNING("SOCKS5Tls failed to post an upstream send: {}", WSAGetLastError());
+                return false;
+            }
+            NETLIB_DEBUG(
+                "SOCKS5Tls relay posted {} encrypted bytes to the upstream socket",
+                tcp_proxy_socket<T>::remote_send_buf_.len);
+            return true;
+        }
+
+        void close_tls_after_drain_locked()
+        {
+            if (tcp_proxy_socket<T>::local_send_buf_.len != 0 ||
+                tcp_proxy_socket<T>::remote_send_buf_.len != 0)
+            {
+                return;
+            }
+
+            if (!tls_shutdown_started_ &&
+                tcp_proxy_socket<T>::remote_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                tls_shutdown_started_ = true;
+                std::vector<char> shutdown_token;
+                if (tls_stream_->create_shutdown_token(shutdown_token))
+                {
+                    tls_encrypted_send_buffer_ = std::move(shutdown_token);
+                    if (post_tls_remote_send_locked())
+                    {
+                        return;
+                    }
+                    NETLIB_WARNING("SOCKS5Tls failed to send close_notify: {}", WSAGetLastError());
+                }
+                else
+                {
+                    NETLIB_WARNING("SOCKS5Tls failed to create close_notify: {}", tls_stream_->last_error());
+                }
+            }
+
+            tcp_proxy_socket<T>::local_recv_buf_.len = 0;
+            tcp_proxy_socket<T>::remote_recv_buf_.len = 0;
+            tcp_proxy_socket<T>::close_client<true>(true, true);
+        }
 
         static void reset_overlapped(per_io_context_t& io_context) noexcept
         {
@@ -480,6 +1140,13 @@ namespace proxy
         socks5_resp_header connect_response_header_{};
         socks5_username_auth username_auth_{};
         std::array<unsigned char, 1 + socks5_username_max_length + sizeof(unsigned short)> connect_response_tail_{};
+        std::unique_ptr<schannel_tls_stream> tls_stream_;
+        std::vector<char> tls_encrypted_send_buffer_;
+        std::vector<char> tls_plaintext_send_buffer_;
+        std::string tls_negotiation_error_;
+        std::atomic_bool tls_relay_active_{ false };
+        bool tls_remote_closed_ = false;
+        bool tls_shutdown_started_ = false;
 
     protected:
         /**

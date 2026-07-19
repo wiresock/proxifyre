@@ -81,6 +81,10 @@ public:
      * @param start Whether to start the proxy immediately.
      * @param login Optional username for authentication.
      * @param password Optional password for authentication.
+     * @param transport Upstream transport used to reach the SOCKS5 proxy.
+     * @param tls_server_name Server name used for TLS SNI and certificate validation.
+     * @param tls_pinned_cert_sha256 Optional SHA-256 certificate fingerprint pin.
+     * @param tls_allow_invalid_certificate Whether to bypass normal certificate validation.
      * @return A handle (LONG_PTR) to the proxy instance, or -1 on failure.
      */
     [[nodiscard]] LONG_PTR add_socks5_proxy(
@@ -89,7 +93,11 @@ public:
         supported_address_families_mx address_family,
         bool start = false,
         const std::string& login = "",
-        const std::string& password = ""
+        const std::string& password = "",
+        socks5_transport_mx transport = socks5_transport_mx::tcp,
+        const std::string& tls_server_name = "",
+        const std::string& tls_pinned_cert_sha256 = "",
+        bool tls_allow_invalid_certificate = false
     ) const;
 
     /**
@@ -100,7 +108,11 @@ public:
         supported_protocols_mx protocol,
         bool start = false,
         const std::string& login = "",
-        const std::string& password = ""
+        const std::string& password = "",
+        socks5_transport_mx transport = socks5_transport_mx::tcp,
+        const std::string& tls_server_name = "",
+        const std::string& tls_pinned_cert_sha256 = "",
+        bool tls_allow_invalid_certificate = false
     ) const;
 
     /**
