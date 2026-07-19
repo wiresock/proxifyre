@@ -12,6 +12,8 @@ As of **v2.2.0**, ProxiFyre supports **LAN bypass**, allowing local network traf
 
 As of **v2.3.0**, ProxiFyre also proxies **IPv6** destinations. Previously only IPv4 traffic from a matched application was routed through the proxy while its IPv6 TCP/UDP traffic leaked out directly; now both address families are redirected to the configured SOCKS5 proxy.
 
+As of **v2.4.0**, ProxiFyre supports native **SOCKS5-over-TLS** upstreams through Windows SChannel, including encrypted TCP `CONNECT` relays and TLS-protected UDP `ASSOCIATE` control channels. This transport is compatible with [Alighieri](https://github.com/wiresock/alighieri) TLS listeners; normal unencrypted SOCKS5 remains the default.
+
 **Requirements and limitations:**
 
 - **Your client host must already have working IPv6 connectivity.** ProxiFyre redirects the IPv6 packets your applications actually transmit — it does *not* create IPv6 reachability. On an **IPv4-only host**, your applications never emit global IPv6 traffic, so there is nothing to redirect and you will still see IPv4-only egress even for IPv6-capable destinations. (This is inherent to the packet-filter design: it intercepts transmitted packets, it does not originate connections on the application's behalf.)
@@ -29,10 +31,10 @@ The application uses a configuration file named `app-config.json`. This JSON fil
 - **socks5ProxyEndpoint**: A string that specifies the SOCKS5 proxy endpoint.
 - **username**: A string that specifies the username for the proxy (optional).
 - **password**: A string that specifies the password for the proxy (optional).
-- **socks5Transport**: `"TCP"` for normal SOCKS5 (default) or `"TLS"` for SOCKS5-over-TLS.
-- **tlsServerName**: SNI/certificate validation name for `"socks5Transport": "TLS"` (defaults to the endpoint host).
-- **tlsPinnedSha256**: Optional SHA-256 certificate fingerprint pin for TLS upstreams.
-- **tlsAllowInvalidCertificate**: Allows invalid TLS certificates (default: `false`). Prefer `tlsPinnedSha256` for self-signed test certificates.
+- **socks5Transport** *(new in v2.4.0)*: `"TCP"` for normal SOCKS5 (default) or `"TLS"` for SOCKS5-over-TLS.
+- **tlsServerName** *(new in v2.4.0)*: SNI/certificate validation name for `"socks5Transport": "TLS"` (defaults to the endpoint host).
+- **tlsPinnedSha256** *(new in v2.4.0)*: Optional SHA-256 certificate fingerprint pin for TLS upstreams.
+- **tlsAllowInvalidCertificate** *(new in v2.4.0)*: Allows invalid TLS certificates (default: `false`). Prefer `tlsPinnedSha256` for self-signed test certificates.
 - **supportedProtocols**: An array of strings specifying the supported protocols (e.g., `"TCP"`, `"UDP"`).
 - **supportedAddressFamilies**: An array containing `"IPv4"`, `"IPv6"`, or both. If omitted, both are enabled. An explicit empty array or any other value is rejected as a configuration error.
 - **excludes** *(new in v2.1.1)*: An array of application names or paths to exclude from proxy routing.
