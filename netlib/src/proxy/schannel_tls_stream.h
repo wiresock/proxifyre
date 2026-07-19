@@ -8,6 +8,7 @@
 #define SCHANNEL_USE_BLACKLISTS
 #endif
 
+#include <WinSock2.h>
 #include <security.h>
 #include <winternl.h>
 #include <schannel.h>
@@ -16,11 +17,15 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
+
+#include "socks5_common.h"
 
 namespace proxy
 {

@@ -1,5 +1,14 @@
 #pragma once
 
+#include <cstdint>
+#include <cstring>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+#include "proxy_common.h"
+
 namespace proxy
 {
     /**

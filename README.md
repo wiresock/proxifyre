@@ -144,7 +144,7 @@ If the SOCKS5 proxy does not support authorization, you can skip the `username` 
 
 ### SOCKS5-over-TLS / Alighieri
 
-ProxiFyre can initiate a TLS session to a SOCKS5 proxy that expects SOCKS5-over-TLS, such as Alighieri with `tls.certfile` / `tls.keyfile` enabled. TLS transport supports both TCP `CONNECT` and the UDP `ASSOCIATE` control channel.
+ProxiFyre can initiate a TLS session to a SOCKS5 proxy that expects SOCKS5-over-TLS, such as [Alighieri](https://github.com/wiresock/alighieri) with `tls.certfile` / `tls.keyfile` enabled. TLS transport supports both TCP `CONNECT` and the UDP `ASSOCIATE` control channel.
 
 ```json
 {
