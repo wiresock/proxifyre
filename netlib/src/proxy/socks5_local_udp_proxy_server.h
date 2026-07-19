@@ -1167,12 +1167,16 @@ namespace proxy
                           reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) == SOCKET_ERROR)
             {
                 NETLIB_WARNING("Failed to set socket receive timeout: {}", WSAGetLastError());
+                closesocket(socks_tcp_socket);
+                return INVALID_SOCKET;
             }
             
             if (setsockopt(socks_tcp_socket, SOL_SOCKET, SO_SNDTIMEO, 
                           reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) == SOCKET_ERROR)
             {
                 NETLIB_WARNING("Failed to set socket send timeout: {}", WSAGetLastError());
+                closesocket(socks_tcp_socket);
+                return INVALID_SOCKET;
             }
 
             if constexpr (address_type_t::af_type == AF_INET)
@@ -1322,7 +1326,7 @@ namespace proxy
             const SOCKET socks_tcp_socket,
             const address_type_t socks_server_address,
             std::unique_ptr<negotiate_context_t>&
-            negotiate_ctx) const noexcept
+            negotiate_ctx) const
         {
             using namespace std::string_literals;
 
@@ -1341,30 +1345,149 @@ namespace proxy
                 socks5_ident_req_size = sizeof(socks5_ident_req<1>);
             }
 
-            auto result = send(socks_tcp_socket, reinterpret_cast<const char*>(&ident_req),
-                static_cast<int>(socks5_ident_req_size), 0);
-            if (result == SOCKET_ERROR)
+            std::unique_ptr<schannel_tls_stream> tls_stream;
+            if (negotiate_ctx->upstream_options.is_tls())
+            {
+                tls_stream = std::make_unique<schannel_tls_stream>(
+                    socks_tcp_socket,
+                    negotiate_ctx->upstream_options.tls);
+                if (!tls_stream->handshake())
+                {
+                    NETLIB_INFO(
+                        "[SOCKS5TLS]: associate_to_socks5_proxy: TLS handshake failed: {}",
+                        tls_stream->last_error());
+                    return {};
+                }
+            }
+
+            auto control_socket_error = 0;
+            const auto send_all_raw = [socks_tcp_socket, &control_socket_error](
+                const void* const buffer, const int len) -> bool
+            {
+                control_socket_error = 0;
+                auto* bytes = static_cast<const char*>(buffer);
+                int sent_total = 0;
+                while (sent_total < len)
+                {
+                    const auto sent = send(socks_tcp_socket, bytes + sent_total, len - sent_total, 0);
+                    if (sent == SOCKET_ERROR)
+                    {
+                        control_socket_error = WSAGetLastError();
+                        return false;
+                    }
+                    if (sent == 0)
+                    {
+                        control_socket_error = WSAECONNRESET;
+                        return false;
+                    }
+                    sent_total += sent;
+                }
+                return true;
+            };
+
+            // Blocking read of exactly 'len' bytes (recv() may return short reads on a
+            // stream socket); returns false on error or premature close.
+            const auto recv_exact_raw = [&control_socket_error](
+                const SOCKET s, void* const buffer, const int len) -> bool
+            {
+                control_socket_error = 0;
+                // Bound the TOTAL time spent assembling these bytes, not just each recv().
+                // SO_RCVTIMEO is a per-call timeout, so a server that drips one byte just
+                // under it could otherwise keep this loop alive for timeout * byte-count.
+                constexpr DWORD total_timeout_ms = 5000;
+
+                DWORD original_timeout = total_timeout_ms;
+                int original_timeout_size = static_cast<int>(sizeof(original_timeout));
+                getsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                    reinterpret_cast<char*>(&original_timeout), &original_timeout_size);
+
+                const auto restore_timeout = [s, original_timeout]  // NOLINT(clang-diagnostic-padded)
+                {
+                    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                        reinterpret_cast<const char*>(&original_timeout), sizeof(original_timeout));
+                };
+
+                auto* const bytes = static_cast<char*>(buffer);
+                const auto deadline = GetTickCount64() + total_timeout_ms;
+                int received = 0;
+                while (received < len)
+                {
+                    const auto now = GetTickCount64();
+                    if (now >= deadline)
+                    {
+                        control_socket_error = WSAETIMEDOUT;
+                        restore_timeout();
+                        return false;
+                    }
+
+                    auto remaining_ms = static_cast<DWORD>(deadline - now);
+                    if (setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                        reinterpret_cast<const char*>(&remaining_ms), sizeof(remaining_ms)) == SOCKET_ERROR)
+                    {
+                        control_socket_error = WSAGetLastError();
+                        restore_timeout();
+                        return false;
+                    }
+
+                    const auto n = recv(s, bytes + received, len - received, 0);
+                    if (n == SOCKET_ERROR)
+                    {
+                        control_socket_error = WSAGetLastError();
+                        restore_timeout();
+                        return false;
+                    }
+                    if (n == 0)
+                    {
+                        control_socket_error = WSAECONNRESET;
+                        restore_timeout();
+                        return false;
+                    }
+                    received += n;
+                }
+
+                restore_timeout();
+                return true;
+            };
+
+            const auto send_control = [&tls_stream, &send_all_raw](const void* const buffer, const int len) -> bool
+            {
+                return tls_stream ? tls_stream->send_all(buffer, len) : send_all_raw(buffer, len);
+            };
+
+            const auto recv_control = [&tls_stream, socks_tcp_socket, &recv_exact_raw](void* const buffer, const int len) -> bool
+            {
+                return tls_stream ? tls_stream->recv_exact(buffer, len) : recv_exact_raw(socks_tcp_socket, buffer, len);
+            };
+
+            const auto control_error = [&tls_stream, &control_socket_error]
+            {
+                return tls_stream
+                    ? tls_stream->last_error()
+                    : std::to_string(control_socket_error);
+            };
+
+            if (!send_control(reinterpret_cast<const char*>(&ident_req),
+                static_cast<int>(socks5_ident_req_size)))
             {
                 NETLIB_INFO(
                     "[SOCKS5]: associate_to_socks5_proxy: Failed to send socks5_ident_req: {}",
-                    WSAGetLastError());
+                    control_error());
                 return {};
             }
 
-            result = recv(socks_tcp_socket, reinterpret_cast<char*>(&ident_resp), sizeof(ident_resp), 0);
-            if (result == SOCKET_ERROR)
+            if (!recv_control(reinterpret_cast<char*>(&ident_resp), sizeof(ident_resp)))
             {
                 NETLIB_INFO(
                     "[SOCKS5]: associate_to_socks5_proxy: Failed to receive socks5_ident_resp: {}",
-                    WSAGetLastError());
+                    control_error());
                 return {};
             }
 
-            if ((ident_resp.version != 5) ||
-                (ident_resp.method == 0xFF))
+            if ((ident_resp.version != socks5_protocol_version) ||
+                (ident_resp.method != 0x00 && ident_resp.method != 0x02))
             {
                 NETLIB_INFO(
-                    "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 authentication has failed");
+                    "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 selected an unsupported authentication method");
                 return {};
             }
 
@@ -1405,27 +1528,25 @@ namespace proxy
                     negotiate_ctx->socks5_password.value()
                 );
 
-                result = send(socks_tcp_socket, reinterpret_cast<const char*>(&auth_req),
+                if (!send_control(reinterpret_cast<const char*>(&auth_req),
                     3 + static_cast<int>(negotiate_ctx->socks5_username.value().length()) + 
-                    static_cast<int>(negotiate_ctx->socks5_password.value().length()), 0);
-                if (result == SOCKET_ERROR)
+                    static_cast<int>(negotiate_ctx->socks5_password.value().length())))
                 {
                     NETLIB_INFO(
                         "[SOCKS5]: associate_to_socks5_proxy: Failed to send socks5_username_auth: {}",
-                        WSAGetLastError());
+                        control_error());
                     return {};
                 }
 
-                result = recv(socks_tcp_socket, reinterpret_cast<char*>(&ident_resp), sizeof(ident_resp), 0);
-                if (result == SOCKET_ERROR)
+                if (!recv_control(reinterpret_cast<char*>(&ident_resp), sizeof(ident_resp)))
                 {
                     NETLIB_INFO(
                         "[SOCKS5]: associate_to_socks5_proxy: Failed to receive socks5_ident_resp: {}",
-                        WSAGetLastError());
+                        control_error());
                     return {};
                 }
 
-                if (ident_resp.method != 0x0)
+                if (ident_resp.version != socks5_username_auth_version || ident_resp.method != 0x00)
                 {
                     NETLIB_INFO(
                         "[SOCKS5]: associate_to_socks5_proxy: USERNAME/PASSWORD authentication has failed!");
@@ -1466,12 +1587,11 @@ namespace proxy
                     associate_req_len = 4 + static_cast<int>(sizeof(in6_addr)) + static_cast<int>(sizeof(unsigned short));
                 }
             }
-            result = send(socks_tcp_socket, reinterpret_cast<const char*>(associate_req_buf), associate_req_len, 0);
-            if (result == SOCKET_ERROR)
+            if (!send_control(reinterpret_cast<const char*>(associate_req_buf), associate_req_len))
             {
                 NETLIB_INFO(
                     "[SOCKS5]: associate_to_socks5_proxy: Failed to send SOCKS5 ASSOCIATE request: {}",
-                    WSAGetLastError());
+                    control_error());
                 return {};
             }
 
@@ -1486,66 +1606,6 @@ namespace proxy
             // exactly the bytes implied by the returned ATYP and take BND.PORT from the
             // correct position so the relay port is family-agnostic and correct.
 
-            // Blocking read of exactly 'len' bytes (recv() may return short reads on a
-            // stream socket); returns false on error or premature close.
-            const auto recv_exact = [](const SOCKET s, void* const buffer, const int len) -> bool
-            {
-                // Bound the TOTAL time spent assembling these bytes, not just each recv().
-                // SO_RCVTIMEO is a per-call timeout, so a server that drips one byte just
-                // under it could otherwise keep this loop (and the IOCP worker that holds
-                // the server lock) alive for timeout * byte-count. Hold a single absolute
-                // deadline, shrink the receive timeout toward it on every iteration, and
-                // restore the socket's default timeout before returning.
-                constexpr DWORD total_timeout_ms = 5000;
-
-                // Save the socket's configured receive timeout and restore exactly that on
-                // every exit path, since the loop below temporarily shrinks SO_RCVTIMEO
-                // toward the deadline (leaving a tiny/stale value on the shared control
-                // socket would otherwise affect any later read on it).
-                DWORD original_timeout = total_timeout_ms;
-                int original_timeout_size = static_cast<int>(sizeof(original_timeout));
-                getsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
-                    reinterpret_cast<char*>(&original_timeout), &original_timeout_size);
-
-                const auto restore_timeout = [s, original_timeout]  // NOLINT(clang-diagnostic-padded)
-                {
-                    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
-                        reinterpret_cast<const char*>(&original_timeout), sizeof(original_timeout));
-                };
-
-                auto* const bytes = static_cast<char*>(buffer);
-                const auto deadline = GetTickCount64() + total_timeout_ms;
-                int received = 0;
-                while (received < len)
-                {
-                    const auto now = GetTickCount64();
-                    if (now >= deadline)
-                    {
-                        restore_timeout();
-                        return false;
-                    }
-
-                    auto remaining_ms = static_cast<DWORD>(deadline - now);
-                    if (setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
-                        reinterpret_cast<const char*>(&remaining_ms), sizeof(remaining_ms)) == SOCKET_ERROR)
-                    {
-                        restore_timeout();
-                        return false;
-                    }
-
-                    const auto n = recv(s, bytes + received, len - received, 0);
-                    if (n == SOCKET_ERROR || n == 0)
-                    {
-                        restore_timeout();
-                        return false;
-                    }
-                    received += n;
-                }
-
-                restore_timeout();
-                return true;
-            };
-
             // Fixed 4-byte reply prefix: VER, REP, RSV, ATYP.
             struct socks5_resp_prefix
             {
@@ -1555,15 +1615,17 @@ namespace proxy
                 unsigned char address_type;
             } resp_prefix{};
 
-            if (!recv_exact(socks_tcp_socket, &resp_prefix, sizeof(resp_prefix)))
+            if (!recv_control(&resp_prefix, sizeof(resp_prefix)))
             {
                 NETLIB_INFO(
-                    "[SOCKS5]: associate_to_socks5_proxy: Failed to receive SOCKS5 ASSOCIATE reply header");
+                    "[SOCKS5]: associate_to_socks5_proxy: Failed to receive SOCKS5 ASSOCIATE reply header: {}",
+                    control_error());
                 return {};
             }
 
-            if ((resp_prefix.version != 5) ||
-                (resp_prefix.reply != 0))
+            if ((resp_prefix.version != socks5_protocol_version) ||
+                (resp_prefix.reply != 0) ||
+                (resp_prefix.reserved != 0))
             {
                 NETLIB_INFO(
                     "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 ASSOCIATE has failed");
@@ -1584,10 +1646,17 @@ namespace proxy
             case 3: // domain name
                 {
                     unsigned char domain_len = 0;
-                    if (!recv_exact(socks_tcp_socket, &domain_len, sizeof(domain_len)))
+                    if (!recv_control(&domain_len, sizeof(domain_len)))
                     {
                         NETLIB_INFO(
-                            "[SOCKS5]: associate_to_socks5_proxy: Failed to receive BND.ADDR domain length");
+                            "[SOCKS5]: associate_to_socks5_proxy: Failed to receive BND.ADDR domain length: {}",
+                            control_error());
+                        return {};
+                    }
+                    if (domain_len == 0)
+                    {
+                        NETLIB_INFO(
+                            "[SOCKS5]: associate_to_socks5_proxy: Empty BND.ADDR domain in ASSOCIATE reply");
                         return {};
                     }
                     bnd_addr_len = domain_len;
@@ -1603,11 +1672,12 @@ namespace proxy
             // Read BND.ADDR followed by the 2-byte BND.PORT. The buffer is sized for the
             // largest possible BND.ADDR (a 255-byte domain) plus the port.
             unsigned char bnd_addr_and_port[255 + sizeof(unsigned short)]{};
-            if (!recv_exact(socks_tcp_socket, bnd_addr_and_port,
+            if (!recv_control(bnd_addr_and_port,
                 bnd_addr_len + static_cast<int>(sizeof(unsigned short))))
             {
                 NETLIB_INFO(
-                    "[SOCKS5]: associate_to_socks5_proxy: Failed to receive BND.ADDR/BND.PORT");
+                    "[SOCKS5]: associate_to_socks5_proxy: Failed to receive BND.ADDR/BND.PORT: {}",
+                    control_error());
                 return {};
             }
 
@@ -1711,7 +1781,17 @@ namespace proxy
                 return false;
             }
 
-            auto udp_endpoint = associate_to_socks5_proxy(socks5_tcp_socket, remote_address, negotiate_ctx);
+            std::optional<net::ip_endpoint<address_type_t>> udp_endpoint;
+            try
+            {
+                udp_endpoint = associate_to_socks5_proxy(socks5_tcp_socket, remote_address, negotiate_ctx);
+            }
+            catch (...)
+            {
+                closesocket(socks5_tcp_socket);
+                lock.lock();
+                throw;
+            }
             if (!udp_endpoint.has_value())
             {
                 NETLIB_DEBUG(

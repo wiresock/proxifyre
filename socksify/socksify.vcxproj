@@ -139,7 +139,7 @@
       <ConformanceMode>false</ConformanceMode>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;Secur32.lib;Crypt32.lib;</AdditionalDependencies>
       <AdditionalLibraryDirectories>
       </AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>
@@ -156,7 +156,7 @@
       <ConformanceMode>false</ConformanceMode>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;Secur32.lib;Crypt32.lib;</AdditionalDependencies>
       <AdditionalLibraryDirectories>
       </AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>
@@ -173,7 +173,7 @@
       <ConformanceMode>false</ConformanceMode>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;Secur32.lib;Crypt32.lib;</AdditionalDependencies>
       <AdditionalLibraryDirectories>
       </AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>
@@ -190,7 +190,7 @@
       <ConformanceMode>false</ConformanceMode>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;Secur32.lib;Crypt32.lib;</AdditionalDependencies>
       <AdditionalLibraryDirectories>
       </AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>
@@ -208,7 +208,7 @@
       <ConformanceMode>false</ConformanceMode>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;Secur32.lib;Crypt32.lib;</AdditionalDependencies>
       <AdditionalLibraryDirectories>
       </AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>
@@ -226,7 +226,7 @@
       <ConformanceMode>false</ConformanceMode>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)bin\lib\$(Platform)\$(Configuration)\ndisapi.lib;Iphlpapi.lib;ws2_32.lib;Advapi32.lib;Dnsapi.lib;Secur32.lib;Crypt32.lib;</AdditionalDependencies>
       <AdditionalLibraryDirectories>
       </AdditionalLibraryDirectories>
       <IgnoreSpecificDefaultLibraries>
@@ -255,6 +255,7 @@
     <ClInclude Include="..\netlib\src\pcap\pcap_stream_logger.h" />
     <ClInclude Include="..\netlib\src\proxy\packet_pool.h" />
     <ClInclude Include="..\netlib\src\proxy\proxy_common.h" />
+    <ClInclude Include="..\netlib\src\proxy\schannel_tls_stream.h" />
     <ClInclude Include="..\netlib\src\proxy\socks5_tcp_proxy_socket.h" />
     <ClInclude Include="..\netlib\src\proxy\socks5_udp_proxy_socket.h" />
     <ClInclude Include="..\netlib\src\proxy\socks5_common.h" />

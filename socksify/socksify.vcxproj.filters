@@ -93,6 +93,9 @@
     <ClInclude Include="..\netlib\src\proxy\proxy_common.h">
       <Filter>Header Files\netlib\proxy</Filter>
     </ClInclude>
+    <ClInclude Include="..\netlib\src\proxy\schannel_tls_stream.h">
+      <Filter>Header Files\netlib\proxy</Filter>
+    </ClInclude>
     <ClInclude Include="..\netlib\src\proxy\tcp_proxy_server.h">
       <Filter>Header Files\netlib\proxy</Filter>
     </ClInclude>

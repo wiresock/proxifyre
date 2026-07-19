@@ -62,6 +62,17 @@ enum class supported_address_families_mx : uint8_t
 };
 
 /**
+ * @brief Specifies the transport used to reach the upstream SOCKS5 proxy.
+ */
+enum class socks5_transport_mx : uint8_t
+{
+    /// <summary>Plain TCP transport.</summary>
+    tcp = 0,
+    /// <summary>TLS-wrapped TCP transport.</summary>
+    tls = 1
+};
+
+/**
  * @brief Enumerates the types of events that can occur in the proxy gateway.
  */
 enum class event_type_mx : uint32_t

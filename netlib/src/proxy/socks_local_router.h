@@ -68,6 +68,7 @@ namespace proxy
         {
             std::optional<net::ip_endpoint<net::ip_address_v4>> ipv4;
             std::optional<net::ip_endpoint<net::ip_address_v6>> ipv6;
+            std::string host;
         };
 
     private:
@@ -1095,7 +1096,8 @@ namespace proxy
                   std::unique_ptr<socks5_local_udp_proxy_server<socks5_udp_proxy_socket<AddrT>>>>
         build_proxy_pair(const net::ip_endpoint<AddrT>& upstream,
                          const supported_protocols protocols,
-                         const std::optional<std::pair<std::string, std::string>>& cred_pair)
+                         const std::optional<std::pair<std::string, std::string>>& cred_pair,
+                         socks5_upstream_options upstream_options)
         {
             using tcp_server_t = tcp_proxy_server<socks5_tcp_proxy_socket<AddrT>>;
             using udp_server_t = socks5_local_udp_proxy_server<socks5_udp_proxy_socket<AddrT>>;
@@ -1105,7 +1107,7 @@ namespace proxy
             auto tcp_server = (protocols == both || protocols == tcp)
                 ? std::make_unique<tcp_server_t>(
                     0, io_port_,
-                    [this, upstream, cred_pair](const AddrT address, const uint16_t port)  // NOLINT(clang-diagnostic-padded)
+                    [this, upstream, cred_pair, upstream_options](const AddrT address, const uint16_t port)  // NOLINT(clang-diagnostic-padded)
                         -> std::tuple<AddrT, uint16_t, std::unique_ptr<tcp_negotiate_t>>
                     {
                         auto& mapper = tcp_mapper_for<AddrT>();
@@ -1140,7 +1142,8 @@ namespace proxy
                                 std::make_unique<tcp_negotiate_t>(
                                     remote_address, remote_port,
                                     cred_pair ? std::optional(cred_pair.value().first) : std::nullopt,
-                                    cred_pair ? std::optional(cred_pair.value().second) : std::nullopt));
+                                    cred_pair ? std::optional(cred_pair.value().second) : std::nullopt,
+                                    upstream_options));
                         }
 
                         return std::make_tuple(AddrT{}, 0, nullptr);
@@ -1150,7 +1153,7 @@ namespace proxy
             auto udp_server = (protocols == both || protocols == udp)
                 ? std::make_unique<udp_server_t>(
                     0, io_port_,
-                    [this, upstream, cred_pair](const AddrT address, const uint16_t port)  // NOLINT(clang-diagnostic-padded)
+                    [this, upstream, cred_pair, upstream_options](const AddrT address, const uint16_t port)  // NOLINT(clang-diagnostic-padded)
                         -> std::tuple<AddrT, uint16_t, std::unique_ptr<udp_negotiate_t>>
                     {
                         auto& mapper = udp_mapper_for<AddrT>();
@@ -1175,7 +1178,8 @@ namespace proxy
                                 std::make_unique<udp_negotiate_t>(
                                     AddrT{}, 0,
                                     cred_pair ? std::optional(cred_pair.value().first) : std::nullopt,
-                                    cred_pair ? std::optional(cred_pair.value().second) : std::nullopt));
+                                    cred_pair ? std::optional(cred_pair.value().second) : std::nullopt,
+                                    upstream_options));
                         }
 
                         return std::make_tuple(AddrT{}, 0, nullptr);
@@ -1198,6 +1202,7 @@ namespace proxy
          * @param protocols enum representing the protocols to be proxied.
          * @param cred_pair optional pair of strings representing username and password for authentication.
          * @param address_families enum representing the destination address family/families to be proxied.
+         * @param upstream_options transport and TLS settings for the upstream SOCKS5 connection.
          * @param start boolean flag to start the proxy server after creating it.
          * @return an optional value containing the index of the added proxy server if successful, std::nullopt otherwise.
          */
@@ -1206,6 +1211,7 @@ namespace proxy
             const supported_protocols protocols,
             const std::optional<std::pair<std::string, std::string>>& cred_pair,
             const supported_address_families address_families = supported_address_families::all,
+            socks5_upstream_options upstream_options = {},
             const bool start = false
         )
         {
@@ -1233,6 +1239,11 @@ namespace proxy
                     "Failed to add SOCKS5 proxy {}: no destination address families are enabled.",
                     endpoint);
                 return {};
+            }
+
+            if (upstream_options.is_tls() && upstream_options.tls.server_name.empty())
+            {
+                upstream_options.tls.server_name = proxy_endpoint->host;
             }
 
             if (!proxy_endpoint->ipv4)
@@ -1266,7 +1277,8 @@ namespace proxy
 
                 if (ipv4_destinations_enabled)
                 {
-                    auto proxy_pair_v4 = build_proxy_pair<net::ip_address_v4>(*proxy_endpoint->ipv4, protocols, cred_pair);
+                    auto proxy_pair_v4 = build_proxy_pair<net::ip_address_v4>(
+                        *proxy_endpoint->ipv4, protocols, cred_pair, upstream_options);
                     socks_tcp_proxy_server = std::move(proxy_pair_v4.first);
                     socks_udp_proxy_server = std::move(proxy_pair_v4.second);
                 }
@@ -1293,7 +1305,8 @@ namespace proxy
                             proxy_endpoint->ipv4->port
                         };
 
-                        auto proxy_pair_v6 = build_proxy_pair<net::ip_address_v6>(*upstream_v6, protocols, cred_pair);
+                        auto proxy_pair_v6 = build_proxy_pair<net::ip_address_v6>(
+                            *upstream_v6, protocols, cred_pair, upstream_options);
                         socks_tcp_proxy_server_v6 = std::move(proxy_pair_v6.first);
                         socks_udp_proxy_server_v6 = std::move(proxy_pair_v6.second);
                     }
@@ -1532,6 +1545,20 @@ namespace proxy
         }
 
         /**
+         * Backwards-compatible overload with explicit destination address families.
+         */
+        std::optional<size_t> add_socks5_proxy(
+            const std::string& endpoint,
+            const supported_protocols protocols,
+            const std::optional<std::pair<std::string, std::string>>& cred_pair,
+            const supported_address_families address_families,
+            const bool start
+        )
+        {
+            return add_socks5_proxy(endpoint, protocols, cred_pair, address_families, {}, start);
+        }
+
+        /**
          * Backwards-compatible overload that enables both IPv4 and IPv6 destinations.
          */
         std::optional<size_t> add_socks5_proxy(
@@ -1541,7 +1568,7 @@ namespace proxy
             const bool start
         )
         {
-            return add_socks5_proxy(endpoint, protocols, cred_pair, supported_address_families::all, start);
+            return add_socks5_proxy(endpoint, protocols, cred_pair, supported_address_families::all, {}, start);
         }
 
         /**
@@ -1664,6 +1691,7 @@ namespace proxy
             }
 
             resolved_proxy_endpoint result;
+            result.host = host;
             for (const auto* address = addresses; address != nullptr; address = address->ai_next)
             {
                 if (!result.ipv4 && address->ai_family == AF_INET &&

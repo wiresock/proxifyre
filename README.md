@@ -29,6 +29,10 @@ The application uses a configuration file named `app-config.json`. This JSON fil
 - **socks5ProxyEndpoint**: A string that specifies the SOCKS5 proxy endpoint.
 - **username**: A string that specifies the username for the proxy (optional).
 - **password**: A string that specifies the password for the proxy (optional).
+- **socks5Transport**: `"TCP"` for normal SOCKS5 (default) or `"TLS"` for SOCKS5-over-TLS.
+- **tlsServerName**: SNI/certificate validation name for `"socks5Transport": "TLS"` (defaults to the endpoint host).
+- **tlsPinnedSha256**: Optional SHA-256 certificate fingerprint pin for TLS upstreams.
+- **tlsAllowInvalidCertificate**: Allows invalid TLS certificates (default: `false`). Prefer `tlsPinnedSha256` for self-signed test certificates.
 - **supportedProtocols**: An array of strings specifying the supported protocols (e.g., `"TCP"`, `"UDP"`).
 - **supportedAddressFamilies**: An array containing `"IPv4"`, `"IPv6"`, or both. If omitted, both are enabled. An explicit empty array or any other value is rejected as a configuration error.
 - **excludes** *(new in v2.1.1)*: An array of application names or paths to exclude from proxy routing.
@@ -135,6 +139,26 @@ Example:
 ### SOCKS5 Proxy Authorization
 
 If the SOCKS5 proxy does not support authorization, you can skip the `username` and `password` fields in the configuration.
+
+---
+
+### SOCKS5-over-TLS / Alighieri
+
+ProxiFyre can initiate a TLS session to a SOCKS5 proxy that expects SOCKS5-over-TLS, such as [Alighieri](https://github.com/wiresock/alighieri) with `tls.certfile` / `tls.keyfile` enabled. TLS transport supports both TCP `CONNECT` and the UDP `ASSOCIATE` control channel.
+
+```json
+{
+  "appNames": ["chrome"],
+  "socks5ProxyEndpoint": "proxy.example.com:443",
+  "socks5Transport": "TLS",
+  "tlsServerName": "proxy.example.com",
+  "tlsPinnedSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "supportedProtocols": ["TCP", "UDP"],
+  "supportedAddressFamilies": ["IPv4", "IPv6"]
+}
+```
+
+For public certificates, omit `tlsPinnedSha256` and leave `tlsAllowInvalidCertificate` as `false`. Setting `tlsPinnedSha256` selects exact leaf-certificate pin validation instead of normal chain/hostname validation, which allows a self-signed certificate while still authenticating the configured certificate. Prefer that mode for self-signed lab certificates rather than disabling validation globally. The native transport currently negotiates TLS 1.2, which is supported by Alighieri's rustls listener.
 
 ---
 

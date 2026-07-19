@@ -769,7 +769,7 @@ namespace proxy
          *
          * @param is_local true if the FIN was read on the local socket, false if on the remote.
          */
-        void on_peer_read_shutdown(const bool is_local)
+        virtual void on_peer_read_shutdown(const bool is_local)
         {
             std::scoped_lock lock(lock_);
 
@@ -820,7 +820,7 @@ namespace proxy
          *
          * Thread safety is ensured by acquiring a lock on the session state.
          *
-         * @return true if the session is fully closed and all buffers are empty (ready for removal),
+         * @return true if the session is fully closed and all I/O has drained (ready for removal),
          *         false otherwise.
          *
          * @note This method may be called periodically by a cleanup thread to manage session lifetimes.
@@ -900,22 +900,21 @@ namespace proxy
             if (sockets_closed)
             {
                 NETLIB_DEBUG("is_ready_for_removal: Both sockets are closed, checking buffer states");
-                NETLIB_DEBUG("is_ready_for_removal: Buffer lengths - remote_send: {}, local_send: {}, remote_recv: {}, local_recv: {}",
+                NETLIB_DEBUG("is_ready_for_removal: Buffer state - remote_send: {}, local_send: {}, remote_recv_capacity: {}, local_recv_capacity: {}",
                     remote_send_buf_.len, local_send_buf_.len, remote_recv_buf_.len, local_recv_buf_.len);
 
-                // If both sockets are closed, force-reset all buffer lengths
-                // The connection is dead, so any remaining data cannot be transmitted
-                if (remote_send_buf_.len != 0 || local_send_buf_.len != 0 || 
-                    remote_recv_buf_.len != 0 || local_recv_buf_.len != 0)
+                // A receive WSABUF's length is available capacity, not buffered payload. Only
+                // send lengths can represent data that was still pending when the sockets closed.
+                if (remote_send_buf_.len != 0 || local_send_buf_.len != 0)
                 {
-                    NETLIB_WARNING("is_ready_for_removal: Sockets closed with non-empty buffers, forcing buffer reset (data lost: remote_send={}, local_send={}, remote_recv={}, local_recv={})",
-                        remote_send_buf_.len, local_send_buf_.len, remote_recv_buf_.len, local_recv_buf_.len);
-                    
-                    remote_send_buf_.len = 0;
-                    local_send_buf_.len = 0;
-                    remote_recv_buf_.len = 0;
-                    local_recv_buf_.len = 0;
+                    NETLIB_WARNING("is_ready_for_removal: Sockets closed with pending send data (remote_send={}, local_send={})",
+                        remote_send_buf_.len, local_send_buf_.len);
                 }
+
+                remote_send_buf_.len = 0;
+                local_send_buf_.len = 0;
+                remote_recv_buf_.len = 0;
+                local_recv_buf_.len = 0;
 
                 // Break the per-session shared_ptr cycle: each per-I/O context member holds a
                 // strong reference back to this object so it stays alive while overlapped I/O

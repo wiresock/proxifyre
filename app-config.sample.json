@@ -7,6 +7,10 @@
             "socks5ProxyEndpoint": "proxy.example.com:1080",
             "username": "REPLACE_WITH_USERNAME_OR_LEAVE_EMPTY",
             "password": "REPLACE_WITH_PASSWORD_OR_LEAVE_EMPTY",
+            "socks5Transport": "TCP",
+            "tlsServerName": "",
+            "tlsPinnedSha256": "",
+            "tlsAllowInvalidCertificate": false,
             "supportedProtocols": ["TCP", "UDP"],
             "supportedAddressFamilies": ["IPv4", "IPv6"]
         }

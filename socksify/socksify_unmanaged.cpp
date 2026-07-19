@@ -240,6 +240,10 @@ void socksify_unmanaged::set_bypass_lan() const
  * @param start Whether to start the proxy immediately.
  * @param login Optional username for authentication.
  * @param password Optional password for authentication.
+ * @param transport Upstream transport used to reach the SOCKS5 proxy.
+ * @param tls_server_name Server name used for TLS SNI and certificate validation.
+ * @param tls_pinned_cert_sha256 Optional SHA-256 certificate fingerprint pin.
+ * @param tls_allow_invalid_certificate Whether to bypass normal certificate validation.
  * @return A handle (LONG_PTR) to the proxy instance, or -1 on failure.
  */
 LONG_PTR socksify_unmanaged::add_socks5_proxy(
@@ -248,12 +252,23 @@ LONG_PTR socksify_unmanaged::add_socks5_proxy(
     const supported_address_families_mx address_family,
     const bool start,
     const std::string& login,
-    const std::string& password) const
+    const std::string& password,
+    const socks5_transport_mx transport,
+    const std::string& tls_server_name,
+    const std::string& tls_pinned_cert_sha256,
+    const bool tls_allow_invalid_certificate) const
 {
     using namespace std::string_literals;
     std::optional<std::pair<std::string, std::string>> cred{ std::nullopt };
 
-    if (!login.empty())
+    if (login.empty() != password.empty() ||
+        login.size() > proxy::socks5_username_max_length ||
+        password.size() > proxy::socks5_username_max_length)
+    {
+        return -1;
+    }
+
+    if (!login.empty() && !password.empty())
     {
         cred = std::make_pair(login, password);
     }
@@ -287,7 +302,23 @@ LONG_PTR socksify_unmanaged::add_socks5_proxy(
         break;
     }
 
-    if (const auto result = proxy_->add_socks5_proxy(endpoint, protocols, cred, address_families, start); result)
+    proxy::socks5_upstream_options upstream_options{};
+    switch (transport)
+    {
+    case socks5_transport_mx::tls:
+        upstream_options.transport = proxy::socks5_transport::tls;
+        upstream_options.tls.server_name = tls_server_name;
+        upstream_options.tls.pinned_cert_sha256 = tls_pinned_cert_sha256;
+        upstream_options.tls.allow_invalid_certificate = tls_allow_invalid_certificate;
+        break;
+    case socks5_transport_mx::tcp:
+    default:
+        upstream_options.transport = proxy::socks5_transport::tcp;
+        break;
+    }
+
+    if (const auto result = proxy_->add_socks5_proxy(
+        endpoint, protocols, cred, address_families, upstream_options, start); result)
     {
         return static_cast<LONG_PTR>(result.value());
     }
@@ -303,9 +334,23 @@ LONG_PTR socksify_unmanaged::add_socks5_proxy(
     const supported_protocols_mx protocol,
     const bool start,
     const std::string& login,
-    const std::string& password) const
+    const std::string& password,
+    const socks5_transport_mx transport,
+    const std::string& tls_server_name,
+    const std::string& tls_pinned_cert_sha256,
+    const bool tls_allow_invalid_certificate) const
 {
-    return add_socks5_proxy(endpoint, protocol, supported_address_families_mx::both, start, login, password);
+    return add_socks5_proxy(
+        endpoint,
+        protocol,
+        supported_address_families_mx::both,
+        start,
+        login,
+        password,
+        transport,
+        tls_server_name,
+        tls_pinned_cert_sha256,
+        tls_allow_invalid_certificate);
 }
 
 /**

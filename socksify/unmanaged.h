@@ -65,6 +65,7 @@
 #include "../netlib/src/winsys/io_completion_port.h"
 #include "../netlib/src/proxy/packet_pool.h"
 #include "../netlib/src/proxy/tcp_proxy_socket.h"
+#include "../netlib/src/proxy/schannel_tls_stream.h"
 #include "../netlib/src/proxy/socks5_tcp_proxy_socket.h"
 #include "../netlib/src/proxy/tcp_proxy_server.h"
 #include "../netlib/src/proxy/socks5_udp_proxy_socket.h"

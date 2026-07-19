@@ -211,7 +211,43 @@ void Socksifier::Socksifier::SetBypassLan()
 IntPtr Socksifier::Socksifier::AddSocks5Proxy(String^ endpoint, String^ username, String^ password,
     SupportedProtocolsEnum protocols, SupportedAddressFamiliesEnum addressFamilies, const bool start)
 {
+    return AddSocks5Proxy(
+        endpoint,
+        username,
+        password,
+        protocols,
+        addressFamilies,
+        Socks5TransportEnum::TCP,
+        nullptr,
+        nullptr,
+        false,
+        start);
+}
+
+/// <summary>
+/// Adds a SOCKS5 proxy to the gateway with an explicit upstream transport.
+/// </summary>
+/// <param name="endpoint">The proxy endpoint (IP:Port).</param>
+/// <param name="username">The username for authentication.</param>
+/// <param name="password">The password for authentication.</param>
+/// <param name="protocols">The supported protocols.</param>
+/// <param name="addressFamilies">The supported destination address families.</param>
+/// <param name="transport">The upstream transport.</param>
+/// <param name="tlsServerName">TLS SNI and certificate validation name.</param>
+/// <param name="tlsPinnedSha256">Optional SHA-256 certificate fingerprint pin.</param>
+/// <param name="tlsAllowInvalidCertificate">Whether to bypass normal certificate validation.</param>
+/// <param name="start">Whether to start the proxy immediately.</param>
+/// <returns>A handle to the proxy instance, or -1 on failure.</returns>
+IntPtr Socksifier::Socksifier::AddSocks5Proxy(String^ endpoint, String^ username, String^ password,
+    SupportedProtocolsEnum protocols, SupportedAddressFamiliesEnum addressFamilies, Socks5TransportEnum transport,
+    String^ tlsServerName, String^ tlsPinnedSha256, const bool tlsAllowInvalidCertificate, const bool start)
+{
     if (!unmanaged_ptr_)
+        return static_cast<IntPtr>(-1);
+
+    const auto has_username = !String::IsNullOrEmpty(username);
+    const auto has_password = !String::IsNullOrEmpty(password);
+    if (has_username != has_password)
         return static_cast<IntPtr>(-1);
 
     auto protocols_mx = supported_protocols_mx::both;
@@ -240,7 +276,24 @@ IntPtr Socksifier::Socksifier::AddSocks5Proxy(String^ endpoint, String^ username
         break;
     }
 
-    if (username != nullptr && password != nullptr)
+    auto transport_mx = socks5_transport_mx::tcp;
+    switch (transport)
+    {
+    case Socks5TransportEnum::TLS:
+        transport_mx = socks5_transport_mx::tls;
+        break;
+    default:
+        break;
+    }
+
+    const auto tls_server_name_mx = tlsServerName != nullptr
+        ? msclr::interop::marshal_as<std::string>(tlsServerName)
+        : std::string{};
+    const auto tls_pinned_sha256_mx = tlsPinnedSha256 != nullptr
+        ? msclr::interop::marshal_as<std::string>(tlsPinnedSha256)
+        : std::string{};
+
+    if (has_username && has_password)
     {
         return static_cast<IntPtr>(unmanaged_ptr_->add_socks5_proxy(
             msclr::interop::marshal_as<std::string>(endpoint),
@@ -248,12 +301,25 @@ IntPtr Socksifier::Socksifier::AddSocks5Proxy(String^ endpoint, String^ username
             address_families_mx,
             start,
             msclr::interop::marshal_as<std::string>(username),
-            msclr::interop::marshal_as<std::string>(password)
+            msclr::interop::marshal_as<std::string>(password),
+            transport_mx,
+            tls_server_name_mx,
+            tls_pinned_sha256_mx,
+            tlsAllowInvalidCertificate
         ));
     }
 
     return static_cast<IntPtr>(unmanaged_ptr_->add_socks5_proxy(
-        msclr::interop::marshal_as<std::string>(endpoint), protocols_mx, address_families_mx, start));
+        msclr::interop::marshal_as<std::string>(endpoint),
+        protocols_mx,
+        address_families_mx,
+        start,
+        "",
+        "",
+        transport_mx,
+        tls_server_name_mx,
+        tls_pinned_sha256_mx,
+        tlsAllowInvalidCertificate));
 }
 
 /// <summary>
