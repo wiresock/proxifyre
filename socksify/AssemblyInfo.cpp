@@ -17,7 +17,7 @@ using namespace System::Security::Permissions;
 
 // Keep the major.minor in sync with the release tag. (The build-revision wildcard auto-fills
 // the last two fields.) A prior release left this at 2.0.* while ProxiFyre.exe advanced, so the
-// shipped socksify.dll reported a stale version; bumped for the 2.3.x line.
-[assembly:AssemblyVersionAttribute("2.3.*")];
+// shipped socksify.dll reported a stale version; keep this aligned with the release line.
+[assembly:AssemblyVersionAttribute("2.4.*")];
 
 [assembly:ComVisible(false)];
