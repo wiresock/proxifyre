@@ -146,6 +146,10 @@ namespace proxy
         /// </summary>
         SOCKET socks_socket_;
 
+        /// Serializes control-socket polling with teardown. The UDP relay does not otherwise read
+        /// this socket after negotiation, so the maintenance thread polls it for peer closure.
+        mutable std::mutex socks_socket_lock_;
+
         /// <summary>
         /// Shared pointer to the packet pool for efficient allocation and reuse of network packet buffers.
         /// </summary>
@@ -213,6 +217,53 @@ namespace proxy
         /// reference our io_context member" guarantee rather than a wall-clock grace.
         /// </summary>
         std::atomic<long> outstanding_io_{ 0 };
+
+        /**
+         * @brief Checks whether the SOCKS5 UDP control connection was closed by the proxy.
+         *
+         * A SOCKS5 UDP association lasts only as long as its TCP control connection. After the
+         * ASSOCIATE reply no further application data is expected on that connection, so either
+         * readable data (for example, an encrypted TLS close_notify) or EOF means the cached UDP
+         * relay must be retired. The zero-timeout select keeps the maintenance scan non-blocking.
+         */
+        [[nodiscard]] bool is_control_channel_closed() const noexcept
+        {
+            std::scoped_lock lock(socks_socket_lock_);
+            if (socks_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
+                return true;
+
+            fd_set read_set;
+            FD_ZERO(&read_set);
+            FD_SET(socks_socket_, &read_set);
+            timeval timeout{};
+
+            const auto select_result = select(0, &read_set, nullptr, nullptr, &timeout);
+            if (select_result == 0)
+                return false;
+            if (select_result == SOCKET_ERROR)
+                return WSAGetLastError() != WSAEINTR;
+
+            char pending_byte{};
+            const auto recv_result = recv(socks_socket_, &pending_byte, 1, MSG_PEEK);
+            if (recv_result == SOCKET_ERROR)
+            {
+                const auto error = WSAGetLastError();
+                return error != WSAEWOULDBLOCK && error != WSAEINTR;
+            }
+
+            return true;
+        }
+
+        void close_control_channel() noexcept
+        {
+            std::scoped_lock lock(socks_socket_lock_);
+            if (socks_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
+                return;
+
+            CancelIoEx(reinterpret_cast<HANDLE>(socks_socket_), nullptr);  // NOLINT(performance-no-int-to-ptr)
+            closesocket(socks_socket_);
+            socks_socket_ = INVALID_SOCKET;
+        }
 
     public:
         /**
@@ -283,13 +334,7 @@ namespace proxy
                 remote_socket_ = INVALID_SOCKET;
             }
 
-            if (socks_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
-            {
-                // Cancel all pending I/O operations on the SOCKS TCP socket before closing
-                CancelIoEx(reinterpret_cast<HANDLE>(socks_socket_), nullptr);  // NOLINT(performance-no-int-to-ptr)
-                closesocket(socks_socket_);
-                socks_socket_ = INVALID_SOCKET;
-            }
+            close_control_channel();
         }
 
         /**
@@ -389,12 +434,7 @@ namespace proxy
                 closesocket(remote_socket_);
                 remote_socket_ = INVALID_SOCKET;
             }
-            if (socks_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
-            {
-                CancelIoEx(reinterpret_cast<HANDLE>(socks_socket_), nullptr);  // NOLINT(performance-no-int-to-ptr)
-                closesocket(socks_socket_);
-                socks_socket_ = INVALID_SOCKET;
-            }
+            close_control_channel();
             ready_for_removal_.store(true);
         }
 
@@ -461,8 +501,9 @@ namespace proxy
         /**
          * @brief Checks if the proxy socket is ready to be removed.
          *
-         * The socket is considered ready for removal if it has been marked as such,
-         * or if no packets have been processed for more than 5 minutes.
+         * The socket is considered ready for removal if it has been marked as such, if the SOCKS5
+         * TCP control connection has closed, or if no packets have been processed for more than
+         * 5 minutes.
          *
          * @return True if the socket should be removed, false otherwise.
          */
@@ -470,8 +511,17 @@ namespace proxy
         {
             using namespace std::chrono_literals;
 
-            if (!ready_for_removal_.load() && (std::chrono::steady_clock::now() - timestamp_ <= 5min))
+            const auto explicitly_closed = ready_for_removal_.load();
+            const auto control_channel_closed = !explicitly_closed && is_control_channel_closed();
+            if (!explicitly_closed && !control_channel_closed &&
+                (std::chrono::steady_clock::now() - timestamp_ <= 5min))
                 return false;
+
+            if (control_channel_closed)
+            {
+                NETLIB_DEBUG("SOCKS5 UDP control channel closed for relay {}:{}; retiring association",
+                    remote_peer_address_, remote_peer_port_);
+            }
 
             // Ready (explicit close or idle timeout). Break the per-I/O self-reference cycle so
             // the destructor can run, but only after a one-cycle grace. First pass: close the
