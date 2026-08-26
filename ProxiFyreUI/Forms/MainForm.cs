@@ -25,6 +25,8 @@ namespace ProxiFyreUI.Forms
         private readonly ConfigurationApplyCoordinator _applyCoordinator;
         private readonly CancellationTokenSource _lifetimeCancellation = new CancellationTokenSource();
         private readonly Queue<string> _logLines = new Queue<string>();
+        private readonly Icon _applicationIcon;
+        private readonly string _baseWindowTitle;
         private UiSettings _settings;
         private EngineLocation _engineLocation;
         private ServiceStatusInfo _serviceStatus = new ServiceStatusInfo(ProxiFyreServiceState.Unknown);
@@ -62,9 +64,16 @@ namespace ProxiFyreUI.Forms
             _logTailer.StatusChanged += LogTailer_StatusChanged;
             followLogsCheckBox.Checked = _settings.FollowLogs;
             minimizeToTrayCheckBox.Checked = _settings.MinimizeToTray;
-            guiVersionValueLabel.Text = GetFileVersion(Assembly.GetExecutingAssembly().Location);
+            var guiVersion = GetFileVersion(Assembly.GetExecutingAssembly().Location);
+            guiVersionValueLabel.Text = guiVersion;
+            _baseWindowTitle = string.Equals(guiVersion, "Not available", StringComparison.Ordinal)
+                ? "ProxiFyre"
+                : "ProxiFyre v" + guiVersion;
+            Text = _baseWindowTitle;
             architectureValueLabel.Text = GetArchitectureDescription();
-            notifyIcon.Icon = SystemIcons.Application;
+            _applicationIcon = LoadApplicationIcon();
+            Icon = _applicationIcon;
+            notifyIcon.Icon = _applicationIcon;
             serviceRefreshTimer.Start();
         }
 
@@ -1092,7 +1101,7 @@ namespace ProxiFyreUI.Forms
             else
                 changesStateValueLabel.Text = "Saved; service not running";
 
-            Text = "ProxiFyre" + (_workspace.IsDirty ? " *" : string.Empty);
+            Text = _baseWindowTitle + (_workspace.IsDirty ? " *" : string.Empty);
             var pending = _serviceStatus.State == ProxiFyreServiceState.StartPending ||
                           _serviceStatus.State == ProxiFyreServiceState.StopPending ||
                           _serviceStatus.State == ProxiFyreServiceState.PausePending ||
@@ -1274,7 +1283,10 @@ namespace ProxiFyreUI.Forms
             _logTailer.Dispose();
             _serviceController.Dispose();
             notifyIcon.Visible = false;
+            notifyIcon.Icon = null;
+            Icon = null;
             notifyIcon.Dispose();
+            _applicationIcon.Dispose();
             _lifetimeCancellation.Dispose();
         }
 
@@ -1340,6 +1352,20 @@ namespace ProxiFyreUI.Forms
                 return "Not available";
             try { return FileVersionInfo.GetVersionInfo(path).FileVersion ?? "Not available"; }
             catch { return "Not available"; }
+        }
+
+        private static Icon LoadApplicationIcon()
+        {
+            try
+            {
+                return Icon.ExtractAssociatedIcon(Application.ExecutablePath) ??
+                       (Icon)SystemIcons.Application.Clone();
+            }
+            catch (Exception ex) when (ex is ArgumentException || ex is IOException ||
+                                       ex is UnauthorizedAccessException)
+            {
+                return (Icon)SystemIcons.Application.Clone();
+            }
         }
 
         private static string GetArchitectureDescription()

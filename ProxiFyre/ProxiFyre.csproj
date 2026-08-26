@@ -8,6 +8,7 @@
     <OutputType>Exe</OutputType>
     <RootNamespace>ProxiFyre</RootNamespace>
     <AssemblyName>ProxiFyre</AssemblyName>
+    <ApplicationIcon>..\assets\ProxiFyre.ico</ApplicationIcon>
     <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
@@ -113,6 +114,9 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="..\assets\ProxiFyre.ico">
+      <Link>ProxiFyre.ico</Link>
+    </None>
     <None Include="App.config" />
     <None Include="..\app-config.sample.json">
       <Link>app-config.sample.json</Link>
