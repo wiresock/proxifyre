@@ -1,4 +1,4 @@
-using ProxiFyreUI.Forms;
+using Microsoft.VisualBasic.ApplicationServices;
 using System;
 using System.Threading;
 using System.Windows.Forms;
@@ -8,13 +8,22 @@ namespace ProxiFyreUI
     internal static class Program
     {
         [STAThread]
-        private static void Main()
+        private static void Main(string[] args)
         {
-            Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.ThreadException += OnThreadException;
             AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
-            Application.Run(new MainForm());
+
+            try
+            {
+                new ProxiFyreApplication().Run(args);
+            }
+            catch (CantStartSingleInstanceException)
+            {
+                MessageBox.Show(
+                    "The existing ProxiFyre window is still starting or closing. Try again in a moment.",
+                    "ProxiFyre", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
 
         private static void OnThreadException(object sender, ThreadExceptionEventArgs e)
@@ -22,7 +31,7 @@ namespace ProxiFyreUI
             ShowFatalError(e.Exception);
         }
 
-        private static void OnUnhandledException(object sender, UnhandledExceptionEventArgs e)
+        private static void OnUnhandledException(object sender, System.UnhandledExceptionEventArgs e)
         {
             ShowFatalError(e.ExceptionObject as Exception);
         }
@@ -35,6 +44,29 @@ namespace ProxiFyreUI
             MessageBox.Show(
                 "An unexpected ProxiFyre UI error occurred. Restart the application and review the redacted diagnostics and service logs.",
                 "ProxiFyre UI", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    internal sealed class ProxiFyreApplication : WindowsFormsApplicationBase
+    {
+        public ProxiFyreApplication()
+        {
+            IsSingleInstance = true;
+            EnableVisualStyles = true;
+            ShutdownStyle = ShutdownMode.AfterMainFormCloses;
+        }
+
+        protected override void OnCreateMainForm()
+        {
+            MainForm = new Forms.MainForm();
+        }
+
+        protected override void OnStartupNextInstance(StartupNextInstanceEventArgs eventArgs)
+        {
+            eventArgs.BringToForeground = true;
+            var mainForm = MainForm as Forms.MainForm;
+            mainForm?.RestoreFromSecondaryLaunch();
+            base.OnStartupNextInstance(eventArgs);
         }
     }
 }

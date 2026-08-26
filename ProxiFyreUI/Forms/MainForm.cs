@@ -936,6 +936,31 @@ namespace ProxiFyreUI.Forms
             OpenFolder(_workspace.LogDirectoryPath, "log");
         }
 
+        private void OpenLogFileButton_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                var filePath = _logTailer.CurrentFilePath;
+                if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+                    filePath = LogFileLocator.FindLatest(_workspace.LogDirectoryPath);
+
+                if (string.IsNullOrWhiteSpace(filePath))
+                {
+                    MessageBox.Show(this,
+                        "No ProxiFyre log file is available yet. Start the service or reload the Logs tab after a log is created.",
+                        "Log file not available", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                Process.Start(new ProcessStartInfo { FileName = filePath, UseShellExecute = true });
+                statusStripLabel.Text = "Opened " + Path.GetFileName(filePath) + ".";
+            }
+            catch (Exception ex)
+            {
+                ShowError("The current log file could not be opened.", ex);
+            }
+        }
+
         private void CopyDiagnosticsButton_Click(object sender, EventArgs e)
         {
             try
@@ -1258,8 +1283,23 @@ namespace ProxiFyreUI.Forms
 
         private void TrayOpenMenuItem_Click(object sender, EventArgs e)
         {
+            ShowMainWindow();
+        }
+
+        internal void RestoreFromSecondaryLaunch()
+        {
+            if (Disposing || IsDisposed)
+                return;
+
+            ShowMainWindow();
+            statusStripLabel.Text = "ProxiFyre was already running; the existing window was activated.";
+        }
+
+        private void ShowMainWindow()
+        {
             Show();
             WindowState = FormWindowState.Normal;
+            BringToFront();
             Activate();
         }
 

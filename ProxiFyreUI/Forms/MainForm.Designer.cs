@@ -53,6 +53,7 @@ namespace ProxiFyreUI.Forms
         private System.Windows.Forms.Button copySelectedLogButton;
         private System.Windows.Forms.Button copyVisibleLogButton;
         private System.Windows.Forms.Button clearLogViewButton;
+        private System.Windows.Forms.Button openLogFileButton;
         private System.Windows.Forms.Button openLogsButton;
         private System.Windows.Forms.Button reloadLogsButton;
         private System.Windows.Forms.RichTextBox logRichTextBox;
@@ -168,6 +169,7 @@ namespace ProxiFyreUI.Forms
             this.copySelectedLogButton = new System.Windows.Forms.Button();
             this.copyVisibleLogButton = new System.Windows.Forms.Button();
             this.clearLogViewButton = new System.Windows.Forms.Button();
+            this.openLogFileButton = new System.Windows.Forms.Button();
             this.openLogsButton = new System.Windows.Forms.Button();
             this.reloadLogsButton = new System.Windows.Forms.Button();
             this.settingsTabPage = new System.Windows.Forms.TabPage();
@@ -455,7 +457,8 @@ namespace ProxiFyreUI.Forms
             this.logsTabPage.TabIndex = 2;
             this.logsTabPage.Text = "Logs";
             this.logsTabPage.UseVisualStyleBackColor = true;
-            this.logsToolbarPanel.AutoScroll = true;
+            this.logsToolbarPanel.AutoSize = true;
+            this.logsToolbarPanel.AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink;
             this.logsToolbarPanel.Controls.Add(this.followLogsCheckBox);
             this.logsToolbarPanel.Controls.Add(this.logLevelFilterLabel);
             this.logsToolbarPanel.Controls.Add(this.logLevelFilterComboBox);
@@ -464,10 +467,12 @@ namespace ProxiFyreUI.Forms
             this.logsToolbarPanel.Controls.Add(this.copySelectedLogButton);
             this.logsToolbarPanel.Controls.Add(this.copyVisibleLogButton);
             this.logsToolbarPanel.Controls.Add(this.clearLogViewButton);
+            this.logsToolbarPanel.Controls.Add(this.openLogFileButton);
             this.logsToolbarPanel.Controls.Add(this.openLogsButton);
             this.logsToolbarPanel.Controls.Add(this.reloadLogsButton);
             this.logsToolbarPanel.Dock = System.Windows.Forms.DockStyle.Top;
             this.logsToolbarPanel.Location = new System.Drawing.Point(8, 8);
+            this.logsToolbarPanel.MinimumSize = new System.Drawing.Size(0, 38);
             this.logsToolbarPanel.Name = "logsToolbarPanel";
             this.logsToolbarPanel.Size = new System.Drawing.Size(1090, 38);
             this.logsToolbarPanel.TabIndex = 0;
@@ -479,6 +484,7 @@ namespace ProxiFyreUI.Forms
             this.copySelectedLogButton.AutoSize = true; this.copySelectedLogButton.Text = "Copy selected"; this.copySelectedLogButton.UseVisualStyleBackColor = true; this.copySelectedLogButton.Click += new System.EventHandler(this.CopySelectedLogButton_Click);
             this.copyVisibleLogButton.AutoSize = true; this.copyVisibleLogButton.Text = "Copy visible"; this.copyVisibleLogButton.UseVisualStyleBackColor = true; this.copyVisibleLogButton.Click += new System.EventHandler(this.CopyVisibleLogButton_Click);
             this.clearLogViewButton.AutoSize = true; this.clearLogViewButton.Text = "Clear view"; this.clearLogViewButton.UseVisualStyleBackColor = true; this.clearLogViewButton.Click += new System.EventHandler(this.ClearLogViewButton_Click);
+            this.openLogFileButton.AutoSize = true; this.openLogFileButton.Text = "Open log file"; this.openLogFileButton.UseVisualStyleBackColor = true; this.openLogFileButton.Click += new System.EventHandler(this.OpenLogFileButton_Click);
             this.openLogsButton.AutoSize = true; this.openLogsButton.Text = "Open log folder"; this.openLogsButton.UseVisualStyleBackColor = true; this.openLogsButton.Click += new System.EventHandler(this.OpenLogFolderButton_Click);
             this.reloadLogsButton.AutoSize = true; this.reloadLogsButton.Text = "Reload"; this.reloadLogsButton.UseVisualStyleBackColor = true; this.reloadLogsButton.Click += new System.EventHandler(this.ReloadLogsButton_Click);
             this.logStatusLabel.Dock = System.Windows.Forms.DockStyle.Bottom;

@@ -289,7 +289,7 @@ Logs are saved in the application folder under the `/logs` directory. The detail
 
 ## ProxiFyre GUI
 
-`ProxiFyreUI.exe` is the lightweight native Windows Forms management application included with each architecture-specific release. It requires Windows, .NET Framework 4.7.2, and administrator approval. The GUI edits configuration, controls `ProxiFyreService`, follows logs, and provides notification-area controls; `ProxiFyre.exe` remains the console/service networking engine. The GUI does not load or call `socksify.dll`.
+`ProxiFyreUI.exe` is the lightweight native Windows Forms management application included with each architecture-specific release. It requires Windows, .NET Framework 4.7.2, and administrator approval. The GUI edits configuration, controls `ProxiFyreService`, follows logs, opens the active log file, and provides notification-area controls; `ProxiFyre.exe` remains the console/service networking engine. The GUI does not load or call `socksify.dll`. For each Windows identity and terminal session, only one GUI instance runs per application major/minor version; launching it again restores the existing window from the notification area.
 
 The GUI locates the engine from the installed service registration first, then beside the GUI, then from the last explicitly selected path. Use **Browse for ProxiFyre.exe** when the engine is installed elsewhere. The Diagnostics tab shows the resolved engine, `app-config.json`, and `logs` paths. GUI preferences are stored separately under `%LocalAppData%\ProxiFyreUI`.
 

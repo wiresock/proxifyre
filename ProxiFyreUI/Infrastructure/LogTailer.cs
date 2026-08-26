@@ -7,6 +7,24 @@ using System.Threading;
 
 namespace ProxiFyreUI.Infrastructure
 {
+    public static class LogFileLocator
+    {
+        public static string FindLatest(string directoryPath)
+        {
+            if (string.IsNullOrWhiteSpace(directoryPath) || !Directory.Exists(directoryPath))
+                return null;
+
+            return Directory.EnumerateFiles(directoryPath, "*", SearchOption.TopDirectoryOnly)
+                .Where(path => path.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) ||
+                               path.EndsWith(".log", StringComparison.OrdinalIgnoreCase))
+                .Select(path => new FileInfo(path))
+                .OrderByDescending(info => info.LastWriteTimeUtc)
+                .ThenByDescending(info => info.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(info => info.FullName)
+                .FirstOrDefault();
+        }
+    }
+
     public sealed class LogLinesEventArgs : EventArgs
     {
         public LogLinesEventArgs(IReadOnlyList<string> lines, string filePath, bool reset)
@@ -125,7 +143,7 @@ namespace ProxiFyreUI.Infrastructure
                     return;
                 }
 
-                var latest = FindLatestLogFile(directory);
+                var latest = LogFileLocator.FindLatest(directory);
                 if (latest == null)
                 {
                     RaiseStatus("Waiting for a ProxiFyre log file…", callbackGeneration);
@@ -240,18 +258,6 @@ namespace ProxiFyreUI.Infrastructure
                     return stream.Position;
             }
             return stream.Position;
-        }
-
-        private static string FindLatestLogFile(string directoryPath)
-        {
-            return Directory.EnumerateFiles(directoryPath, "*", SearchOption.TopDirectoryOnly)
-                .Where(path => path.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) ||
-                               path.EndsWith(".log", StringComparison.OrdinalIgnoreCase))
-                .Select(path => new FileInfo(path))
-                .OrderByDescending(info => info.LastWriteTimeUtc)
-                .ThenByDescending(info => info.Name, StringComparer.OrdinalIgnoreCase)
-                .Select(info => info.FullName)
-                .FirstOrDefault();
         }
 
         private void RaiseStatus(string status, int generation)

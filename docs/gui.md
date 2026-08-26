@@ -61,9 +61,9 @@ The workspace fingerprints the file when it is loaded. If another process change
 
 ## Logs and notification area
 
-Engine logs are stored in the `logs` directory beside `ProxiFyre.exe`. The Logs tab reads a bounded tail with read/write sharing, follows appended content incrementally, switches to a newer daily file after rotation, and recovers from creation, truncation, or temporary locks. Follow/pause, text filtering, copy, reload, clear-view, and open-folder actions affect only the viewer; clearing the view does not delete log files.
+Engine logs are stored in the `logs` directory beside `ProxiFyre.exe`. The Logs tab reads a bounded tail with read/write sharing, follows appended content incrementally, switches to a newer daily file after rotation, and recovers from creation, truncation, or temporary locks. **Open log file** launches the file currently being followed, or the newest `.log`/`.txt` file when following is paused. Follow/pause, text filtering, copy, reload, clear-view, and open-folder actions affect only the viewer; clearing the view does not delete log files.
 
-Closing the window hides it in the notification area. The tray menu reflects the real service state and provides open, start, stop, restart, logs, and exit actions. Exiting the GUI does not stop the engine service. Unsaved edits are checked before reload, engine changes, or application exit.
+Closing the window hides it in the notification area. The tray menu reflects the real service state and provides open, start, stop, restart, logs, and exit actions. Within each Windows identity and terminal session, ProxiFyre permits one GUI instance per application major/minor version; launching the same version again restores and activates the existing window, including a tray-hidden window. Exiting the GUI does not stop the engine service. Unsaved edits are checked before reload, engine changes, or application exit.
 
 ## Build and test
 
@@ -93,7 +93,7 @@ Tests write to `bin\tests\<architecture>\<configuration>\` and do not require th
 - **Saved, restart required:** choose **Apply & Restart** or restart the service after completing related edits.
 - **Windows Packet Filter unavailable:** install WinpkFilter from `https://github.com/wiresock/ndisapi/releases`, restart Windows if requested, and retry. The GUI checks the `NDISRD` device before install/start/restart and does not treat a missing driver as a configuration failure.
 - **Engine startup failed:** the service may have rejected configuration or encountered another native initialization error. A service that returns to `Stopped` during startup is reported immediately; review recent lines on the Logs tab.
-- **No log file yet:** start the service or use **Reload** after the engine creates its `logs` directory. The follower continues checking for creation and rotation.
+- **No log file yet:** start the service or use **Reload** after the engine creates its `logs` directory. The follower continues checking for creation and rotation; **Open log file** becomes useful as soon as a `.log` or `.txt` file exists.
 - **External change detected:** reload to accept the on-disk file, overwrite only if the other edit is known to be obsolete, or cancel and compare both versions first.
 - **Recursive timeouts with another VPN:** add the other VPN's carrier/tunnel process to Exclusions.
 
@@ -108,6 +108,7 @@ On a Windows test machine with the appropriate driver and administrator access:
 5. Modify the live JSON externally and verify that save presents conflict choices.
 6. Verify service-not-installed state, then install/start/stop/restart the service where safe.
 7. Confirm invalid configuration blocks apply and an engine startup failure is never displayed as Running.
-8. Follow logs through service restart, append, truncation, and daily rotation.
+8. Follow logs through service restart, append, truncation, and daily rotation, then open the active file from the Logs toolbar.
 9. Copy diagnostics and verify that no password or full credential-bearing configuration appears.
-10. Exit the GUI and confirm the service continues running.
+10. Hide the GUI to the notification area, launch `ProxiFyreUI.exe` again, and confirm the existing window is restored without creating a second tray icon.
+11. Exit the GUI and confirm the service continues running.
