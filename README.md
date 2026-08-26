@@ -299,7 +299,7 @@ Use the Routing tab to add or edit rules and move them into evaluation order. Th
 
 Rules can use normal SOCKS5 over TCP or SOCKS5-over-TLS. A TLS certificate pin is the normalized 64-hex-character SHA-256 fingerprint of the expected leaf certificate. Prefer a pin for a self-signed test endpoint. Allowing an invalid certificate disables normal certificate validation and is prominently warned, especially when no pin is present.
 
-**Save** validates and atomically updates the configuration while preserving `app-config.json.bak`; it does not restart a running service. **Apply & Restart** saves, restarts, waits for the actual SCM result, and offers a one-time rollback to the backup when startup fails. External file changes are detected before either action. Logs are read from the engine's `logs` directory and can be followed without locking the service's file.
+**Save** validates and atomically updates the configuration while preserving `app-config.json.bak`; it does not restart a running service. **Apply & Restart** saves, restarts, waits for the actual SCM result, and offers a one-time rollback to the backup when startup fails. The **Engine log level** is a configuration setting and needs that restart to take effect. External file changes are detected before either action. Logs are read from the engine's `logs` directory and can be followed without locking the service's file; the Logs-tab **View filter** only changes displayed lines and never changes engine verbosity.
 
 Release output is written to `bin\exe\<x86|x64|ARM64>\<Debug|Release>\`. Restore, build, and test from a Visual Studio developer shell with:
 
