@@ -1,6 +1,6 @@
 # ProxiFyre: SOCKS5 Proxifier for Windows
 
-ProxiFyre is a Windows-specific SOCKS5 proxifier application that builds upon the Windows Packet Filter's socksify demo. It consists of three main projects: ndisapi.lib (Windows Packet Filter static library), socksify (.NET C++/CLI class library), and ProxiFyre (C# console application).
+ProxiFyre is a Windows-specific SOCKS5 proxifier application that builds upon the Windows Packet Filter's socksify demo. Its production projects are ndisapi.lib (Windows Packet Filter static library), socksify (.NET C++/CLI class library), ProxiFyre (C# console/service engine), ProxiFyre.Configuration (shared managed configuration library), and ProxiFyreUI (C# Windows Forms manager). ProxiFyre.Tests covers managed logic without requiring the driver or a live service.
 
 **ALWAYS reference these instructions first and fallback to search or bash commands only when you encounter unexpected information that does not match the info here.**
 
@@ -8,7 +8,7 @@ ProxiFyre is a Windows-specific SOCKS5 proxifier application that builds upon th
 
 ### CRITICAL: Platform Requirements
 - **This application ONLY builds and runs on Windows**. Do not attempt to build on Linux/macOS.
-- Build requires: Windows, Visual Studio 2017+, MSBuild, vcpkg, Windows Packet Filter (WinpkFilter)
+- Build requires: Windows, Visual Studio 2022 with MSBuild/C++ workloads, vcpkg, Windows Packet Filter (WinpkFilter)
 - If you are in a Linux environment: **Document that builds cannot be completed** and focus on repository navigation and structure analysis only.
 
 ### Prerequisites Installation (Windows Only)
@@ -63,6 +63,12 @@ Install these dependencies in the following exact order:
    ```cmd
    msbuild socksify.sln -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=x64 -property:Version=2.1.1
    ```
+
+4. **Run managed tests** after the solution build:
+   ```cmd
+   vstest.console.exe bin\tests\x64\Release\ProxiFyre.Tests.dll /TestAdapterPath:packages\NUnit3TestAdapter.4.6.0\build\net462 /Platform:x64
+   ```
+   Use a test assembly matching the host architecture; an x64 runner must not attempt to execute the ARM64 test assembly. The tests must remain independent of `socksify.dll`, the packet-filter driver, SCM mutations, and a live SOCKS5 endpoint.
 
 ## Running the Application (Windows Only)
 
@@ -120,7 +126,7 @@ Create this file in the same directory as `ProxiFyre.exe`:
 
 ### Key Configuration Properties
 - **logLevel**: `Error`, `Warning`, `Info`, `Debug`, `All`
-- **appNames**: Application names or paths to proxy (partial matching supported)
+- **appNames**: Process names use the engine's anchored name matching; path-form entries use permissive path substring matching
 - **socks5ProxyEndpoint**: SOCKS5 server address and port
 - **username/password**: Optional SOCKS5 authentication
 - **supportedProtocols**: Array containing `TCP` and/or `UDP`
@@ -164,7 +170,22 @@ Create this file in the same directory as `ProxiFyre.exe`:
    - C# console application (.NET Framework 4.7.2)
    - Main entry point and service management
    - Key files: `Program.cs`, `ProxiFyre.csproj`
-   - Dependencies: Newtonsoft.Json, NLog, Topshelf
+   - Dependencies: ProxiFyre.Configuration, NLog, Topshelf, and socksify; JSON is consumed transitively through the shared configuration library
+
+4. **ProxiFyre.Configuration** (`./ProxiFyre.Configuration/`):
+   - Shared .NET Framework 4.7.2 configuration models and services
+   - Owns JSON compatibility, normalization, validation, fingerprints, and atomic file persistence
+   - Depends on Newtonsoft.Json only; it must never reference `socksify`
+
+5. **ProxiFyreUI** (`./ProxiFyreUI/`):
+   - Native Windows Forms management application targeting .NET Framework 4.7.2
+   - Edits `app-config.json`, controls `ProxiFyreService`, tails logs, and provides a tray icon
+   - Depends on ProxiFyre.Configuration; it must never reference or load `socksify.dll`
+   - The service/console executable remains the only networking engine
+
+6. **ProxiFyre.Tests** (`./ProxiFyre.Tests/`):
+   - NUnit tests for shared configuration and non-UI application services
+   - Output: `bin\tests\{Platform}\{Configuration}\`
 
 ### Important Files
 - `socksify.sln`: Main Visual Studio solution file
@@ -187,18 +208,18 @@ ls -la
 
 # Key configuration files
 find . -name "*.json" -o -name "*.config" -o -name "packages.config"
-# Output: ./ProxiFyre/App.config, ./ProxiFyre/NLog.config, ./ProxiFyre/packages.config
+# Output includes the managed project App.config/packages.config files and ProxiFyre/NLog.config
 
 # Project structure
 find . -name "*.csproj" -o -name "*.vcxproj" -o -name "*.sln"
-# Output: ./ProxiFyre/ProxiFyre.csproj, ./socksify/socksify.vcxproj, ./ndisapi.lib/ndisapilib.vcxproj, ./socksify.sln
+# Output additionally includes ProxiFyre.Configuration, ProxiFyreUI, and ProxiFyre.Tests projects
 ```
 
 ### Source Code Analysis
 ```bash
 # Find C# files
 find . -name "*.cs"
-# Output: ./ProxiFyre/Program.cs, ./ProxiFyre/Properties/AssemblyInfo.cs
+# Output includes the service, shared configuration, GUI forms/services, and managed test sources
 
 # Find C++ files  
 find . -name "*.cpp" -o -name "*.h"
@@ -228,9 +249,10 @@ find . -name "*.cpp" -o -name "*.h"
 - **Build Process**: ~5-8 minutes per platform (x86, x64, ARM64)
 - **vcpkg Dependencies**: ~10-15 minutes for installation
 - **Total Pipeline**: ~20-25 minutes for complete build across all platforms
-- **Artifacts**: Creates signed ZIP files for each platform
+- **Artifacts**: Creates unsigned architecture-specific ZIP files; the separate release-signing script signs and replaces release payloads under the existing signing policy
 
 ### Build Matrix
 - Platforms: x86, x64, ARM64
 - Configuration: Release only for CI builds
-- Output: `bin\exe\{Platform}\Release\ProxiFyre.exe`
+- Runtime output: `bin\exe\{Platform}\Release\` contains `ProxiFyre.exe`, `ProxiFyreUI.exe`, `socksify.dll`, `ProxiFyre.Configuration.dll`, and their managed dependencies
+- Test output: `bin\tests\{Platform}\Release\ProxiFyre.Tests.dll`

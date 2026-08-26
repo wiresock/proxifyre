@@ -287,6 +287,32 @@ Logs are saved in the application folder under the `/logs` directory. The detail
 
 ---
 
+## ProxiFyre GUI
+
+`ProxiFyreUI.exe` is the lightweight native Windows Forms management application included with each architecture-specific release. It requires Windows, .NET Framework 4.7.2, and administrator approval. The GUI edits configuration, controls `ProxiFyreService`, follows logs, and provides notification-area controls; `ProxiFyre.exe` remains the console/service networking engine. The GUI does not load or call `socksify.dll`.
+
+The GUI locates the engine from the installed service registration first, then beside the GUI, then from the last explicitly selected path. Use **Browse for ProxiFyre.exe** when the engine is installed elsewhere. The Diagnostics tab shows the resolved engine, `app-config.json`, and `logs` paths. GUI preferences are stored separately under `%LocalAppData%\ProxiFyreUI`.
+
+When the service is absent, select **Install Service**. Installation invokes only the resolved engine with its fixed `install` lifecycle argument and refreshes the real Windows Service Control Manager state. Start, stop, and restart operations remain asynchronous, and a successful save is never reported as active proxying.
+
+Use the Routing tab to add or edit rules and move them into evaluation order. The first matching rule wins. **All unmatched applications** writes an explicit empty string (`"appNames": [""]`) and should be the last rule, because it shadows later rules. Exclusions are edited separately, take priority over the catch-all, and use permissive process-name/path substring matching; a VPN carrier process may need exclusion to avoid recursive routing.
+
+Rules can use normal SOCKS5 over TCP or SOCKS5-over-TLS. A TLS certificate pin is the normalized 64-hex-character SHA-256 fingerprint of the expected leaf certificate. Prefer a pin for a self-signed test endpoint. Allowing an invalid certificate disables normal certificate validation and is prominently warned, especially when no pin is present.
+
+**Save** validates and atomically updates the configuration while preserving `app-config.json.bak`; it does not restart a running service. **Apply & Restart** saves, restarts, waits for the actual SCM result, and offers a one-time rollback to the backup when startup fails. External file changes are detected before either action. Logs are read from the engine's `logs` directory and can be followed without locking the service's file.
+
+Release output is written to `bin\exe\<x86|x64|ARM64>\<Debug|Release>\`. Restore, build, and test from a Visual Studio developer shell with:
+
+```powershell
+nuget restore socksify.sln
+msbuild socksify.sln -t:Rebuild -v:minimal -p:Configuration=Release -p:Platform=x64 -p:Version=2.4.0
+vstest.console.exe bin\tests\x64\Release\ProxiFyre.Tests.dll /TestAdapterPath:packages\NUnit3TestAdapter.4.6.0\build\net462 /Platform:x64
+```
+
+Use `x86` in place of `x64` when running on a matching host. Build the ARM64 payload on x64 if the toolchain is installed, but run ARM64 tests only on Windows ARM64. See [docs/gui.md](docs/gui.md) for detailed architecture, security behavior, troubleshooting, and the manual validation checklist.
+
+---
+
 ## Build Prerequisites
 
 Before starting the build process, ensure the following requirements are met:
@@ -305,7 +331,7 @@ Before starting the build process, ensure the following requirements are met:
 
 ## Projects
 
-This repository consists of three main projects:
+This repository consists of six projects:
 
 ### 1. ndisapi.lib
 
@@ -318,3 +344,15 @@ This project is a .Net C++/CLI class library that implements the local SOCKS5 ro
 ### 3. ProxiFyre
 
 This is a .Net-based Windows console application that employs the functionality provided by the socksify .Net C++/CLI class library.
+
+### 4. ProxiFyre.Configuration
+
+This .NET Framework 4.7.2 class library contains the shared configuration models, forward-compatible JSON serialization, normalization, structured validation, fingerprints, and atomic persistence used by both the engine and GUI. It has no dependency on `socksify`.
+
+### 5. ProxiFyreUI
+
+This .NET Framework 4.7.2 Windows Forms application edits configuration and manages the existing Windows service. It depends only on `ProxiFyre.Configuration` and Windows framework APIs; it is not an in-process proxy engine.
+
+### 6. ProxiFyre.Tests
+
+This project contains automated configuration, persistence, path-handling, workspace-state, rollback, and diagnostics-redaction tests and does not require the native driver or a live service.

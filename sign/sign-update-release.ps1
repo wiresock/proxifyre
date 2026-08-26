@@ -16,8 +16,8 @@ directory is created under the system temporary directory.
 .EXAMPLE
 .\sign-update-release.ps1 -VersionTag 2.3.0
 
-Preflights the release, asks for confirmation, signs and verifies both shipped
-binaries, uploads the signed archives, and then removes the unsigned archives.
+Preflights the release, asks for confirmation, signs and verifies every shipped
+executable module, uploads the signed archives, and then removes the unsigned archives.
 
 .EXAMPLE
 .\sign-update-release.ps1 -VersionTag 2.3.0 -WhatIf
@@ -57,8 +57,25 @@ $repository = "ProxiFyre"
 $releaseTag = "v$VersionTag"
 $certificateSubject = "The Anti-Cloud Corporation"
 $architectures = @("ARM64", "x64", "x86")
-$expectedFiles = @("ProxiFyre.exe", "socksify.dll", "app-config.sample.json")
-$binariesToSign = @("ProxiFyre.exe", "socksify.dll")
+$expectedFiles = @(
+    "ProxiFyre.exe",
+    "ProxiFyre.exe.config",
+    "ProxiFyreUI.exe",
+    "ProxiFyreUI.exe.config",
+    "ProxiFyre.Configuration.dll",
+    "socksify.dll",
+    "Newtonsoft.Json.dll",
+    "NLog.dll",
+    "Topshelf.dll",
+    "NLog.config",
+    "app-config.sample.json"
+)
+$binariesToSign = @(
+    "ProxiFyre.exe",
+    "ProxiFyreUI.exe",
+    "ProxiFyre.Configuration.dll",
+    "socksify.dll"
+)
 
 function Assert-ExpectedFiles {
     param (

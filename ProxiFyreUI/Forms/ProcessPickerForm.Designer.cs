@@ -1,0 +1,156 @@
+namespace ProxiFyreUI.Forms
+{
+    partial class ProcessPickerForm
+    {
+        private System.ComponentModel.IContainer components = null;
+        private System.Windows.Forms.Label searchLabel;
+        private System.Windows.Forms.TextBox searchTextBox;
+        private System.Windows.Forms.Button refreshButton;
+        private System.Windows.Forms.DataGridView processGrid;
+        private System.Windows.Forms.DataGridViewTextBoxColumn nameColumn;
+        private System.Windows.Forms.DataGridViewTextBoxColumn idColumn;
+        private System.Windows.Forms.DataGridViewTextBoxColumn pathColumn;
+        private System.Windows.Forms.CheckBox useFullPathCheckBox;
+        private System.Windows.Forms.ProgressBar progressBar;
+        private System.Windows.Forms.Label statusLabel;
+        private System.Windows.Forms.Button okButton;
+        private System.Windows.Forms.Button cancelButton;
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) components?.Dispose();
+            base.Dispose(disposing);
+        }
+
+        private void InitializeComponent()
+        {
+            this.searchLabel = new System.Windows.Forms.Label();
+            this.searchTextBox = new System.Windows.Forms.TextBox();
+            this.refreshButton = new System.Windows.Forms.Button();
+            this.processGrid = new System.Windows.Forms.DataGridView();
+            this.nameColumn = new System.Windows.Forms.DataGridViewTextBoxColumn();
+            this.idColumn = new System.Windows.Forms.DataGridViewTextBoxColumn();
+            this.pathColumn = new System.Windows.Forms.DataGridViewTextBoxColumn();
+            this.useFullPathCheckBox = new System.Windows.Forms.CheckBox();
+            this.progressBar = new System.Windows.Forms.ProgressBar();
+            this.statusLabel = new System.Windows.Forms.Label();
+            this.okButton = new System.Windows.Forms.Button();
+            this.cancelButton = new System.Windows.Forms.Button();
+            ((System.ComponentModel.ISupportInitialize)(this.processGrid)).BeginInit();
+            this.SuspendLayout();
+            this.searchLabel.AutoSize = true;
+            this.searchLabel.Location = new System.Drawing.Point(12, 16);
+            this.searchLabel.Name = "searchLabel";
+            this.searchLabel.Size = new System.Drawing.Size(45, 15);
+            this.searchLabel.TabIndex = 0;
+            this.searchLabel.Text = "Search:";
+            this.searchTextBox.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) | System.Windows.Forms.AnchorStyles.Right)));
+            this.searchTextBox.Location = new System.Drawing.Point(63, 12);
+            this.searchTextBox.Name = "searchTextBox";
+            this.searchTextBox.Size = new System.Drawing.Size(619, 23);
+            this.searchTextBox.TabIndex = 1;
+            this.searchTextBox.TextChanged += new System.EventHandler(this.SearchTextBox_TextChanged);
+            this.refreshButton.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
+            this.refreshButton.Location = new System.Drawing.Point(688, 10);
+            this.refreshButton.Name = "refreshButton";
+            this.refreshButton.Size = new System.Drawing.Size(84, 27);
+            this.refreshButton.TabIndex = 2;
+            this.refreshButton.Text = "Refresh";
+            this.refreshButton.UseVisualStyleBackColor = true;
+            this.refreshButton.Click += new System.EventHandler(this.RefreshButton_Click);
+            this.processGrid.AllowUserToAddRows = false;
+            this.processGrid.AllowUserToDeleteRows = false;
+            this.processGrid.AllowUserToResizeRows = false;
+            this.processGrid.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) | System.Windows.Forms.AnchorStyles.Left) | System.Windows.Forms.AnchorStyles.Right)));
+            this.processGrid.AutoSizeColumnsMode = System.Windows.Forms.DataGridViewAutoSizeColumnsMode.Fill;
+            this.processGrid.BackgroundColor = System.Drawing.SystemColors.Window;
+            this.processGrid.ColumnHeadersHeightSizeMode = System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode.AutoSize;
+            this.processGrid.Columns.AddRange(new System.Windows.Forms.DataGridViewColumn[] { this.nameColumn, this.idColumn, this.pathColumn });
+            this.processGrid.Location = new System.Drawing.Point(12, 44);
+            this.processGrid.MultiSelect = true;
+            this.processGrid.Name = "processGrid";
+            this.processGrid.ReadOnly = true;
+            this.processGrid.RowHeadersVisible = false;
+            this.processGrid.SelectionMode = System.Windows.Forms.DataGridViewSelectionMode.FullRowSelect;
+            this.processGrid.Size = new System.Drawing.Size(760, 385);
+            this.processGrid.TabIndex = 3;
+            this.processGrid.CellDoubleClick += new System.Windows.Forms.DataGridViewCellEventHandler(this.ProcessGrid_CellDoubleClick);
+            this.processGrid.SelectionChanged += new System.EventHandler(this.ProcessGrid_SelectionChanged);
+            this.nameColumn.FillWeight = 25F;
+            this.nameColumn.HeaderText = "Process name";
+            this.nameColumn.Name = "nameColumn";
+            this.nameColumn.ReadOnly = true;
+            this.idColumn.FillWeight = 12F;
+            this.idColumn.HeaderText = "PID";
+            this.idColumn.Name = "idColumn";
+            this.idColumn.ReadOnly = true;
+            this.pathColumn.FillWeight = 63F;
+            this.pathColumn.HeaderText = "Executable path";
+            this.pathColumn.Name = "pathColumn";
+            this.pathColumn.ReadOnly = true;
+            this.useFullPathCheckBox.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)));
+            this.useFullPathCheckBox.AutoSize = true;
+            this.useFullPathCheckBox.Location = new System.Drawing.Point(12, 442);
+            this.useFullPathCheckBox.Name = "useFullPathCheckBox";
+            this.useFullPathCheckBox.Size = new System.Drawing.Size(240, 19);
+            this.useFullPathCheckBox.TabIndex = 4;
+            this.useFullPathCheckBox.Text = "Use full executable path when available";
+            this.useFullPathCheckBox.UseVisualStyleBackColor = true;
+            this.progressBar.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)));
+            this.progressBar.Location = new System.Drawing.Point(12, 470);
+            this.progressBar.MarqueeAnimationSpeed = 30;
+            this.progressBar.Name = "progressBar";
+            this.progressBar.Size = new System.Drawing.Size(155, 16);
+            this.progressBar.Style = System.Windows.Forms.ProgressBarStyle.Marquee;
+            this.progressBar.TabIndex = 5;
+            this.statusLabel.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left) | System.Windows.Forms.AnchorStyles.Right)));
+            this.statusLabel.AutoEllipsis = true;
+            this.statusLabel.Location = new System.Drawing.Point(173, 470);
+            this.statusLabel.Name = "statusLabel";
+            this.statusLabel.Size = new System.Drawing.Size(437, 18);
+            this.statusLabel.TabIndex = 6;
+            this.statusLabel.Text = "Enumerating running processes…";
+            this.okButton.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
+            this.okButton.DialogResult = System.Windows.Forms.DialogResult.OK;
+            this.okButton.Enabled = false;
+            this.okButton.Location = new System.Drawing.Point(616, 464);
+            this.okButton.Name = "okButton";
+            this.okButton.Size = new System.Drawing.Size(75, 27);
+            this.okButton.TabIndex = 7;
+            this.okButton.Text = "Add";
+            this.okButton.UseVisualStyleBackColor = true;
+            this.cancelButton.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
+            this.cancelButton.DialogResult = System.Windows.Forms.DialogResult.Cancel;
+            this.cancelButton.Location = new System.Drawing.Point(697, 464);
+            this.cancelButton.Name = "cancelButton";
+            this.cancelButton.Size = new System.Drawing.Size(75, 27);
+            this.cancelButton.TabIndex = 8;
+            this.cancelButton.Text = "Cancel";
+            this.cancelButton.UseVisualStyleBackColor = true;
+            this.AcceptButton = this.okButton;
+            this.AutoScaleDimensions = new System.Drawing.SizeF(7F, 15F);
+            this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
+            this.CancelButton = this.cancelButton;
+            this.ClientSize = new System.Drawing.Size(784, 503);
+            this.Controls.Add(this.cancelButton);
+            this.Controls.Add(this.okButton);
+            this.Controls.Add(this.statusLabel);
+            this.Controls.Add(this.progressBar);
+            this.Controls.Add(this.useFullPathCheckBox);
+            this.Controls.Add(this.processGrid);
+            this.Controls.Add(this.refreshButton);
+            this.Controls.Add(this.searchTextBox);
+            this.Controls.Add(this.searchLabel);
+            this.Font = new System.Drawing.Font("Segoe UI", 9F);
+            this.MinimizeBox = false;
+            this.MinimumSize = new System.Drawing.Size(620, 420);
+            this.Name = "ProcessPickerForm";
+            this.ShowInTaskbar = false;
+            this.StartPosition = System.Windows.Forms.FormStartPosition.CenterParent;
+            this.Text = "Add running process";
+            ((System.ComponentModel.ISupportInitialize)(this.processGrid)).EndInit();
+            this.ResumeLayout(false);
+            this.PerformLayout();
+        }
+    }
+}
