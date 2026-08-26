@@ -87,7 +87,8 @@ namespace ProxiFyreUI.Forms
             tlsServerNameTextBox.Text = rule.TlsServerName ?? string.Empty;
             tlsPinTextBox.Text = rule.TlsPinnedSha256 ?? string.Empty;
             allowInvalidCertificateCheckBox.Checked = rule.TlsAllowInvalidCertificate;
-            _confirmedInvalidCertificate = rule.TlsAllowInvalidCertificate;
+            _confirmedInvalidCertificate = InvalidCertificateConfirmationPolicy.IsPersistedSelectionConfirmed(
+                rule.Socks5Transport, rule.TlsAllowInvalidCertificate);
             UpdateTransportControls();
             UpdateApplicationControls();
         }
@@ -208,6 +209,16 @@ namespace ProxiFyreUI.Forms
                 var validation = _validator.ValidateRule(BuildCandidate(), _ruleIndex);
                 blocking |= validation.HasErrors;
                 warnings.AddRange(validation.Issues.Select(issue => issue.Severity + ": " + issue.Message));
+
+                var usernameLengthIssue = validation.Issues.FirstOrDefault(
+                    issue => issue.Code == "AUTH_USERNAME_TOO_LONG");
+                if (usernameLengthIssue != null)
+                    errorProvider.SetError(usernameTextBox, usernameLengthIssue.Message);
+
+                var passwordLengthIssue = validation.Issues.FirstOrDefault(
+                    issue => issue.Code == "AUTH_PASSWORD_TOO_LONG");
+                if (passwordLengthIssue != null)
+                    errorProvider.SetError(passwordTextBox, passwordLengthIssue.Message);
             }
             catch (Exception)
             {
@@ -314,6 +325,7 @@ namespace ProxiFyreUI.Forms
         private void TransportComboBox_SelectedIndexChanged(object sender, EventArgs e)
         {
             UpdateTransportControls();
+            ConfirmInvalidCertificateIfNeeded();
             ValidateInput();
         }
 
@@ -332,26 +344,41 @@ namespace ProxiFyreUI.Forms
         {
             if (!_initializing && !allowInvalidCertificateCheckBox.Checked)
                 _confirmedInvalidCertificate = false;
-            if (!_initializing && allowInvalidCertificateCheckBox.Checked && !_confirmedInvalidCertificate)
+            ConfirmInvalidCertificateIfNeeded();
+            ValidateInput();
+        }
+
+        private void ConfirmInvalidCertificateIfNeeded()
+        {
+            if (_initializing || !InvalidCertificateConfirmationPolicy.RequiresConfirmation(
+                    transportComboBox.SelectedIndex == 1,
+                    allowInvalidCertificateCheckBox.Checked,
+                    _confirmedInvalidCertificate))
+                return;
+
+            var result = MessageBox.Show(this,
+                "Allowing invalid certificates disables normal certificate chain and hostname validation. " +
+                "Without a SHA-256 certificate pin, the upstream server is not authenticated.\r\n\r\n" +
+                "Enable this unsafe option?",
+                "Security warning", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+            if (result != DialogResult.Yes)
             {
-                var result = MessageBox.Show(this,
-                    "Allowing invalid certificates disables normal certificate chain and hostname validation. " +
-                    "Without a SHA-256 certificate pin, the upstream server is not authenticated.\r\n\r\n" +
-                    "Enable this unsafe option?",
-                    "Security warning", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
-                    MessageBoxDefaultButton.Button2);
-                if (result != DialogResult.Yes)
+                _initializing = true;
+                try
                 {
-                    _initializing = true;
                     allowInvalidCertificateCheckBox.Checked = false;
+                }
+                finally
+                {
                     _initializing = false;
                 }
-                else
-                {
-                    _confirmedInvalidCertificate = true;
-                }
+                _confirmedInvalidCertificate = false;
             }
-            ValidateInput();
+            else
+            {
+                _confirmedInvalidCertificate = true;
+            }
         }
 
         private void ShowPasswordCheckBox_CheckedChanged(object sender, EventArgs e)
@@ -398,14 +425,6 @@ namespace ProxiFyreUI.Forms
             ResultRule = BuildCandidate();
             DialogResult = DialogResult.OK;
             Close();
-        }
-
-        private static bool IsTlsTransport(string value)
-        {
-            return string.Equals(value, "TLS", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(value, "SOCKS5TLS", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(value, "SOCKS5_TLS", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(value, "SOCKS5-TLS", StringComparison.OrdinalIgnoreCase);
         }
 
         private static void ParseEndpoint(string endpoint, out string host, out decimal port)

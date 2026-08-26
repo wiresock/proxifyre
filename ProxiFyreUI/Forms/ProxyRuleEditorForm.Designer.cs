@@ -190,7 +190,7 @@ namespace ProxiFyreUI.Forms
             this.proxyGroupBox.Size = new System.Drawing.Size(820, 132);
             this.proxyGroupBox.TabIndex = 1;
             this.proxyGroupBox.TabStop = false;
-            this.proxyGroupBox.Text = "SOCKS5 endpoint and authentication";
+            this.proxyGroupBox.Text = "SOCKS5 endpoint and authentication (credentials: 255 encoded bytes each)";
             this.hostLabel.AutoSize = true;
             this.hostLabel.Location = new System.Drawing.Point(12, 27);
             this.hostLabel.Name = "hostLabel";

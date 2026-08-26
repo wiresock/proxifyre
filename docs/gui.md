@@ -11,14 +11,19 @@ ProxiFyre.exe --------------> ProxiFyre.Configuration.dll
       |
       +---------------------> socksify.dll
 
-ProxiFyreUI.exe ------------> ProxiFyre.Configuration.dll
+ProxiFyreUI.exe (native verifier/CLR host)
+      |
+      +---------------------> ProxiFyreUI.Managed.dll
+                                      |
+                                      +--> ProxiFyre.Configuration.dll
+                                      +--> Newtonsoft.Json.dll
 ```
 
-`ProxiFyre.Configuration` contains the JSON models, forward-compatible serialization, normalization, structured validation, fingerprints, and atomic file operations. It has no native dependency. `ProxiFyreUI` never references or loads `socksify.dll`; it controls the installed service through the Windows Service Control Manager and invokes only the resolved `ProxiFyre.exe` with a fixed `install` or `uninstall` argument.
+`ProxiFyre.Configuration` contains the JSON models, forward-compatible serialization, normalization, structured validation, fingerprints, and atomic file operations. It has no native dependency. The native `ProxiFyreUI.exe` host validates and leases the signed managed UI, its dependencies, and its exact CLR configuration before starting .NET Framework; this prevents a mutable CLR configuration from running code before the managed integrity check. `ProxiFyreUI.Managed.dll` never references or loads `socksify.dll`; it controls the installed service through the Windows Service Control Manager and invokes only the resolved `ProxiFyre.exe` with a fixed `install` or `uninstall` argument.
 
-The GUI requests administrator privileges at startup. This is required to manage a Windows service and to update a configuration beside an engine installed in a protected directory. SOCKS5 credentials remain in the existing plaintext JSON schema because the engine must be able to read them. The GUI masks passwords and omits them from logs, tooltips, and diagnostics.
+The GUI requests administrator privileges at startup. This is required to manage a Windows service and to update a configuration beside an engine installed in a protected directory. Before loading the CLR, the statically linked native host removes CLR-control environment overrides, rejects unexpected app-local executable modules, verifies the UI and its managed dependencies against Windows Authenticode trust and the pinned ProxiFyre release key, verifies the exact CLR-configuration hash, and holds those files and every normal directory component open without write/delete sharing. Production service operations apply the same signed-payload checks to the engine and hold its verified files and path through process or SCM startup. Release service installation/start also requires a direct fixed-volume path, a protected directory/ancestor ACL chain, trusted owners, no reparse points, no loader-redirection marker, and no unexpected executable module. The GUI deliberately refuses to rewrite a user-controlled directory in place because an attacker could retain a pre-existing write or permission-control handle after the ACL change. Debug builds retain an explicit unsigned/developer-directory policy. SOCKS5 credentials remain in the existing plaintext JSON schema because the engine must be able to read them. The GUI masks passwords and omits them from logs, tooltips, and diagnostics.
 
-The primary service controls include explicit install and uninstall actions. Uninstall requires confirmation and removes only the Windows service registration; `app-config.json`, its backup, and engine logs are preserved. The same uninstall action remains available under **Settings / Diagnostics**.
+The primary service controls include explicit install and uninstall actions. Uninstall requires confirmation, stops a running service first, and then removes only the Windows service registration; `app-config.json`, its backup, and engine logs are preserved. If another service-management handle delays removal, the GUI reports the Windows deletion-pending state instead of treating the successful uninstall request as a failure. The same uninstall action remains available under **Settings / Diagnostics**.
 
 ## Engine and configuration discovery
 
@@ -29,7 +34,7 @@ The GUI resolves the engine in this order:
 3. The last explicitly selected engine saved in `%LocalAppData%\ProxiFyreUI\ui-settings.json`.
 4. A file selected by the user.
 
-Quoted service image paths and a fixed trailing service argument are parsed without executing the registered command line. A selected file must be named `ProxiFyre.exe`. The engine, configuration, and log paths are displayed on the Diagnostics tab.
+Quoted service image paths and a fixed trailing service argument are parsed without executing the registered command line. Relative registrations and unquoted executable paths containing whitespace are rejected because the GUI and Windows service manager could resolve them to different executables. A selected file must be named `ProxiFyre.exe`. The engine, configuration, and log paths are displayed on the Diagnostics tab.
 
 The live configuration is always `app-config.json` beside the resolved engine. GUI-only preferences are never written into that file. If the live file is missing, the GUI can initialize it from `app-config.sample.json` beside the engine or GUI; otherwise it starts with a blank model that must gain a valid proxy rule before the service can start.
 
@@ -77,7 +82,7 @@ msbuild socksify.sln -t:Rebuild -v:minimal -p:Configuration=Release -p:Platform=
 vstest.console.exe bin\tests\x64\Release\ProxiFyre.Tests.dll /TestAdapterPath:packages\NUnit3TestAdapter.4.6.0\build\net462 /Platform:x64
 ```
 
-Replace `x64` with `x86` for tests on a matching host. The ARM64 payload can be cross-built when the Visual Studio toolchain is installed, but its tests must run on Windows ARM64 rather than an x64 CI host. Architecture-specific release files, including `ProxiFyre.exe`, `ProxiFyreUI.exe`, `socksify.dll`, `ProxiFyre.Configuration.dll`, managed dependencies, and the sample configuration, are placed in:
+Replace `x64` with `x86` for tests on a matching host. The ARM64 payload can be cross-built when the Visual Studio toolchain is installed, but its tests must run on Windows ARM64 rather than an x64 CI host. Architecture-specific release files, including `ProxiFyre.exe`, the native `ProxiFyreUI.exe` host, `ProxiFyreUI.Managed.dll`, `socksify.dll`, `ProxiFyre.Configuration.dll`, managed dependencies, and the sample configuration, are placed in:
 
 ```text
 bin\exe\<architecture>\Release\
@@ -89,6 +94,7 @@ Tests write to `bin\tests\<architecture>\<configuration>\` and do not require th
 
 - **Service not installed:** verify the resolved engine path, then select **Install Service**. Installation uses that exact executable and refreshes SCM state afterward.
 - **Access denied:** restart the GUI and approve the administrator prompt. Check directory ACLs if the engine is installed outside the normal application directory.
+- **Service location is not protected:** if the old service is installed outside a protected parent, stop and uninstall it first, then exit the GUI. Use a trusted installer to place the complete signed release in a dedicated folder under `C:\Program Files` with a `SYSTEM`, `Administrators`, or `TrustedInstaller` owner and no standard-user or `CREATOR OWNER` write/control grant. Launch the GUI from that copy and install the service again. The installed registration takes precedence over Browse, so merely browsing to a new copy does not migrate an existing service.
 - **Configuration invalid:** open the validation details. The GUI will not save or start a new invalid rule set.
 - **Saved, restart required:** choose **Apply & Restart** or restart the service after completing related edits.
 - **Windows Packet Filter unavailable:** install WinpkFilter from `https://github.com/wiresock/ndisapi/releases`, restart Windows if requested, and retry. The GUI checks the `NDISRD` device before install/start/restart and does not treat a missing driver as a configuration failure.

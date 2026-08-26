@@ -13,6 +13,7 @@ namespace ProxiFyreUI.Infrastructure
         ExternalChangeDetected,
         SavedConfigurationChangedBeforeApply,
         SavedConfigurationChangedDuringApply,
+        ServiceEngineChanged,
         ServiceStatusUnavailable,
         DependencyUnavailable,
         SaveFailed,
@@ -21,7 +22,10 @@ namespace ProxiFyreUI.Infrastructure
         RolledBackAndRunning,
         RollbackFailed,
         RolledBackServiceRestartFailed,
-        RolledBackConfigurationChanged
+        RolledBackConfigurationChanged,
+        RolledBackServiceEngineChanged,
+        ConfigurationReloadNotConfirmed,
+        RolledBackConfigurationReloadNotConfirmed
     }
 
     public sealed class ConfigurationApplyResult
@@ -36,7 +40,9 @@ namespace ProxiFyreUI.Infrastructure
             Outcome == ConfigurationApplyOutcome.RolledBackAndRunning;
         public bool WasRolledBack => Outcome == ConfigurationApplyOutcome.RolledBackAndRunning ||
                                      Outcome == ConfigurationApplyOutcome.RolledBackServiceRestartFailed ||
-                                     Outcome == ConfigurationApplyOutcome.RolledBackConfigurationChanged;
+                                     Outcome == ConfigurationApplyOutcome.RolledBackConfigurationChanged ||
+                                     Outcome == ConfigurationApplyOutcome.RolledBackServiceEngineChanged ||
+                                     Outcome == ConfigurationApplyOutcome.RolledBackConfigurationReloadNotConfirmed;
         public bool RollbackAttempted => WasRolledBack || Outcome == ConfigurationApplyOutcome.RollbackFailed;
     }
 
@@ -48,12 +54,15 @@ namespace ProxiFyreUI.Infrastructure
     {
         private readonly ConfigurationWorkspace _workspace;
         private readonly IProxiFyreServiceController _serviceController;
+        private readonly Func<string, bool> _isServiceEngineCurrent;
 
         public ConfigurationApplyCoordinator(ConfigurationWorkspace workspace,
-            IProxiFyreServiceController serviceController)
+            IProxiFyreServiceController serviceController,
+            Func<string, bool> isServiceEngineCurrent = null)
         {
             _workspace = workspace ?? throw new ArgumentNullException(nameof(workspace));
             _serviceController = serviceController ?? throw new ArgumentNullException(nameof(serviceController));
+            _isServiceEngineCurrent = isServiceEngineCurrent;
         }
 
         public async Task<ConfigurationApplyResult> SaveAndApplyAsync(bool overwriteExternalChanges,
@@ -99,6 +108,16 @@ namespace ProxiFyreUI.Infrastructure
                     Outcome = ConfigurationApplyOutcome.ServiceStatusUnavailable
                 };
             }
+            if (status.State == ProxiFyreServiceState.DeletionPending)
+            {
+                return new ConfigurationApplyResult
+                {
+                    SaveResult = save,
+                    ServiceResult = ServiceOperationResult.Failed(status,
+                        "The ProxiFyre service is marked for deletion. Wait for Windows to finish removing it before applying the configuration."),
+                    Outcome = ConfigurationApplyOutcome.ServiceStatusUnavailable
+                };
+            }
             if (!status.IsInstalled)
             {
                 if (!installIfMissing)
@@ -137,15 +156,23 @@ namespace ProxiFyreUI.Infrastructure
 
                 if (!_workspace.IsSaveCurrent(save))
                     return ConfigurationChanged(save, install, false);
+                if (!IsServiceEngineCurrent(enginePath))
+                    return ServiceEngineChanged(save, install);
 
                 remaining = Remaining(timeout, operationClock);
                 var start = remaining <= TimeSpan.Zero
                     ? TimedOut(install.Status, "The service was installed, but start did not begin before the apply timeout.")
-                    : await _serviceController.StartAsync(remaining, cancellationToken).ConfigureAwait(false);
+                    : await _serviceController.StartAsync(enginePath,
+                        () => IsServiceEngineCurrent(enginePath),
+                        remaining, cancellationToken).ConfigureAwait(false);
                 if (!_workspace.IsSaveCurrent(save))
                     return ConfigurationChanged(save, start, true);
+                if (!IsServiceEngineCurrent(enginePath))
+                    return ServiceEngineChanged(save, start);
                 if (start.Success && start.Status?.IsRunning == true)
                 {
+                    if (!start.ConfirmsConfigurationReloaded)
+                        return ConfigurationReloadNotConfirmed(save, start);
                     if (!_workspace.TryMarkApplied(save.SavedFingerprint))
                         return ConfigurationChanged(save, start, true);
                     return new ConfigurationApplyResult
@@ -162,14 +189,22 @@ namespace ProxiFyreUI.Infrastructure
 
             if (!_workspace.IsSaveCurrent(save))
                 return ConfigurationChanged(save, null, false);
+            if (!IsServiceEngineCurrent(enginePath))
+                return ServiceEngineChanged(save, null);
             var restartBudget = Remaining(timeout, operationClock);
             var restart = restartBudget <= TimeSpan.Zero
                 ? TimedOut(status, "Service restart did not begin before the apply timeout.")
-                : await _serviceController.RestartAsync(restartBudget, cancellationToken).ConfigureAwait(false);
+                : await _serviceController.RestartAsync(enginePath,
+                    () => IsServiceEngineCurrent(enginePath),
+                    restartBudget, cancellationToken).ConfigureAwait(false);
             if (!_workspace.IsSaveCurrent(save))
                 return ConfigurationChanged(save, restart, true);
+            if (!IsServiceEngineCurrent(enginePath))
+                return ServiceEngineChanged(save, restart);
             if (restart.Success && restart.Status?.IsRunning == true)
             {
+                if (!restart.ConfirmsConfigurationReloaded)
+                    return ConfigurationReloadNotConfirmed(save, restart);
                 if (!_workspace.TryMarkApplied(save.SavedFingerprint))
                     return ConfigurationChanged(save, restart, true);
                 return new ConfigurationApplyResult
@@ -196,6 +231,9 @@ namespace ProxiFyreUI.Infrastructure
         {
             if (save == null)
                 throw new ArgumentNullException(nameof(save));
+            var expectedEnginePath = _workspace.EnginePath;
+            if (!IsServiceEngineCurrent(expectedEnginePath))
+                return ServiceEngineChanged(save, null);
 
             Exception rollbackError = null;
             if (!save.BackupCreated || string.IsNullOrWhiteSpace(save.BackupPath) ||
@@ -220,11 +258,15 @@ namespace ProxiFyreUI.Infrastructure
                     Outcome = ConfigurationApplyOutcome.RolledBackConfigurationChanged
                 };
             }
+            if (!IsServiceEngineCurrent(expectedEnginePath))
+                return RolledBackServiceEngineChanged(save, null);
 
             var remaining = Remaining(timeout, operationClock);
             var restart = remaining <= TimeSpan.Zero
                 ? TimedOut(null, "The previous configuration was restored, but restart did not begin before the apply timeout.")
-                : await _serviceController.RestartAsync(remaining, cancellationToken).ConfigureAwait(false);
+                : await _serviceController.RestartAsync(expectedEnginePath,
+                    () => IsServiceEngineCurrent(expectedEnginePath), remaining,
+                    cancellationToken).ConfigureAwait(false);
             if (!_workspace.IsFingerprintCurrent(restoredFingerprint))
             {
                 return new ConfigurationApplyResult
@@ -234,8 +276,19 @@ namespace ProxiFyreUI.Infrastructure
                     Outcome = ConfigurationApplyOutcome.RolledBackConfigurationChanged
                 };
             }
+            if (!IsServiceEngineCurrent(expectedEnginePath))
+                return RolledBackServiceEngineChanged(save, restart);
             if (restart.Success && restart.Status?.IsRunning == true)
             {
+                if (!restart.ConfirmsConfigurationReloaded)
+                {
+                    return new ConfigurationApplyResult
+                    {
+                        SaveResult = save,
+                        ServiceResult = restart,
+                        Outcome = ConfigurationApplyOutcome.RolledBackConfigurationReloadNotConfirmed
+                    };
+                }
                 if (!_workspace.TryMarkApplied(restoredFingerprint))
                 {
                     return new ConfigurationApplyResult
@@ -314,6 +367,55 @@ namespace ProxiFyreUI.Infrastructure
                 Outcome = duringApply
                     ? ConfigurationApplyOutcome.SavedConfigurationChangedDuringApply
                     : ConfigurationApplyOutcome.SavedConfigurationChangedBeforeApply
+            };
+        }
+
+        private static ConfigurationApplyResult ConfigurationReloadNotConfirmed(
+            WorkspaceSaveResult save, ServiceOperationResult serviceResult)
+        {
+            return new ConfigurationApplyResult
+            {
+                SaveResult = save,
+                ServiceResult = serviceResult,
+                Outcome = ConfigurationApplyOutcome.ConfigurationReloadNotConfirmed
+            };
+        }
+
+        private bool IsServiceEngineCurrent(string expectedEnginePath)
+        {
+            if (_isServiceEngineCurrent == null)
+                return true;
+            try
+            {
+                return _isServiceEngineCurrent(expectedEnginePath);
+            }
+            catch
+            {
+                // Registry access and path canonicalization are part of the safety check. If
+                // either cannot be completed, do not mutate the service or claim an apply.
+                return false;
+            }
+        }
+
+        private static ConfigurationApplyResult ServiceEngineChanged(WorkspaceSaveResult save,
+            ServiceOperationResult serviceResult)
+        {
+            return new ConfigurationApplyResult
+            {
+                SaveResult = save,
+                ServiceResult = serviceResult,
+                Outcome = ConfigurationApplyOutcome.ServiceEngineChanged
+            };
+        }
+
+        private static ConfigurationApplyResult RolledBackServiceEngineChanged(WorkspaceSaveResult save,
+            ServiceOperationResult serviceResult)
+        {
+            return new ConfigurationApplyResult
+            {
+                SaveResult = save,
+                ServiceResult = serviceResult,
+                Outcome = ConfigurationApplyOutcome.RolledBackServiceEngineChanged
             };
         }
 

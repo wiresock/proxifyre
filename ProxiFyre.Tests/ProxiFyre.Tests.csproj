@@ -79,9 +79,12 @@
     <Compile Include="ConfigurationValidatorTests.cs" />
     <Compile Include="DiagnosticsBuilderTests.cs" />
     <Compile Include="EngineLocatorTests.cs" />
+    <Compile Include="InvalidCertificateConfirmationPolicyTests.cs" />
     <Compile Include="LogTailerTests.cs" />
+    <Compile Include="LogLevelMatcherTests.cs" />
     <Compile Include="PathUtilitiesTests.cs" />
     <Compile Include="ServiceManagementTests.cs" />
+    <Compile Include="ServiceInstallLocationPolicyTests.cs" />
     <Compile Include="TestModels.cs" />
     <Compile Include="UserVisibleErrorFormatterTests.cs" />
     <Compile Include="UiSettingsStoreTests.cs" />

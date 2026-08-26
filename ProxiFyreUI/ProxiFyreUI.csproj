@@ -5,15 +5,14 @@
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">x64</Platform>
     <ProjectGuid>{7790E7D3-66F9-4E93-A9DB-967DDCECC76D}</ProjectGuid>
-    <OutputType>WinExe</OutputType>
+    <OutputType>Library</OutputType>
     <RootNamespace>ProxiFyreUI</RootNamespace>
-    <AssemblyName>ProxiFyreUI</AssemblyName>
+    <AssemblyName>ProxiFyreUI.Managed</AssemblyName>
     <ApplicationIcon>..\assets\ProxiFyre.ico</ApplicationIcon>
     <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
     <Deterministic>true</Deterministic>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
     <DebugSymbols>true</DebugSymbols><DebugType>full</DebugType><Optimize>false</Optimize>
@@ -63,7 +62,10 @@
     <Compile Include="Infrastructure\ConfigurationWorkspace.cs" />
     <Compile Include="Infrastructure\DiagnosticsBuilder.cs" />
     <Compile Include="Infrastructure\EngineLocator.cs" />
+    <Compile Include="Infrastructure\InvalidCertificateConfirmationPolicy.cs" />
     <Compile Include="Infrastructure\LogTailer.cs" />
+    <Compile Include="Infrastructure\LogLevelMatcher.cs" />
+    <Compile Include="Infrastructure\PayloadIntegrity.cs" />
     <Compile Include="Infrastructure\ProcessCatalog.cs" />
     <Compile Include="Infrastructure\ServiceManagement.cs" />
     <Compile Include="Infrastructure\UiSettings.cs" />
@@ -83,7 +85,6 @@
     <None Include="..\assets\ProxiFyre.ico">
       <Link>ProxiFyre.ico</Link>
     </None>
-    <None Include="App.config" />
     <None Include="app.manifest" />
     <None Include="..\app-config.sample.json">
       <Link>app-config.sample.json</Link>
@@ -106,5 +107,10 @@
     <MakeDir Directories="$(IntermediateOutputPath)" />
     <WriteCodeFragment Language="C#" OutputFile="$(IntermediateOutputPath)Version.cs" AssemblyAttributes="@(AssemblyAttributes)" />
     <ItemGroup><Compile Include="$(IntermediateOutputPath)Version.cs" /></ItemGroup>
+  </Target>
+  <Target Name="CopyNativeHostConfiguration" AfterTargets="Build">
+    <Copy SourceFiles="$(ProjectDir)App.config"
+          DestinationFiles="$(OutputPath)ProxiFyreUI.exe.config"
+          SkipUnchangedFiles="true" />
   </Target>
 </Project>

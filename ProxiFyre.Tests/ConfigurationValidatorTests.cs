@@ -73,6 +73,38 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
+        public void AuthenticationCredentialsRespectNativeEncodedByteLimit()
+        {
+            var rule = TestModels.ValidRule();
+            rule.Username = new string('u', ConfigurationValidator.Socks5CredentialMaximumEncodedBytes);
+            rule.Password = new string('p', ConfigurationValidator.Socks5CredentialMaximumEncodedBytes);
+
+            var boundary = _validator.ValidateRule(rule, 2);
+
+            NoIssueWithPrefix(boundary, "AUTH_USERNAME_TOO_LONG");
+            NoIssueWithPrefix(boundary, "AUTH_PASSWORD_TOO_LONG");
+
+            rule.Username += "u";
+            var usernameTooLong = _validator.ValidateRule(rule, 2);
+            HasIssue(usernameTooLong, "AUTH_USERNAME_TOO_LONG", ValidationSeverity.Error);
+            Assert.That(
+                usernameTooLong.Issues.Single(issue => issue.Code == "AUTH_USERNAME_TOO_LONG").Path,
+                Is.EqualTo("proxies[2].username"));
+
+            rule.Username = "user";
+            rule.Password += "p";
+            var passwordTooLong = _validator.ValidateRule(rule, 2);
+            HasIssue(passwordTooLong, "AUTH_PASSWORD_TOO_LONG", ValidationSeverity.Error);
+            Assert.That(
+                passwordTooLong.Issues.Single(issue => issue.Code == "AUTH_PASSWORD_TOO_LONG").Path,
+                Is.EqualTo("proxies[2].password"));
+            Assert.That(
+                passwordTooLong.Issues.All(issue => !issue.Message.Contains(rule.Password)),
+                Is.True,
+                "Credential validation must not echo secret values.");
+        }
+
+        [Test]
         public void WhitespaceApplicationIsIgnoredButExplicitEmptyStringIsCatchAll()
         {
             var whitespace = TestModels.ValidRule();

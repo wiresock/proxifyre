@@ -92,6 +92,87 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
+        public void ServiceRegistrationAccessFailureDoesNotFallBackToAnotherEngine()
+        {
+            var uiExecutable = CreatePlaceholder("portable", "ProxiFyreUI.exe");
+            CreatePlaceholder("portable", ProxiFyrePaths.EngineExecutableName);
+            var locator = new EngineLocator(
+                () => throw new UnauthorizedAccessException("registry denied"),
+                path => File.Exists(path), uiExecutable);
+
+            var result = locator.Resolve(new UiSettings());
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result.IsResolved, Is.False);
+                Assert.That(result.Source,
+                    Is.EqualTo(UiEngineLocationSource.ServiceRegistration));
+                Assert.That(result.Error, Does.Contain("could not be read"));
+                Assert.Throws<UnauthorizedAccessException>(() =>
+                    locator.GetRegisteredServiceImagePath());
+            });
+        }
+
+        [Test]
+        public void InvalidExistingServiceImagePathDoesNotFallBackToAnotherEngine()
+        {
+            var uiExecutable = CreatePlaceholder("portable", "ProxiFyreUI.exe");
+            CreatePlaceholder("portable", ProxiFyrePaths.EngineExecutableName);
+            var locator = new EngineLocator(
+                () => throw new InvalidDataException("ImagePath is missing"),
+                path => File.Exists(path), uiExecutable);
+
+            var result = locator.Resolve(new UiSettings());
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result.IsResolved, Is.False);
+                Assert.That(result.Source,
+                    Is.EqualTo(UiEngineLocationSource.ServiceRegistration));
+                Assert.That(result.Error, Does.Contain("could not be read"));
+            });
+        }
+
+        [TestCase(null)]
+        [TestCase("")]
+        [TestCase("   ")]
+        [TestCase(42)]
+        public void ExistingServiceRequiresAValidStringImagePath(object value)
+        {
+            Assert.Throws<InvalidDataException>(() =>
+                EngineLocator.RequireValidServiceImagePathValue(value));
+        }
+
+        [Test]
+        public void ExistingServiceAcceptsANonEmptyStringImagePath()
+        {
+            const string imagePath = "\"C:\\Program Files\\ProxiFyre\\ProxiFyre.exe\" install";
+
+            Assert.That(EngineLocator.RequireValidServiceImagePathValue(imagePath),
+                Is.EqualTo(imagePath));
+        }
+
+        [Test]
+        public void RegisteredServiceMatchRequiresTheSameTrustedExecutable()
+        {
+            var registeredEngine = CreatePlaceholder("service", ProxiFyrePaths.EngineExecutableName);
+            var otherEngine = CreatePlaceholder("other", ProxiFyrePaths.EngineExecutableName);
+            var uiExecutable = CreatePlaceholder("ui", "ProxiFyreUI.exe");
+            var trusted = new EngineLocator(() => "\"" + registeredEngine + "\" run",
+                path => string.Equals(path, registeredEngine, StringComparison.OrdinalIgnoreCase),
+                uiExecutable);
+            var untrusted = new EngineLocator(() => "\"" + registeredEngine + "\" run",
+                path => false, uiExecutable);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(trusted.IsRegisteredServiceExecutable(registeredEngine), Is.True);
+                Assert.That(trusted.IsRegisteredServiceExecutable(otherEngine), Is.False);
+                Assert.That(untrusted.IsRegisteredServiceExecutable(registeredEngine), Is.False);
+            });
+        }
+
+        [Test]
         public void RealIdentityCheckRejectsArbitraryExeRenamedToProxiFyre()
         {
             var renamedUi = Path.Combine(_directory, ProxiFyrePaths.EngineExecutableName);
@@ -103,6 +184,177 @@ namespace ProxiFyre.Tests
             Assert.That(result.IsResolved, Is.False,
                 "A matching filename must not bypass the version-resource identity check.");
             Assert.That(result.Error, Is.Not.Null.And.Not.Empty);
+        }
+
+        [Test]
+        public void UnsignedProductionBinaryDoesNotSatisfyAuthenticodeTrust()
+        {
+            Assert.That(AuthenticodeExecutableValidator.IsSignedByExpectedPublisher(
+                typeof(EngineLocator).Assembly.Location), Is.False);
+        }
+
+        [TestCase(6, 1, true)]
+        [TestCase(6, 2, false)]
+        [TestCase(10, 0, false)]
+        public void WindowsSevenUsesTheLegacyWinTrustStructure(int major, int minor,
+            bool expected)
+        {
+            Assert.That(AuthenticodeExecutableValidator.RequiresLegacyWinTrust(
+                new Version(major, minor)), Is.EqualTo(expected));
+        }
+
+        [Test]
+        public void LifecyclePayloadIncludesEveryLoadableModuleAndPinnedConfiguration()
+        {
+            var enginePath = Path.Combine(_directory, ProxiFyrePaths.EngineExecutableName);
+
+            var names = Array.ConvertAll(
+                EngineExecutableValidator.GetLifecyclePayloadPaths(enginePath),
+                Path.GetFileName);
+
+            Assert.That(names, Is.EqualTo(new[]
+            {
+                "ProxiFyre.exe",
+                "ProxiFyre.Configuration.dll",
+                "socksify.dll",
+                "Newtonsoft.Json.dll",
+                "NLog.dll",
+                "Topshelf.dll",
+                "ProxiFyre.exe.config",
+                "NLog.config"
+            }));
+        }
+
+        [Test]
+        public void UiStartupPayloadIncludesItsTransitiveJsonDependency()
+        {
+            var uiPath = Path.Combine(_directory, "ProxiFyreUI.Managed.dll");
+
+            var names = Array.ConvertAll(UiStartupPayload.GetStartupPayloadPaths(uiPath),
+                Path.GetFileName);
+
+            Assert.That(names, Is.EqualTo(new[]
+            {
+                "ProxiFyreUI.Managed.dll",
+                "ProxiFyre.Configuration.dll",
+                "Newtonsoft.Json.dll",
+                "ProxiFyreUI.exe.config"
+            }));
+        }
+
+        [Test]
+        public void PayloadHashValidationFailsAfterContentChanges()
+        {
+            var path = Path.Combine(_directory, "payload.config");
+            File.WriteAllText(path, "payload");
+
+            Assert.That(PayloadHashValidator.HasExpectedSha256(path,
+                "239F59ED55E737C77147CF55AD0C1B030B6D7EE748A7426952F9B852D5A935E5"),
+                Is.True);
+
+            File.AppendAllText(path, " changed");
+
+            Assert.That(PayloadHashValidator.HasExpectedSha256(path,
+                "239F59ED55E737C77147CF55AD0C1B030B6D7EE748A7426952F9B852D5A935E5"),
+                Is.False);
+        }
+
+        [Test]
+        public void BuiltUiConfigurationMatchesTheRuntimeIntegrityPin()
+        {
+            var path = Path.Combine(Path.GetDirectoryName(typeof(EngineLocator).Assembly.Location),
+                "ProxiFyreUI.exe.config");
+
+            Assert.That(File.Exists(path), Is.True);
+            Assert.That(UiStartupPayload.IsTrustedUiPayloadFile(path), Is.True);
+        }
+
+        [Test]
+        public void UninstallFallbackPrefersCurrentTrustedEngine()
+        {
+            var current = CreatePlaceholder("current", ProxiFyrePaths.EngineExecutableName);
+            var uiExecutable = CreatePlaceholder("portable", "ProxiFyreUI.exe");
+            CreatePlaceholder("portable", ProxiFyrePaths.EngineExecutableName);
+            var saved = CreatePlaceholder("saved", ProxiFyrePaths.EngineExecutableName);
+            var locator = CreateLocator(() => @"C:\missing\ProxiFyre.exe", uiExecutable);
+
+            var result = locator.ResolveTrustedUninstallFallback(
+                new UiSettings { SelectedEnginePath = saved }, current);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result.IsResolved, Is.True);
+                Assert.That(result.Path, Is.EqualTo(current));
+                Assert.That(result.Source, Is.EqualTo(UiEngineLocationSource.UserSelection));
+            });
+        }
+
+        [Test]
+        public void UninstallFallbackUsesAdjacentEngineBeforeSavedSelection()
+        {
+            var uiExecutable = CreatePlaceholder("portable", "ProxiFyreUI.exe");
+            var adjacent = CreatePlaceholder("portable", ProxiFyrePaths.EngineExecutableName);
+            var saved = CreatePlaceholder("saved", ProxiFyrePaths.EngineExecutableName);
+            var locator = CreateLocator(() => @"C:\missing\ProxiFyre.exe", uiExecutable);
+
+            var result = locator.ResolveTrustedUninstallFallback(
+                new UiSettings { SelectedEnginePath = saved }, @"C:\also-missing\ProxiFyre.exe");
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result.IsResolved, Is.True);
+                Assert.That(result.Path, Is.EqualTo(adjacent));
+                Assert.That(result.Source, Is.EqualTo(UiEngineLocationSource.BesideUserInterface));
+            });
+        }
+
+        [Test]
+        public void UninstallFallbackUsesSavedSelectionWhenOtherCandidatesAreUnavailable()
+        {
+            var uiExecutable = CreatePlaceholder("ui-only", "ProxiFyreUI.exe");
+            var saved = CreatePlaceholder("saved", ProxiFyrePaths.EngineExecutableName);
+            var locator = CreateLocator(() => @"C:\missing\ProxiFyre.exe", uiExecutable);
+
+            var result = locator.ResolveTrustedUninstallFallback(
+                new UiSettings { SelectedEnginePath = saved }, null);
+
+            Assert.That(result.Path, Is.EqualTo(saved));
+            Assert.That(result.IsResolved, Is.True);
+        }
+
+        [Test]
+        public void UninstallFallbackDoesNotMakeNormalBrokenRegistrationResolutionPermissive()
+        {
+            var uiExecutable = CreatePlaceholder("portable", "ProxiFyreUI.exe");
+            var adjacent = CreatePlaceholder("portable", ProxiFyrePaths.EngineExecutableName);
+            var locator = CreateLocator(() => @"C:\missing\ProxiFyre.exe", uiExecutable);
+
+            var normal = locator.Resolve(new UiSettings());
+            var uninstallFallback = locator.ResolveTrustedUninstallFallback(new UiSettings(), null);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(normal.IsResolved, Is.False);
+                Assert.That(normal.Source, Is.EqualTo(UiEngineLocationSource.ServiceRegistration));
+                Assert.That(uninstallFallback.IsResolved, Is.True);
+                Assert.That(uninstallFallback.Path, Is.EqualTo(adjacent));
+            });
+        }
+
+        [Test]
+        public void UninstallFallbackReportsWhenBrowsingIsRequired()
+        {
+            var uiExecutable = CreatePlaceholder("ui-only", "ProxiFyreUI.exe");
+            var locator = CreateLocator(() => @"C:\missing\ProxiFyre.exe", uiExecutable);
+
+            var result = locator.ResolveTrustedUninstallFallback(new UiSettings(), null);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result.IsResolved, Is.False);
+                Assert.That(result.Source, Is.EqualTo(UiEngineLocationSource.None));
+                Assert.That(result.Error, Does.Contain("trusted ProxiFyre.exe"));
+            });
         }
 
         private EngineLocator CreateLocator(Func<string> servicePathReader, string uiExecutable)

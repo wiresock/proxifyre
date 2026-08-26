@@ -22,14 +22,14 @@ namespace ProxiFyreUI.Infrastructure
 
             var recent = (recentWarningOrErrorLines ?? Enumerable.Empty<string>()).ToArray();
             var message = result.Message ?? "The service operation failed.";
+            if (!string.IsNullOrWhiteSpace(result.Details))
+            {
+                message += "\r\n\r\nService operation details:\r\n" + result.Details;
+            }
             if (recent.Length > 0)
             {
                 message += "\r\n\r\nRecent warning/error log lines:\r\n" +
                            string.Join(Environment.NewLine, recent);
-            }
-            else if (!string.IsNullOrWhiteSpace(result.Details))
-            {
-                message += "\r\n\r\n" + result.Details;
             }
 
             return _redactor.Redact(message, secrets);

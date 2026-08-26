@@ -21,7 +21,8 @@ namespace ProxiFyreUI.Infrastructure
         PausePending,
         ContinuePending,
         Unknown,
-        Error
+        Error,
+        DeletionPending
     }
 
     public enum ServiceOperationFailureKind
@@ -52,6 +53,142 @@ namespace ProxiFyreUI.Infrastructure
         }
     }
 
+    public static class ServiceStartupCompletionEvaluator
+    {
+        public static ServiceOperationResult Evaluate(ServiceStatusInfo finalStatus)
+        {
+            if (finalStatus != null && finalStatus.IsRunning)
+            {
+                return ServiceOperationResult.Completed(finalStatus,
+                    "The ProxiFyre service is running.", confirmsConfigurationReloaded: true);
+            }
+
+            var status = finalStatus ?? new ServiceStatusInfo(ProxiFyreServiceState.Error,
+                "The final service state could not be read.");
+            return ServiceOperationResult.Failed(status,
+                "The service reached Running, but its final Running state could not be confirmed. " +
+                "Review the recent engine logs for the underlying error.",
+                null, null, false, ServiceOperationFailureKind.StartupFailed);
+        }
+    }
+
+    public static class ServiceStopCompletionEvaluator
+    {
+        public static ServiceOperationResult Evaluate(ServiceStatusInfo finalStatus)
+        {
+            var status = finalStatus ?? new ServiceStatusInfo(ProxiFyreServiceState.Error,
+                "The final service state could not be read.");
+            if (status.State == ProxiFyreServiceState.Stopped)
+            {
+                return ServiceOperationResult.Completed(status,
+                    "The ProxiFyre service is stopped.");
+            }
+            if (status.State == ProxiFyreServiceState.NotInstalled)
+            {
+                return ServiceOperationResult.Completed(status,
+                    "The ProxiFyre service is no longer installed.");
+            }
+
+            return ServiceOperationResult.Failed(status,
+                "The service reached Stopped, but its final stopped state could not be confirmed.");
+        }
+    }
+
+    public static class ServiceOperationBudget
+    {
+        public static TimeSpan Remaining(TimeSpan timeout, TimeSpan elapsed)
+        {
+            if (timeout <= TimeSpan.Zero || elapsed >= timeout)
+                return TimeSpan.Zero;
+            return timeout - elapsed;
+        }
+    }
+
+    public enum ServicePreLaunchDecision
+    {
+        Allowed,
+        TimedOut,
+        GuardRejected
+    }
+
+    /// <summary>
+    /// Makes the final mutation decision against one shared operation clock. The second deadline
+    /// check is intentional: registry/SCM identity verification can itself consume the budget.
+    /// </summary>
+    public static class ServicePreLaunchPolicy
+    {
+        public static ServicePreLaunchDecision Evaluate(TimeSpan timeout,
+            Func<TimeSpan> elapsedProvider, Func<bool> registrationGuard)
+        {
+            if (elapsedProvider == null)
+                throw new ArgumentNullException(nameof(elapsedProvider));
+            if (ServiceOperationBudget.Remaining(timeout, elapsedProvider()) <= TimeSpan.Zero)
+                return ServicePreLaunchDecision.TimedOut;
+
+            if (registrationGuard != null)
+            {
+                try
+                {
+                    if (!registrationGuard())
+                        return ServicePreLaunchDecision.GuardRejected;
+                }
+                catch
+                {
+                    return ServicePreLaunchDecision.GuardRejected;
+                }
+            }
+
+            return ServiceOperationBudget.Remaining(timeout, elapsedProvider()) > TimeSpan.Zero
+                ? ServicePreLaunchDecision.Allowed
+                : ServicePreLaunchDecision.TimedOut;
+        }
+    }
+
+    public static class ServiceUninstallCompletionEvaluator
+    {
+        public static ServiceOperationResult Evaluate(ServiceStatusInfo finalStatus,
+            string details, int exitCode)
+        {
+            var status = finalStatus ?? new ServiceStatusInfo(ProxiFyreServiceState.Error,
+                "The final service state could not be read.");
+            if (exitCode != 0)
+            {
+                return ServiceOperationResult.Failed(status,
+                    "The service uninstall command failed.", details, exitCode);
+            }
+
+            if (status.State == ProxiFyreServiceState.NotInstalled)
+            {
+                return ServiceOperationResult.Completed(status,
+                    "The ProxiFyre service was uninstalled. Configuration and logs were preserved.",
+                    details, exitCode);
+            }
+
+            if (status.State == ProxiFyreServiceState.DeletionPending)
+            {
+                return ServiceOperationResult.Completed(status,
+                    "The ProxiFyre service is marked for deletion. Windows will finish removing it " +
+                    "after open service-management handles close. Configuration and logs were preserved.",
+                    details, exitCode);
+            }
+
+            // DeleteService succeeds before SCM necessarily removes the service record. If a
+            // different process still owns an open service handle, a stopped record may remain
+            // queryable until that handle closes even though the uninstall command succeeded.
+            if (status.State == ProxiFyreServiceState.Stopped)
+            {
+                return ServiceOperationResult.Completed(status,
+                    "The uninstall command succeeded, but Windows is still completing service removal. " +
+                    "Close other service-management tools if the stopped service remains visible. " +
+                    "Configuration and logs were preserved.", details, exitCode);
+            }
+
+            return ServiceOperationResult.Failed(status,
+                "The service uninstall command completed, but Windows did not confirm that the " +
+                "service was removed or pending deletion.", details, exitCode);
+        }
+    }
+
     public static class ServiceOperationFailureClassifier
     {
         public static ServiceOperationFailureKind Classify(Exception exception)
@@ -60,6 +197,19 @@ namespace ProxiFyreUI.Infrastructure
             return native != null && (native.NativeErrorCode == 1068 || native.NativeErrorCode == 1075)
                 ? ServiceOperationFailureKind.DependencyUnavailable
                 : ServiceOperationFailureKind.General;
+        }
+
+        public static bool IsEngineStartupFailure(ServiceOperationResult result)
+        {
+            if (result == null)
+                return false;
+            if (result.FailureKind == ServiceOperationFailureKind.StartupFailed)
+                return true;
+
+            // A timeout is an engine-start failure only while SCM still reports the start
+            // transition. Restart can also time out while stopping or before Start begins.
+            return result.FailureKind == ServiceOperationFailureKind.TimedOut &&
+                   result.Status?.State == ProxiFyreServiceState.StartPending;
         }
     }
 
@@ -76,7 +226,8 @@ namespace ProxiFyreUI.Infrastructure
         public bool IsInstallationKnown => State != ProxiFyreServiceState.Error &&
                                            State != ProxiFyreServiceState.Unknown;
         public bool IsInstalled => IsInstallationKnown && State != ProxiFyreServiceState.NotInstalled;
-        public bool HasConcreteInstalledState => IsInstalled;
+        public bool HasConcreteInstalledState => IsInstalled &&
+                                                 State != ProxiFyreServiceState.DeletionPending;
         public bool IsRunning => State == ProxiFyreServiceState.Running;
 
         public override string ToString()
@@ -91,6 +242,7 @@ namespace ProxiFyreUI.Infrastructure
                 case ProxiFyreServiceState.Paused: return "Paused";
                 case ProxiFyreServiceState.PausePending: return "Pause pending";
                 case ProxiFyreServiceState.ContinuePending: return "Continue pending";
+                case ProxiFyreServiceState.DeletionPending: return "Deletion pending";
                 case ProxiFyreServiceState.Error: return "Error";
                 default: return "Unknown";
             }
@@ -100,7 +252,8 @@ namespace ProxiFyreUI.Infrastructure
     public sealed class ServiceOperationResult
     {
         private ServiceOperationResult(bool success, ServiceStatusInfo status, string message,
-            string details, int? exitCode, bool timedOut, ServiceOperationFailureKind failureKind)
+            string details, int? exitCode, bool timedOut, ServiceOperationFailureKind failureKind,
+            bool confirmsConfigurationReloaded)
         {
             Success = success;
             Status = status;
@@ -109,6 +262,7 @@ namespace ProxiFyreUI.Infrastructure
             ExitCode = exitCode;
             TimedOut = timedOut;
             FailureKind = failureKind;
+            ConfirmsConfigurationReloaded = confirmsConfigurationReloaded;
         }
 
         public bool Success { get; }
@@ -118,11 +272,14 @@ namespace ProxiFyreUI.Infrastructure
         public int? ExitCode { get; }
         public bool TimedOut { get; }
         public ServiceOperationFailureKind FailureKind { get; }
+        public bool ConfirmsConfigurationReloaded { get; }
 
-        public static ServiceOperationResult Completed(ServiceStatusInfo status, string message, string details = null, int? exitCode = null)
+        public static ServiceOperationResult Completed(ServiceStatusInfo status, string message,
+            string details = null, int? exitCode = null,
+            bool confirmsConfigurationReloaded = false)
         {
             return new ServiceOperationResult(true, status, message, details, exitCode, false,
-                ServiceOperationFailureKind.None);
+                ServiceOperationFailureKind.None, confirmsConfigurationReloaded);
         }
 
         public static ServiceOperationResult Failed(ServiceStatusInfo status, string message,
@@ -132,18 +289,21 @@ namespace ProxiFyreUI.Infrastructure
             if (timedOut && failureKind == ServiceOperationFailureKind.General)
                 failureKind = ServiceOperationFailureKind.TimedOut;
             return new ServiceOperationResult(false, status, message, details, exitCode, timedOut,
-                failureKind);
+                failureKind, false);
         }
     }
 
     public interface IProxiFyreServiceController : IDisposable
     {
         Task<ServiceStatusInfo> GetStatusAsync(CancellationToken cancellationToken);
-        Task<ServiceOperationResult> StartAsync(TimeSpan timeout, CancellationToken cancellationToken);
+        Task<ServiceOperationResult> StartAsync(string expectedEnginePath,
+            Func<bool> preLaunchGuard, TimeSpan timeout, CancellationToken cancellationToken);
         Task<ServiceOperationResult> StopAsync(TimeSpan timeout, CancellationToken cancellationToken);
-        Task<ServiceOperationResult> RestartAsync(TimeSpan timeout, CancellationToken cancellationToken);
+        Task<ServiceOperationResult> RestartAsync(string expectedEnginePath,
+            Func<bool> preLaunchGuard, TimeSpan timeout, CancellationToken cancellationToken);
         Task<ServiceOperationResult> InstallAsync(string enginePath, TimeSpan timeout, CancellationToken cancellationToken);
-        Task<ServiceOperationResult> UninstallAsync(string enginePath, TimeSpan timeout, CancellationToken cancellationToken);
+        Task<ServiceOperationResult> UninstallAsync(string enginePath,
+            Func<bool> preLaunchGuard, TimeSpan timeout, CancellationToken cancellationToken);
     }
 
     public sealed class ProxiFyreServiceController : IProxiFyreServiceController
@@ -169,31 +329,42 @@ namespace ProxiFyreUI.Infrastructure
             return Task.Run(() => GetStatusCore(cancellationToken), cancellationToken);
         }
 
-        public Task<ServiceOperationResult> StartAsync(TimeSpan timeout, CancellationToken cancellationToken)
+        public Task<ServiceOperationResult> StartAsync(string expectedEnginePath,
+            Func<bool> preLaunchGuard, TimeSpan timeout, CancellationToken cancellationToken)
         {
-            return RunExclusiveAsync(() => StartCore(timeout, cancellationToken), cancellationToken);
+            ValidateServiceMutationRequest(expectedEnginePath, preLaunchGuard);
+            return RunExclusiveAsync(() => StartCore(expectedEnginePath, preLaunchGuard,
+                timeout, cancellationToken), cancellationToken);
         }
 
         public Task<ServiceOperationResult> StopAsync(TimeSpan timeout, CancellationToken cancellationToken)
         {
-            return RunExclusiveAsync(() => StopCore(timeout, cancellationToken), cancellationToken);
+            return RunExclusiveAsync(() => StopCore(timeout, Stopwatch.StartNew(),
+                cancellationToken), cancellationToken);
         }
 
-        public Task<ServiceOperationResult> RestartAsync(TimeSpan timeout, CancellationToken cancellationToken)
+        public Task<ServiceOperationResult> RestartAsync(string expectedEnginePath,
+            Func<bool> preLaunchGuard, TimeSpan timeout, CancellationToken cancellationToken)
         {
-            return RunExclusiveAsync(() => RestartCore(timeout, cancellationToken), cancellationToken);
+            ValidateServiceMutationRequest(expectedEnginePath, preLaunchGuard);
+            return RunExclusiveAsync(() => RestartCore(expectedEnginePath, preLaunchGuard,
+                timeout, cancellationToken), cancellationToken);
         }
 
         public Task<ServiceOperationResult> InstallAsync(string enginePath, TimeSpan timeout, CancellationToken cancellationToken)
         {
-            ValidateLifecycleExecutable(enginePath);
+            ValidateEnginePathArgument(enginePath);
             return RunExclusiveAsync(() => InstallCore(enginePath, timeout, cancellationToken), cancellationToken);
         }
 
-        public Task<ServiceOperationResult> UninstallAsync(string enginePath, TimeSpan timeout, CancellationToken cancellationToken)
+        public Task<ServiceOperationResult> UninstallAsync(string enginePath,
+            Func<bool> preLaunchGuard, TimeSpan timeout, CancellationToken cancellationToken)
         {
-            ValidateLifecycleExecutable(enginePath);
-            return RunExclusiveAsync(() => RunLifecycleCommandCore(enginePath, "uninstall", timeout, cancellationToken), cancellationToken);
+            ValidateEnginePathArgument(enginePath);
+            if (preLaunchGuard == null)
+                throw new ArgumentNullException(nameof(preLaunchGuard));
+            return RunExclusiveAsync(() => UninstallCore(enginePath, preLaunchGuard, timeout,
+                cancellationToken), cancellationToken);
         }
 
         private async Task<ServiceOperationResult> RunExclusiveAsync(Func<ServiceOperationResult> operation, CancellationToken cancellationToken)
@@ -210,7 +381,55 @@ namespace ProxiFyreUI.Infrastructure
             }
         }
 
-        private ServiceOperationResult StartCore(TimeSpan timeout, CancellationToken cancellationToken)
+        private ServiceOperationResult StartCore(string expectedEnginePath,
+            Func<bool> preLaunchGuard, TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            var operationClock = Stopwatch.StartNew();
+            var status = GetStatusCore(cancellationToken);
+            if (!status.IsInstallationKnown)
+                return InstallationStateUnavailable(status);
+            if (!status.IsInstalled)
+                return ServiceOperationResult.Failed(status, "The ProxiFyre service is not installed.");
+            if (status.State == ProxiFyreServiceState.Running)
+                return ServiceOperationResult.Completed(status, "The ProxiFyre service is already running.");
+
+            LifecycleExecutableLease payloadLease;
+            try
+            {
+                payloadLease = AcquireTrustedEnginePayload(expectedEnginePath);
+            }
+            catch (Exception ex) when (IsPayloadValidationException(ex))
+            {
+                return FailureFromException("The service could not be started.", ex, cancellationToken);
+            }
+
+            using (payloadLease)
+            {
+                var locationFailure = GetUnprotectedServiceLocationFailure(status,
+                    expectedEnginePath);
+                if (locationFailure != null)
+                    return locationFailure;
+
+                var dependencyFailure = GetPacketFilterDependencyFailure(status);
+                if (dependencyFailure != null)
+                    return dependencyFailure;
+
+                try
+                {
+                    return StartVerifiedCore(preLaunchGuard, timeout, operationClock,
+                        cancellationToken);
+                }
+                catch (Exception ex) when (IsServiceException(ex))
+                {
+                    // Keep the verified payload leased while the final failure status is read.
+                    return FailureFromException("The service could not be started.", ex,
+                        cancellationToken);
+                }
+            }
+        }
+
+        private ServiceOperationResult StartVerifiedCore(Func<bool> preLaunchGuard,
+            TimeSpan timeout, Stopwatch operationClock, CancellationToken cancellationToken)
         {
             var status = GetStatusCore(cancellationToken);
             if (!status.IsInstallationKnown)
@@ -220,40 +439,48 @@ namespace ProxiFyreUI.Infrastructure
             if (status.State == ProxiFyreServiceState.Running)
                 return ServiceOperationResult.Completed(status, "The ProxiFyre service is already running.");
 
-            var dependencyFailure = GetPacketFilterDependencyFailure(status);
-            if (dependencyFailure != null)
-                return dependencyFailure;
-
-            try
+            using (var controller = new ServiceController(ProxiFyrePaths.ServiceName))
             {
-                using (var controller = new ServiceController(ProxiFyrePaths.ServiceName))
+                var launchDecision = ServicePreLaunchPolicy.Evaluate(timeout,
+                    () => operationClock.Elapsed, preLaunchGuard);
+                if (launchDecision == ServicePreLaunchDecision.TimedOut)
+                    return ServiceOperationResult.Failed(status,
+                        "The start operation timed out before the service could be started.",
+                        null, null, true);
+                if (launchDecision == ServicePreLaunchDecision.GuardRejected)
                 {
-                    controller.Start();
-                    var startup = WaitForStartup(controller, timeout, cancellationToken);
-                    if (startup == ServiceStartupWaitResult.TimedOut)
-                    {
-                        var current = GetStatusCore(cancellationToken);
-                        return ServiceOperationResult.Failed(current,
-                            "The service did not reach Running before the timeout.", null, null, true);
-                    }
-                    if (startup == ServiceStartupWaitResult.Failed)
-                    {
-                        var current = GetStatusCore(cancellationToken);
-                        return ServiceOperationResult.Failed(current,
-                            "The service stopped during startup. Review the recent engine logs for the underlying error.",
-                            null, null, false, ServiceOperationFailureKind.StartupFailed);
-                    }
+                    return ServiceOperationResult.Failed(status,
+                        "The registered ProxiFyre executable changed before the service could be started. " +
+                        "No start request was sent.");
                 }
+                controller.Start();
+                var remaining = ServiceOperationBudget.Remaining(timeout, operationClock.Elapsed);
+                if (remaining <= TimeSpan.Zero)
+                {
+                    return ServiceOperationResult.Failed(GetStatusCore(cancellationToken),
+                        "The service did not reach Running before the timeout.", null, null, true);
+                }
+                var startup = WaitForStartup(controller, remaining, cancellationToken);
+                if (startup == ServiceStartupWaitResult.TimedOut)
+                {
+                    var current = GetStatusCore(cancellationToken);
+                    return ServiceOperationResult.Failed(current,
+                        "The service did not reach Running before the timeout.", null, null, true);
+                }
+                if (startup == ServiceStartupWaitResult.Failed)
+                {
+                    var current = GetStatusCore(cancellationToken);
+                    return ServiceOperationResult.Failed(current,
+                        "The service stopped during startup. Review the recent engine logs for the underlying error.",
+                        null, null, false, ServiceOperationFailureKind.StartupFailed);
+                }
+            }
 
-                return ServiceOperationResult.Completed(GetStatusCore(cancellationToken), "The ProxiFyre service is running.");
-            }
-            catch (Exception ex) when (IsServiceException(ex))
-            {
-                return FailureFromException("The service could not be started.", ex, cancellationToken);
-            }
+            return ServiceStartupCompletionEvaluator.Evaluate(GetStatusCore(cancellationToken));
         }
 
-        private ServiceOperationResult StopCore(TimeSpan timeout, CancellationToken cancellationToken)
+        private ServiceOperationResult StopCore(TimeSpan timeout, Stopwatch operationClock,
+            CancellationToken cancellationToken, Func<bool> preStopGuard = null)
         {
             var status = GetStatusCore(cancellationToken);
             if (!status.IsInstallationKnown)
@@ -270,8 +497,32 @@ namespace ProxiFyreUI.Infrastructure
                     controller.Refresh();
                     // SCM accepts Stop directly for a paused service. Continuing first creates
                     // a ContinuePending race where a subsequent Stop can be rejected.
-                    controller.Stop();
-                    if (!WaitForStatus(controller, ServiceControllerStatus.Stopped, timeout, cancellationToken))
+                    // Do not send a duplicate control when another caller has already started
+                    // the stop transition, or when the service stopped after our first query.
+                    if (controller.Status != ServiceControllerStatus.Stopped &&
+                        controller.Status != ServiceControllerStatus.StopPending)
+                    {
+                        var stopDecision = ServicePreLaunchPolicy.Evaluate(timeout,
+                            () => operationClock.Elapsed, preStopGuard);
+                        if (stopDecision == ServicePreLaunchDecision.TimedOut)
+                        {
+                            return ServiceOperationResult.Failed(GetStatusCore(cancellationToken),
+                                "The stop operation timed out before the service could be stopped.",
+                                null, null, true);
+                        }
+                        if (stopDecision == ServicePreLaunchDecision.GuardRejected)
+                        {
+                            return ServiceOperationResult.Failed(GetStatusCore(cancellationToken),
+                                "The registered ProxiFyre executable changed before the service could be stopped. " +
+                                "No stop request was sent.");
+                        }
+                        controller.Stop();
+                    }
+                    var remaining = ServiceOperationBudget.Remaining(timeout,
+                        operationClock.Elapsed);
+                    if (remaining <= TimeSpan.Zero ||
+                        !WaitForStatus(controller, ServiceControllerStatus.Stopped, remaining,
+                            cancellationToken))
                     {
                         var current = GetStatusCore(cancellationToken);
                         return ServiceOperationResult.Failed(current,
@@ -279,7 +530,7 @@ namespace ProxiFyreUI.Infrastructure
                     }
                 }
 
-                return ServiceOperationResult.Completed(GetStatusCore(cancellationToken), "The ProxiFyre service is stopped.");
+                return ServiceStopCompletionEvaluator.Evaluate(GetStatusCore(cancellationToken));
             }
             catch (Exception ex) when (IsServiceException(ex))
             {
@@ -287,7 +538,8 @@ namespace ProxiFyreUI.Infrastructure
             }
         }
 
-        private ServiceOperationResult RestartCore(TimeSpan timeout, CancellationToken cancellationToken)
+        private ServiceOperationResult RestartCore(string expectedEnginePath,
+            Func<bool> preLaunchGuard, TimeSpan timeout, CancellationToken cancellationToken)
         {
             var started = Stopwatch.StartNew();
             var status = GetStatusCore(cancellationToken);
@@ -296,38 +548,186 @@ namespace ProxiFyreUI.Infrastructure
             if (!status.IsInstalled)
                 return ServiceOperationResult.Failed(status, "The ProxiFyre service is not installed.");
 
-            var dependencyFailure = GetPacketFilterDependencyFailure(status);
-            if (dependencyFailure != null)
-                return dependencyFailure;
-
-            if (status.State != ProxiFyreServiceState.Stopped)
+            LifecycleExecutableLease payloadLease;
+            try
             {
-                var stop = StopCore(timeout, cancellationToken);
-                if (!stop.Success)
-                    return stop;
+                payloadLease = AcquireTrustedEnginePayload(expectedEnginePath);
+            }
+            catch (Exception ex) when (IsPayloadValidationException(ex))
+            {
+                return FailureFromException("The service could not be restarted.", ex,
+                    cancellationToken);
             }
 
-            var remaining = timeout - started.Elapsed;
-            if (remaining <= TimeSpan.Zero)
-                return ServiceOperationResult.Failed(GetStatusCore(cancellationToken),
-                    "The restart operation timed out before the service could start.", null, null, true);
+            // Acquire before Stop so every executable/configuration file used by the service
+            // remains the exact payload that was revalidated for the whole restart attempt.
+            using (payloadLease)
+            {
+                var locationFailure = GetUnprotectedServiceLocationFailure(status,
+                    expectedEnginePath);
+                if (locationFailure != null)
+                    return locationFailure;
 
-            var start = StartCore(remaining, cancellationToken);
-            return start.Success
-                ? ServiceOperationResult.Completed(start.Status, "The ProxiFyre service restarted successfully.")
-                : start;
+                var dependencyFailure = GetPacketFilterDependencyFailure(status);
+                if (dependencyFailure != null)
+                    return dependencyFailure;
+
+                try
+                {
+                    if (status.State != ProxiFyreServiceState.Stopped)
+                    {
+                        var stopBudget = ServiceOperationBudget.Remaining(timeout, started.Elapsed);
+                        if (stopBudget <= TimeSpan.Zero)
+                        {
+                            return ServiceOperationResult.Failed(status,
+                                "The restart operation timed out before the service could be stopped.",
+                                null, null, true);
+                        }
+                        var stop = StopCore(timeout, started, cancellationToken, preLaunchGuard);
+                        if (!stop.Success)
+                            return stop;
+                    }
+
+                    var remaining = ServiceOperationBudget.Remaining(timeout, started.Elapsed);
+                    if (remaining <= TimeSpan.Zero)
+                        return ServiceOperationResult.Failed(GetStatusCore(cancellationToken),
+                            "The restart operation timed out before the service could start.", null, null, true);
+
+                    var start = StartVerifiedCore(preLaunchGuard, timeout, started,
+                        cancellationToken);
+                    return start.Success
+                        ? ServiceOperationResult.Completed(start.Status,
+                            "The ProxiFyre service restarted successfully.",
+                            confirmsConfigurationReloaded: start.ConfirmsConfigurationReloaded)
+                        : start;
+                }
+                catch (Exception ex) when (IsServiceException(ex))
+                {
+                    // Keep the verified payload leased while the final failure status is read.
+                    return FailureFromException("The service could not be restarted.", ex,
+                        cancellationToken);
+                }
+            }
         }
 
         private ServiceOperationResult InstallCore(string enginePath, TimeSpan timeout,
             CancellationToken cancellationToken)
         {
+            var operationClock = Stopwatch.StartNew();
             var status = GetStatusCore(cancellationToken);
             if (!status.IsInstallationKnown)
                 return InstallationStateUnavailable(status);
+            if (status.State == ProxiFyreServiceState.DeletionPending)
+            {
+                return ServiceOperationResult.Failed(status,
+                    "The ProxiFyre service is marked for deletion. Wait for Windows to finish removing it before installing again.");
+            }
+            if (status.IsInstalled)
+            {
+                return ServiceOperationResult.Completed(status,
+                    "The ProxiFyre service is already installed.");
+            }
 
-            var dependencyFailure = GetPacketFilterDependencyFailure(status);
-            return dependencyFailure ??
-                   RunLifecycleCommandCore(enginePath, "install", timeout, cancellationToken);
+            LifecycleExecutableLease payloadLease;
+            try
+            {
+                payloadLease = AcquireTrustedEnginePayload(enginePath);
+            }
+            catch (Exception ex) when (IsPayloadValidationException(ex))
+            {
+                return FailureFromException("The service could not be installed.", ex,
+                    cancellationToken);
+            }
+
+            using (payloadLease)
+            {
+                var locationFailure = GetUnprotectedServiceLocationFailure(status, enginePath);
+                if (locationFailure != null)
+                    return locationFailure;
+
+                var dependencyFailure = GetPacketFilterDependencyFailure(status);
+                return dependencyFailure ??
+                       RunLifecycleCommandCore(enginePath, "install", timeout, operationClock,
+                           cancellationToken, payloadAlreadyLeased: true);
+            }
+        }
+
+        private ServiceOperationResult UninstallCore(string enginePath, Func<bool> preLaunchGuard,
+            TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            var started = Stopwatch.StartNew();
+            var status = GetStatusCore(cancellationToken);
+            if (!status.IsInstallationKnown)
+                return InstallationStateUnavailable(status);
+            if (status.State == ProxiFyreServiceState.NotInstalled)
+            {
+                return ServiceOperationResult.Completed(status,
+                    "The ProxiFyre service is already uninstalled. Configuration and logs were preserved.");
+            }
+            if (status.State == ProxiFyreServiceState.DeletionPending)
+            {
+                return ServiceOperationResult.Completed(status,
+                    "The ProxiFyre service is already marked for deletion. Windows will finish " +
+                    "removing it after open service-management handles close.");
+            }
+
+            LifecycleExecutableLease payloadLease;
+            try
+            {
+                payloadLease = AcquireTrustedEnginePayload(enginePath);
+            }
+            catch (Exception ex) when (IsPayloadValidationException(ex))
+            {
+                return FailureFromException("The service uninstall command could not be run.", ex,
+                    cancellationToken);
+            }
+
+            using (payloadLease)
+            {
+                if (ServiceOperationBudget.Remaining(timeout, started.Elapsed) <= TimeSpan.Zero)
+                    return LifecycleCommandTimedOut("uninstall", cancellationToken);
+
+                if (status.State != ProxiFyreServiceState.Stopped)
+                {
+                    var stopBudget = ServiceOperationBudget.Remaining(timeout, started.Elapsed);
+                    if (stopBudget <= TimeSpan.Zero)
+                    {
+                        return ServiceOperationResult.Failed(status,
+                            "The uninstall operation timed out before the service could be stopped.",
+                            null, null, true);
+                    }
+
+                    var stop = StopCore(timeout, started, cancellationToken, preLaunchGuard);
+                    if (!stop.Success)
+                        return stop;
+
+                    status = stop.Status ?? GetStatusCore(cancellationToken);
+                    if (status.State == ProxiFyreServiceState.NotInstalled ||
+                        status.State == ProxiFyreServiceState.DeletionPending)
+                    {
+                        return ServiceOperationResult.Completed(status,
+                            status.State == ProxiFyreServiceState.NotInstalled
+                                ? "The ProxiFyre service is already uninstalled. Configuration and logs were preserved."
+                                : "The ProxiFyre service is already marked for deletion. Windows will finish " +
+                                  "removing it after open service-management handles close.");
+                    }
+                    if (status.State != ProxiFyreServiceState.Stopped)
+                    {
+                        return ServiceOperationResult.Failed(status,
+                            "The service did not remain stopped, so the uninstall command was not run.");
+                    }
+                }
+
+                if (ServiceOperationBudget.Remaining(timeout, started.Elapsed) <= TimeSpan.Zero)
+                {
+                    return ServiceOperationResult.Failed(status,
+                        "The uninstall operation timed out before the uninstall command could be run.",
+                        null, null, true);
+                }
+
+                return RunLifecycleCommandCore(enginePath, "uninstall", timeout, started,
+                    cancellationToken, preLaunchGuard, true);
+            }
         }
 
         private ServiceOperationResult GetPacketFilterDependencyFailure(ServiceStatusInfo serviceStatus)
@@ -341,41 +741,68 @@ namespace ProxiFyreUI.Infrastructure
         }
 
         private ServiceOperationResult RunLifecycleCommandCore(string enginePath, string command,
-            TimeSpan timeout, CancellationToken cancellationToken)
+            TimeSpan timeout, Stopwatch operationClock, CancellationToken cancellationToken,
+            Func<bool> preLaunchGuard = null, bool payloadAlreadyLeased = false)
         {
             var output = new StringBuilder();
             var error = new StringBuilder();
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = enginePath,
-                Arguments = command,
-                WorkingDirectory = Path.GetDirectoryName(enginePath),
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
 
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (ServiceOperationBudget.Remaining(timeout, operationClock.Elapsed) <=
+                    TimeSpan.Zero)
+                    return LifecycleCommandTimedOut(command, cancellationToken);
+
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = enginePath,
+                    Arguments = command,
+                    WorkingDirectory = Path.GetDirectoryName(enginePath),
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                using (var executableLease = payloadAlreadyLeased
+                           ? null
+                           : AcquireTrustedEnginePayload(enginePath))
                 using (var process = new Process { StartInfo = startInfo })
                 {
                     process.OutputDataReceived += (sender, args) => { if (args.Data != null) lock (output) output.AppendLine(args.Data); };
                     process.ErrorDataReceived += (sender, args) => { if (args.Data != null) lock (error) error.AppendLine(args.Data); };
+                    var launchDecision = ServicePreLaunchPolicy.Evaluate(timeout,
+                        () => operationClock.Elapsed, preLaunchGuard);
+                    if (launchDecision == ServicePreLaunchDecision.TimedOut)
+                        return LifecycleCommandTimedOut(command, cancellationToken);
+                    if (launchDecision == ServicePreLaunchDecision.GuardRejected)
+                    {
+                        return ServiceOperationResult.Failed(GetStatusCore(cancellationToken),
+                            "The service registration changed before the uninstall command could run. " +
+                            "No uninstall command was launched.");
+                    }
                     process.Start();
                     process.BeginOutputReadLine();
                     process.BeginErrorReadLine();
 
-                    var stopwatch = Stopwatch.StartNew();
-                    while (!process.WaitForExit(150))
+                    while (true)
                     {
                         if (cancellationToken.IsCancellationRequested)
                         {
                             TerminateLifecycleProcess(process);
                             cancellationToken.ThrowIfCancellationRequested();
                         }
-                        if (stopwatch.Elapsed < timeout)
+
+                        var remaining = ServiceOperationBudget.Remaining(timeout,
+                            operationClock.Elapsed);
+                        if (remaining > TimeSpan.Zero)
+                        {
+                            var waitMilliseconds = Math.Max(1,
+                                Math.Min(150, (int)Math.Ceiling(remaining.TotalMilliseconds)));
+                            if (process.WaitForExit(waitMilliseconds))
+                                break;
                             continue;
+                        }
 
                         TerminateLifecycleProcess(process);
                         var timedOutStatus = GetStatusCore(CancellationToken.None);
@@ -386,28 +813,35 @@ namespace ProxiFyreUI.Infrastructure
                     process.WaitForExit();
                     var exitCode = process.ExitCode;
                     var status = GetStatusCore(cancellationToken);
+                    var details = CombineOutput(output, error);
+                    if (command == "uninstall")
+                        return ServiceUninstallCompletionEvaluator.Evaluate(status, details, exitCode);
+
                     // Never treat Error/Unknown as proof that a lifecycle command worked. The
-                    // UI remains conservative on those states, while success requires an actual
-                    // installed state or the explicit NotInstalled state from SCM (1060).
-                    var expected = command == "install"
-                        ? status.HasConcreteInstalledState
-                        : status.IsInstallationKnown && !status.IsInstalled;
-                    if (exitCode == 0 && expected)
+                    // UI remains conservative on those states, while install success requires
+                    // an actual installed state from SCM.
+                    if (exitCode == 0 && status.HasConcreteInstalledState)
                     {
-                        var message = command == "install"
-                            ? "The ProxiFyre service was installed."
-                            : "The ProxiFyre service was uninstalled. Configuration and logs were preserved.";
-                        return ServiceOperationResult.Completed(status, message, CombineOutput(output, error), exitCode);
+                        return ServiceOperationResult.Completed(status,
+                            "The ProxiFyre service was installed.", details, exitCode);
                     }
 
                     return ServiceOperationResult.Failed(status,
-                        $"The service {command} command failed.", CombineOutput(output, error), exitCode);
+                        $"The service {command} command failed.", details, exitCode);
                 }
             }
-            catch (Exception ex) when (IsServiceException(ex) || ex is IOException || ex is InvalidOperationException)
+            catch (Exception ex) when (IsServiceException(ex) || IsPayloadValidationException(ex))
             {
                 return FailureFromException($"The service {command} command could not be run.", ex, cancellationToken);
             }
+        }
+
+        private ServiceOperationResult LifecycleCommandTimedOut(string command,
+            CancellationToken cancellationToken)
+        {
+            return ServiceOperationResult.Failed(GetStatusCore(cancellationToken),
+                $"The service {command} command timed out before it could be launched.",
+                null, null, true);
         }
 
         private static void TerminateLifecycleProcess(Process process)
@@ -494,9 +928,13 @@ namespace ProxiFyreUI.Infrastructure
                     return new ServiceStatusInfo(MapStatus(status));
                 }
             }
-            catch (InvalidOperationException ex) when (IsMissingService(ex))
+            catch (Exception ex) when (IsMissingService(ex))
             {
                 return new ServiceStatusInfo(ProxiFyreServiceState.NotInstalled);
+            }
+            catch (Exception ex) when (IsMarkedForDeletion(ex))
+            {
+                return new ServiceStatusInfo(ProxiFyreServiceState.DeletionPending);
             }
             catch (Exception ex) when (IsServiceException(ex))
             {
@@ -574,16 +1012,96 @@ namespace ProxiFyreUI.Infrastructure
             return native != null && native.NativeErrorCode == 1060;
         }
 
+        private static bool IsMarkedForDeletion(Exception exception)
+        {
+            var native = exception as Win32Exception ?? exception.InnerException as Win32Exception;
+            return native != null && native.NativeErrorCode == 1072;
+        }
+
         private static bool IsServiceException(Exception exception)
         {
             return exception is InvalidOperationException || exception is Win32Exception ||
                    exception is System.ServiceProcess.TimeoutException || exception is UnauthorizedAccessException;
         }
 
-        private static void ValidateLifecycleExecutable(string enginePath)
+        private static bool IsPayloadValidationException(Exception exception)
         {
-            if (!EngineExecutableValidator.IsTrusted(enginePath))
-                throw new FileNotFoundException("A trusted ProxiFyre.exe must be resolved before changing service installation.", enginePath);
+            return exception is IOException || exception is UnauthorizedAccessException ||
+                   exception is ArgumentException || exception is NotSupportedException ||
+                   exception is Win32Exception;
+        }
+
+        private static LifecycleExecutableLease AcquireTrustedEnginePayload(string enginePath)
+        {
+            return LifecycleExecutableLease.Acquire(
+                EngineExecutableValidator.GetLifecyclePayloadPaths(enginePath),
+                EngineExecutableValidator.IsTrustedPayloadFile);
+        }
+
+        private static ServiceOperationResult GetUnprotectedServiceLocationFailure(
+            ServiceStatusInfo status, string enginePath)
+        {
+#if DEBUG
+            // Repository builds intentionally run from a developer-writable output directory.
+            return null;
+#else
+            string reason;
+            if (ServiceInstallLocationPolicy.IsProtected(enginePath, out reason))
+                return null;
+
+            var remediation = status != null && status.IsInstalled
+                ? "Stop and uninstall the existing service, exit this GUI, then copy or extract " +
+                  "the complete release using a trusted installer into a protected per-machine " +
+                  "directory (normally under Program Files). Launch the GUI from that copy and " +
+                  "install the service again."
+                : "Install the complete release with a trusted installer into a protected " +
+                  "per-machine directory (normally under Program Files), launch the GUI from " +
+                  "that copy, and install the service. The GUI will not rewrite permissions on " +
+                  "a user-controlled directory in place.";
+            return ServiceOperationResult.Failed(status,
+                "The ProxiFyre service cannot run as LocalSystem from a location writable by " +
+                "standard users. " + remediation, reason);
+#endif
+        }
+
+        private static void ValidateServiceMutationRequest(string expectedEnginePath,
+            Func<bool> preLaunchGuard)
+        {
+            ValidateEnginePathArgument(expectedEnginePath);
+            if (preLaunchGuard == null)
+                throw new ArgumentNullException(nameof(preLaunchGuard));
+        }
+
+        private static void ValidateEnginePathArgument(string enginePath)
+        {
+            if (string.IsNullOrWhiteSpace(enginePath) ||
+                !ProxiFyrePaths.IsEngineExecutable(enginePath) ||
+                !IsFullyQualifiedWindowsPath(enginePath))
+            {
+                throw new ArgumentException(
+                    "A fully qualified ProxiFyre.exe path is required.", nameof(enginePath));
+            }
+
+            // Force the same canonicalization checks used by the payload lease without requiring
+            // an SCM ImagePath representation. A direct executable path may legitimately contain
+            // spaces without surrounding quotes.
+            Path.GetFullPath(enginePath);
+        }
+
+        private static bool IsFullyQualifiedWindowsPath(string path)
+        {
+            if (path.Length >= 3 && char.IsLetter(path[0]) && path[1] == ':' &&
+                (path[2] == Path.DirectorySeparatorChar ||
+                 path[2] == Path.AltDirectorySeparatorChar))
+                return true;
+
+            return path.Length >= 3 &&
+                   (path[0] == Path.DirectorySeparatorChar ||
+                    path[0] == Path.AltDirectorySeparatorChar) &&
+                   (path[1] == Path.DirectorySeparatorChar ||
+                    path[1] == Path.AltDirectorySeparatorChar) &&
+                   path[2] != Path.DirectorySeparatorChar &&
+                   path[2] != Path.AltDirectorySeparatorChar;
         }
 
         private void ThrowIfDisposed()

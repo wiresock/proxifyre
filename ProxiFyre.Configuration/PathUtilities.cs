@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 
 namespace ProxiFyre.Configuration
 {
@@ -85,6 +86,8 @@ namespace ProxiFyre.Configuration
                 var closingQuote = value.IndexOf('"', 1);
                 if (closingQuote <= 1)
                     return false;
+                if (closingQuote + 1 < value.Length && !char.IsWhiteSpace(value[closingQuote + 1]))
+                    return false;
                 candidate = value.Substring(1, closingQuote - 1);
             }
             else
@@ -93,10 +96,18 @@ namespace ProxiFyre.Configuration
                 if (executableEnd < 0)
                     return false;
                 candidate = value.Substring(0, executableEnd);
+
+                // CreateProcess/SCM probes whitespace-delimited prefixes for an unquoted
+                // executable path (for example C:\Program.exe before C:\Program Files\...).
+                // Do not certify a later .exe that Windows may never launch.
+                if (candidate.Any(char.IsWhiteSpace))
+                    return false;
             }
 
             candidate = candidate.Trim();
             if (!candidate.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || candidate.IndexOf('"') >= 0)
+                return false;
+            if (!IsFullyQualifiedWindowsPath(candidate))
                 return false;
 
             try
@@ -108,6 +119,27 @@ namespace ProxiFyre.Configuration
             {
                 return false;
             }
+        }
+
+        private static bool IsFullyQualifiedWindowsPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return false;
+
+            // Path.IsPathRooted also accepts drive-relative (C:app.exe) and current-drive
+            // rooted (\app.exe) paths. SCM resolves those independently of this GUI's current
+            // directory, so accepting them could make us validate a different executable.
+            if (path.Length >= 3 && char.IsLetter(path[0]) && path[1] == ':' &&
+                IsDirectorySeparator(path[2]))
+                return true;
+
+            return path.Length >= 3 && IsDirectorySeparator(path[0]) &&
+                   IsDirectorySeparator(path[1]) && !IsDirectorySeparator(path[2]);
+        }
+
+        private static bool IsDirectorySeparator(char value)
+        {
+            return value == Path.DirectorySeparatorChar || value == Path.AltDirectorySeparatorChar;
         }
 
         private static int FindExecutableEnd(string value)

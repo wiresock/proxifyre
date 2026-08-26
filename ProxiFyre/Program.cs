@@ -6,6 +6,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Security.Principal;
 using Topshelf;
 using LogLevel = Socksifier.LogLevel;
@@ -304,7 +305,57 @@ namespace ProxiFyre
         /// </summary>
         /// <param name="args">Command-line arguments (e.g., install, uninstall, start, stop).</param>
         /// <returns>The Topshelf exit code as an integer.</returns>
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static int Main(string[] args)
+        {
+            try
+            {
+                NativeDependencyLoader.Initialize();
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(
+                    "ProxiFyre could not establish its secure native dependency loading policy. " +
+                    ex.Message);
+                return 126; // ERROR_MOD_NOT_FOUND
+            }
+
+#if !DEBUG
+            if (RequiresProtectedServiceLocation(args))
+            {
+                string locationFailure;
+                if (!EngineServiceInstallLocationPolicy.IsProtected(
+                        Assembly.GetExecutingAssembly().Location, out locationFailure))
+                {
+                    Console.Error.WriteLine(
+                        "ProxiFyre cannot install or run its LocalSystem service from a location " +
+                        "writable by standard users. Copy or extract the complete release into " +
+                        "a protected per-machine directory (normally under Program Files), " +
+                        "preserve inherited permissions, and retry. " + locationFailure);
+                    return 5; // ERROR_ACCESS_DENIED
+                }
+            }
+#endif
+
+            // Keep all references that can cause the mixed-mode Socksifier assembly to load
+            // behind a non-inlined boundary. The CLR must execute the loader policy above before
+            // it can JIT this method or resolve ProxiFyreService.
+            return RunAfterNativeDependencyPolicy(args);
+        }
+
+#if !DEBUG
+        private static bool RequiresProtectedServiceLocation(string[] args)
+        {
+            var command = args != null && args.Length > 0
+                ? (args[0] ?? string.Empty).Trim().ToLowerInvariant()
+                : string.Empty;
+            return command == "install" || command == "start" ||
+                   !Environment.UserInteractive;
+        }
+#endif
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static int RunAfterNativeDependencyPolicy(string[] args)
         {
             // Detect Topshelf lifecycle commands. For these commands the underlying
             // .NET installer (System.Configuration.Install.InstallContext, invoked via

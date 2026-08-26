@@ -79,6 +79,39 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
+        public void FailedEngineLoadPreservesTheCompletePreviousWorkspace()
+        {
+            var workspace = CreateLoadedWorkspace("original.example:1080");
+            workspace.Configuration.Proxies[0].Socks5ProxyEndpoint = "unsaved.example:2080";
+            workspace.MarkDirty();
+            var originalEnginePath = workspace.EnginePath;
+            var originalConfigurationPath = workspace.ConfigurationPath;
+            var originalConfiguration = workspace.Configuration;
+            var originalFingerprint = workspace.CurrentFingerprint;
+
+            var secondDirectory = Path.Combine(_directory, "second-engine");
+            Directory.CreateDirectory(secondDirectory);
+            var secondEngine = Path.Combine(secondDirectory, ProxiFyrePaths.EngineExecutableName);
+            File.WriteAllBytes(secondEngine, new byte[] { 0 });
+            File.WriteAllText(ProxiFyrePaths.GetConfigurationPath(secondEngine), "{ malformed json");
+
+            Assert.Throws<ConfigurationFormatException>(() => workspace.Load(
+                new EngineLocation(secondEngine,
+                    ProxiFyreUI.Infrastructure.EngineLocationSource.UserSelection)));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(workspace.EnginePath, Is.EqualTo(originalEnginePath));
+                Assert.That(workspace.ConfigurationPath, Is.EqualTo(originalConfigurationPath));
+                Assert.That(workspace.Configuration, Is.SameAs(originalConfiguration));
+                Assert.That(workspace.Configuration.Proxies[0].Socks5ProxyEndpoint,
+                    Is.EqualTo("unsaved.example:2080"));
+                Assert.That(workspace.CurrentFingerprint, Is.EqualTo(originalFingerprint));
+                Assert.That(workspace.IsDirty, Is.True);
+            });
+        }
+
+        [Test]
         public void SaveDoesNotClaimConfigurationWasApplied()
         {
             var workspace = CreateEditedWorkspace("saved.example:2080");
@@ -104,13 +137,71 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
+        public void SaveReportsFingerprintReadFailureInsteadOfThrowing()
+        {
+            var initial = TestModels.ValidConfiguration();
+            new ConfigurationSerializer().Save(_configurationPath, initial);
+            var fileSystem = new ThrowingReadFileSystem();
+            var workspace = new ConfigurationWorkspace(
+                new ConfigurationFileStore(new ConfigurationSerializer(), fileSystem));
+            workspace.Load(CreateEngineLocation());
+            workspace.Configuration.Proxies[0].Socks5ProxyEndpoint = "edited.example:2180";
+            workspace.MarkDirty();
+            fileSystem.ThrowOnRead = true;
+
+            WorkspaceSaveResult save = null;
+            Assert.DoesNotThrow(() => save = workspace.Save(false));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(save.Status, Is.EqualTo(WorkspaceSaveStatus.Failed));
+                Assert.That(save.Error, Is.TypeOf<IOException>());
+                Assert.That(workspace.IsDirty, Is.True);
+                Assert.That(workspace.RestartRequired, Is.False);
+            });
+        }
+
+        [Test]
+        public void FingerprintReadFailureCannotConfirmAppliedConfiguration()
+        {
+            var initial = TestModels.ValidConfiguration();
+            new ConfigurationSerializer().Save(_configurationPath, initial);
+            var fileSystem = new ThrowingReadFileSystem();
+            var workspace = new ConfigurationWorkspace(
+                new ConfigurationFileStore(new ConfigurationSerializer(), fileSystem));
+            workspace.Load(CreateEngineLocation());
+            var expectedFingerprint = workspace.CurrentFingerprint;
+            workspace.MarkApplied();
+            fileSystem.ThrowOnRead = true;
+
+            var isCurrent = true;
+            var markedApplied = true;
+            Assert.DoesNotThrow(() => isCurrent = workspace.IsFingerprintCurrent(expectedFingerprint));
+            Assert.DoesNotThrow(() => markedApplied = workspace.TryMarkApplied(expectedFingerprint));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(isCurrent, Is.False);
+                Assert.That(markedApplied, Is.False);
+                Assert.That(workspace.HasConfirmedApplied, Is.False);
+            });
+        }
+
+        [Test]
         public async Task SuccessfulRestartMarksSavedConfigurationApplied()
         {
             var workspace = CreateEditedWorkspace("applied.example:3080");
+            var registrationChecks = new List<string>();
             using (var service = FakeServiceController.Installed(
-                ServiceOperationResult.Completed(RunningStatus(), "Restarted.")))
+                ServiceOperationResult.Completed(RunningStatus(), "Restarted.",
+                    confirmsConfigurationReloaded: true)))
             {
-                var coordinator = new ConfigurationApplyCoordinator(workspace, service);
+                var coordinator = new ConfigurationApplyCoordinator(workspace, service,
+                    enginePath =>
+                    {
+                        registrationChecks.Add(enginePath);
+                        return true;
+                    });
 
                 var result = await coordinator.SaveAndApplyAsync(false, _enginePath, false, false,
                     OperationTimeout, CancellationToken.None);
@@ -123,10 +214,38 @@ namespace ProxiFyre.Tests
                     Assert.That(result.WasRolledBack, Is.False);
                     Assert.That(service.GetStatusCalls, Is.EqualTo(1));
                     Assert.That(service.RestartCalls, Is.EqualTo(1));
+                    Assert.That(service.LastRestartEnginePath, Is.EqualTo(_enginePath));
+                    Assert.That(service.LastRestartPreLaunchGuard, Is.Not.Null);
+                    Assert.That(service.LastRestartPreLaunchGuard(), Is.True);
+                    Assert.That(registrationChecks, Is.All.EqualTo(_enginePath));
                     Assert.That(workspace.IsDirty, Is.False);
                     Assert.That(workspace.RestartRequired, Is.False);
                     Assert.That(workspace.HasConfirmedApplied, Is.True);
                     Assert.That(ReadEndpoint(_configurationPath), Is.EqualTo("applied.example:3080"));
+                });
+            }
+        }
+
+        [Test]
+        public async Task RunningResultWithoutReloadDoesNotClaimConfigurationApplied()
+        {
+            var workspace = CreateEditedWorkspace("not-reloaded.example:3180");
+            using (var service = FakeServiceController.Installed(
+                ServiceOperationResult.Completed(RunningStatus(), "Already running.")))
+            {
+                var result = await new ConfigurationApplyCoordinator(workspace, service)
+                    .SaveAndApplyAsync(false, _enginePath, false, false,
+                        OperationTimeout, CancellationToken.None);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(result.Outcome,
+                        Is.EqualTo(ConfigurationApplyOutcome.ConfigurationReloadNotConfirmed));
+                    Assert.That(result.IsApplied, Is.False);
+                    Assert.That(result.ServiceResult.Success, Is.True);
+                    Assert.That(result.ServiceResult.ConfirmsConfigurationReloaded, Is.False);
+                    Assert.That(workspace.RestartRequired, Is.True);
+                    Assert.That(workspace.HasConfirmedApplied, Is.False);
                 });
             }
         }
@@ -197,7 +316,8 @@ namespace ProxiFyre.Tests
             var workspace = CreateEditedWorkspace("bad.example:5080");
             using (var service = FakeServiceController.Installed(
                 ServiceOperationResult.Failed(StoppedStatus(), "New configuration failed."),
-                ServiceOperationResult.Completed(RunningStatus(), "Restored configuration started.")))
+                ServiceOperationResult.Completed(RunningStatus(), "Restored configuration started.",
+                    confirmsConfigurationReloaded: true)))
             {
                 var coordinator = new ConfigurationApplyCoordinator(workspace, service);
 
@@ -289,7 +409,8 @@ namespace ProxiFyre.Tests
             var workspace = CreateEditedWorkspace("requested.example:5580");
             var save = workspace.Save(false);
             using (var service = FakeServiceController.Installed(
-                ServiceOperationResult.Completed(RunningStatus(), "Restarted.")))
+                ServiceOperationResult.Completed(RunningStatus(), "Restarted.",
+                    confirmsConfigurationReloaded: true)))
             {
                 service.RestartAction = () =>
                 {
@@ -313,6 +434,79 @@ namespace ProxiFyre.Tests
                     Assert.That(workspace.HasConfirmedApplied, Is.False);
                     Assert.That(ReadEndpoint(_configurationPath),
                         Is.EqualTo("external-during-restart.example:5680"));
+                });
+            }
+        }
+
+        [Test]
+        public async Task ChangedServiceEngineStopsApplyBeforeRestart()
+        {
+            var workspace = CreateEditedWorkspace("requested.example:5780");
+            var save = workspace.Save(false);
+            using (var service = FakeServiceController.Installed())
+            {
+                var result = await new ConfigurationApplyCoordinator(workspace, service,
+                        enginePath => false)
+                    .ApplySavedConfigurationAsync(save, _enginePath, false, false,
+                        OperationTimeout, CancellationToken.None);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(result.Outcome, Is.EqualTo(ConfigurationApplyOutcome.ServiceEngineChanged));
+                    Assert.That(service.RestartCalls, Is.Zero);
+                    Assert.That(workspace.RestartRequired, Is.True);
+                    Assert.That(workspace.HasConfirmedApplied, Is.False);
+                });
+            }
+        }
+
+        [Test]
+        public async Task ServiceEngineChangeDuringRestartPreventsAppliedClaim()
+        {
+            var workspace = CreateEditedWorkspace("requested.example:5880");
+            var save = workspace.Save(false);
+            var registrationChecks = new Queue<bool>(new[] { true, false });
+            using (var service = FakeServiceController.Installed(
+                ServiceOperationResult.Completed(RunningStatus(), "Restarted.",
+                    confirmsConfigurationReloaded: true)))
+            {
+                var result = await new ConfigurationApplyCoordinator(workspace, service,
+                        enginePath => registrationChecks.Dequeue())
+                    .ApplySavedConfigurationAsync(save, _enginePath, false, false,
+                        OperationTimeout, CancellationToken.None);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(result.Outcome, Is.EqualTo(ConfigurationApplyOutcome.ServiceEngineChanged));
+                    Assert.That(service.RestartCalls, Is.EqualTo(1));
+                    Assert.That(workspace.RestartRequired, Is.True);
+                    Assert.That(workspace.HasConfirmedApplied, Is.False);
+                });
+            }
+        }
+
+        [Test]
+        public async Task ServiceEngineChangeAfterRestorePreservesRolledBackState()
+        {
+            var workspace = CreateEditedWorkspace("requested.example:5980");
+            var save = workspace.Save(false);
+            var registrationChecks = new Queue<bool>(new[] { true, false });
+            using (var service = FakeServiceController.Installed())
+            {
+                var result = await new ConfigurationApplyCoordinator(workspace, service,
+                        enginePath => registrationChecks.Dequeue())
+                    .RollbackAndRestartAsync(save, OperationTimeout, CancellationToken.None);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(result.Outcome,
+                        Is.EqualTo(ConfigurationApplyOutcome.RolledBackServiceEngineChanged));
+                    Assert.That(result.WasRolledBack, Is.True);
+                    Assert.That(result.RollbackAttempted, Is.True);
+                    Assert.That(service.RestartCalls, Is.Zero);
+                    Assert.That(workspace.RestartRequired, Is.True);
+                    Assert.That(workspace.HasConfirmedApplied, Is.False);
+                    Assert.That(ReadEndpoint(_configurationPath), Is.EqualTo("original.example:1080"));
                 });
             }
         }
@@ -373,13 +567,40 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
+        public async Task DeletionPendingServiceStopsApplyBeforeAnyScmMutation()
+        {
+            var workspace = CreateEditedWorkspace("deletion-pending.example:5980");
+            using (var service = FakeServiceController.WithStatus(
+                new ServiceStatusInfo(ProxiFyreServiceState.DeletionPending)))
+            {
+                var result = await new ConfigurationApplyCoordinator(workspace, service)
+                    .SaveAndApplyAsync(false, _enginePath, true, false,
+                        OperationTimeout, CancellationToken.None);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(result.Outcome,
+                        Is.EqualTo(ConfigurationApplyOutcome.ServiceStatusUnavailable));
+                    Assert.That(result.ServiceResult.Success, Is.False);
+                    Assert.That(result.ServiceResult.Message, Does.Contain("marked for deletion"));
+                    Assert.That(service.InstallCalls, Is.Zero);
+                    Assert.That(service.StartCalls, Is.Zero);
+                    Assert.That(service.RestartCalls, Is.Zero);
+                    Assert.That(workspace.RestartRequired, Is.True);
+                    Assert.That(workspace.HasConfirmedApplied, Is.False);
+                });
+            }
+        }
+
+        [Test]
         public async Task ServiceNotInstalledCanUseExplicitInstallAndStartFlow()
         {
             var workspace = CreateEditedWorkspace("installed.example:7080");
             using (var service = FakeServiceController.NotInstalled())
             {
                 service.InstallResult = ServiceOperationResult.Completed(StoppedStatus(), "Installed.");
-                service.StartResult = ServiceOperationResult.Completed(RunningStatus(), "Started.");
+                service.StartResult = ServiceOperationResult.Completed(RunningStatus(), "Started.",
+                    confirmsConfigurationReloaded: true);
                 var coordinator = new ConfigurationApplyCoordinator(workspace, service);
 
                 var result = await coordinator.SaveAndApplyAsync(false, _enginePath, true, false,
@@ -391,6 +612,9 @@ namespace ProxiFyre.Tests
                     Assert.That(service.InstallCalls, Is.EqualTo(1));
                     Assert.That(service.LastInstallEnginePath, Is.EqualTo(_enginePath));
                     Assert.That(service.StartCalls, Is.EqualTo(1));
+                    Assert.That(service.LastStartEnginePath, Is.EqualTo(_enginePath));
+                    Assert.That(service.LastStartPreLaunchGuard, Is.Not.Null);
+                    Assert.That(service.LastStartPreLaunchGuard(), Is.True);
                     Assert.That(service.RestartCalls, Is.Zero);
                     Assert.That(workspace.RestartRequired, Is.False);
                     Assert.That(workspace.HasConfirmedApplied, Is.True);
@@ -434,7 +658,8 @@ namespace ProxiFyre.Tests
             using (var service = FakeServiceController.NotInstalled())
             {
                 service.InstallResult = ServiceOperationResult.Completed(StoppedStatus(), "Installed.");
-                service.StartResult = ServiceOperationResult.Completed(RunningStatus(), "Started.");
+                service.StartResult = ServiceOperationResult.Completed(RunningStatus(), "Started.",
+                    confirmsConfigurationReloaded: true);
                 service.InstallDelay = TimeSpan.FromMilliseconds(80);
                 var coordinator = new ConfigurationApplyCoordinator(workspace, service);
                 var totalBudget = TimeSpan.FromSeconds(5);
@@ -564,6 +789,10 @@ namespace ProxiFyre.Tests
             public int InstallCalls { get; private set; }
             public int UninstallCalls { get; private set; }
             public string LastInstallEnginePath { get; private set; }
+            public string LastStartEnginePath { get; private set; }
+            public string LastRestartEnginePath { get; private set; }
+            public Func<bool> LastStartPreLaunchGuard { get; private set; }
+            public Func<bool> LastRestartPreLaunchGuard { get; private set; }
             public TimeSpan LastInstallTimeout { get; private set; }
             public TimeSpan LastStartTimeout { get; private set; }
 
@@ -591,10 +820,13 @@ namespace ProxiFyre.Tests
                 return Task.FromResult(Status);
             }
 
-            public Task<ServiceOperationResult> StartAsync(TimeSpan timeout, CancellationToken cancellationToken)
+            public Task<ServiceOperationResult> StartAsync(string expectedEnginePath,
+                Func<bool> preLaunchGuard, TimeSpan timeout, CancellationToken cancellationToken)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 StartCalls++;
+                LastStartEnginePath = expectedEnginePath;
+                LastStartPreLaunchGuard = preLaunchGuard;
                 LastStartTimeout = timeout;
                 if (StartResult == null)
                     throw new InvalidOperationException("The test did not configure a start result.");
@@ -608,10 +840,13 @@ namespace ProxiFyre.Tests
                 throw new InvalidOperationException("Stop was not expected in this coordinator test.");
             }
 
-            public Task<ServiceOperationResult> RestartAsync(TimeSpan timeout, CancellationToken cancellationToken)
+            public Task<ServiceOperationResult> RestartAsync(string expectedEnginePath,
+                Func<bool> preLaunchGuard, TimeSpan timeout, CancellationToken cancellationToken)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 RestartCalls++;
+                LastRestartEnginePath = expectedEnginePath;
+                LastRestartPreLaunchGuard = preLaunchGuard;
                 if (_restartResults.Count == 0)
                     throw new InvalidOperationException("The test did not configure another restart result.");
                 var result = _restartResults.Dequeue();
@@ -633,8 +868,8 @@ namespace ProxiFyre.Tests
                 return InstallResult;
             }
 
-            public Task<ServiceOperationResult> UninstallAsync(string enginePath, TimeSpan timeout,
-                CancellationToken cancellationToken)
+            public Task<ServiceOperationResult> UninstallAsync(string enginePath,
+                Func<bool> preLaunchGuard, TimeSpan timeout, CancellationToken cancellationToken)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 UninstallCalls++;
@@ -644,6 +879,41 @@ namespace ProxiFyre.Tests
             public void Dispose()
             {
             }
+        }
+
+        private sealed class ThrowingReadFileSystem : IConfigurationFileSystem
+        {
+            private readonly PhysicalConfigurationFileSystem _inner =
+                new PhysicalConfigurationFileSystem();
+
+            public bool ThrowOnRead { get; set; }
+
+            public bool FileExists(string path) => _inner.FileExists(path);
+
+            public byte[] ReadAllBytes(string path)
+            {
+                if (ThrowOnRead)
+                    throw new IOException("Deliberate fingerprint read failure.");
+                return _inner.ReadAllBytes(path);
+            }
+
+            public long GetFileLength(string path) => _inner.GetFileLength(path);
+
+            public DateTime GetLastWriteTimeUtc(string path) =>
+                _inner.GetLastWriteTimeUtc(path);
+
+            public void CreateDirectory(string path) => _inner.CreateDirectory(path);
+
+            public void DeleteFile(string path) => _inner.DeleteFile(path);
+
+            public void MoveFile(string sourcePath, string destinationPath) =>
+                _inner.MoveFile(sourcePath, destinationPath);
+
+            public void ReplaceFile(string sourcePath, string destinationPath, string backupPath) =>
+                _inner.ReplaceFile(sourcePath, destinationPath, backupPath);
+
+            public void WriteAllTextAndFlush(string path, string content) =>
+                _inner.WriteAllTextAndFlush(path, content);
         }
     }
 }

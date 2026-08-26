@@ -70,11 +70,13 @@ namespace ProxiFyreUI.Infrastructure
             if (engineLocation == null || !engineLocation.IsResolved)
                 throw new InvalidOperationException("Resolve ProxiFyre.exe before loading its configuration.");
 
-            EnginePath = engineLocation.Path;
-            ConfigurationPath = engineLocation.ConfigurationPath;
-            LogDirectoryPath = engineLocation.LogDirectoryPath;
-
-            var engineDirectory = Path.GetDirectoryName(EnginePath);
+            // Build the complete replacement state before touching the active workspace. A
+            // malformed or inaccessible configuration at a newly selected engine must not
+            // pair the previous in-memory configuration with the new engine's paths.
+            var enginePath = engineLocation.Path;
+            var configurationPath = engineLocation.ConfigurationPath;
+            var logDirectoryPath = engineLocation.LogDirectoryPath;
+            var engineDirectory = Path.GetDirectoryName(enginePath);
             var samplePath = Path.Combine(engineDirectory ?? string.Empty, ProxiFyrePaths.SampleConfigurationFileName);
             if (!File.Exists(samplePath))
             {
@@ -83,14 +85,20 @@ namespace ProxiFyreUI.Infrastructure
                 samplePath = File.Exists(adjacentSample) ? adjacentSample : null;
             }
 
-            var loaded = _fileStore.LoadOrCreate(ConfigurationPath, samplePath);
-            Configuration = loaded.Configuration ?? CreateBlankConfiguration();
-            EnsureCollections(Configuration);
+            var loaded = _fileStore.LoadOrCreate(configurationPath, samplePath);
+            var configuration = loaded.Configuration ?? CreateBlankConfiguration();
+            EnsureCollections(configuration);
+            var validation = _validator.Validate(configuration);
+
+            EnginePath = enginePath;
+            ConfigurationPath = configurationPath;
+            LogDirectoryPath = logDirectoryPath;
+            Configuration = configuration;
             _fingerprint = loaded.Fingerprint ?? FileFingerprint.Missing;
             _lastBackupPath = null;
             _lastBackupFingerprint = null;
             _lastSavedFingerprint = null;
-            LastValidation = _validator.Validate(Configuration);
+            LastValidation = validation;
             RestartRequired = false;
             HasConfirmedApplied = false;
             SetDirty(!loaded.LiveFileExists);
@@ -136,8 +144,21 @@ namespace ProxiFyreUI.Infrastructure
 
         public bool IsFingerprintCurrent(FileFingerprint expectedFingerprint)
         {
-            return HasConfigurationPath && expectedFingerprint != null &&
-                   _fileStore.GetFingerprint(ConfigurationPath) == expectedFingerprint;
+            if (!HasConfigurationPath || expectedFingerprint == null)
+                return false;
+
+            try
+            {
+                return _fileStore.GetFingerprint(ConfigurationPath) == expectedFingerprint;
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException ||
+                                       ex is InvalidOperationException || ex is ArgumentException)
+            {
+                // A fingerprint is used only to prove that the exact saved bytes are still
+                // current. If the file cannot be read, conservatively decline that proof
+                // instead of turning a completed service operation into a fatal UI error.
+                return false;
+            }
         }
 
         public ValidationResult ValidateLiveFile()
@@ -169,17 +190,17 @@ namespace ProxiFyreUI.Infrastructure
                 };
             }
 
-            if (!overwriteExternalChanges && HasExternalChanges())
-            {
-                return new WorkspaceSaveResult
-                {
-                    Status = WorkspaceSaveStatus.ExternalChangeDetected,
-                    Validation = validation
-                };
-            }
-
             try
             {
+                if (!overwriteExternalChanges && HasExternalChanges())
+                {
+                    return new WorkspaceSaveResult
+                    {
+                        Status = WorkspaceSaveStatus.ExternalChangeDetected,
+                        Validation = validation
+                    };
+                }
+
                 var normalized = _normalizer.Normalize(Configuration);
                 var normalizedValidation = _validator.Validate(normalized);
                 if (normalizedValidation.HasErrors)
@@ -341,10 +362,18 @@ namespace ProxiFyreUI.Infrastructure
             HasConfirmedApplied = true;
         }
 
+        public void InvalidateAppliedConfirmation()
+        {
+            HasConfirmedApplied = false;
+        }
+
         public bool TryMarkApplied(FileFingerprint expectedFingerprint)
         {
             if (!IsFingerprintCurrent(expectedFingerprint))
+            {
+                InvalidateAppliedConfirmation();
                 return false;
+            }
             MarkApplied();
             return true;
         }

@@ -17,7 +17,8 @@ directory is created under the system temporary directory.
 .\sign-update-release.ps1 -VersionTag 2.3.0
 
 Preflights the release, asks for confirmation, signs and verifies every shipped
-executable module, uploads the signed archives, and then removes the unsigned archives.
+executable module, uploads the signed archives, removes the unsigned archives, and
+publishes the release only after final verification.
 
 .EXAMPLE
 .\sign-update-release.ps1 -VersionTag 2.3.0 -WhatIf
@@ -56,11 +57,13 @@ $owner = "wiresock"
 $repository = "ProxiFyre"
 $releaseTag = "v$VersionTag"
 $certificateSubject = "The Anti-Cloud Corporation"
+$expectedPublicKeySha256 = "07D12F0ABEA80E9A9A71899B68E1B6CB940E58B2CAF37874CD0A62EB2E2E4C5A"
 $architectures = @("ARM64", "x64", "x86")
 $expectedFiles = @(
     "ProxiFyre.exe",
     "ProxiFyre.exe.config",
     "ProxiFyreUI.exe",
+    "ProxiFyreUI.Managed.dll",
     "ProxiFyreUI.exe.config",
     "ProxiFyre.Configuration.dll",
     "socksify.dll",
@@ -73,9 +76,153 @@ $expectedFiles = @(
 $binariesToSign = @(
     "ProxiFyre.exe",
     "ProxiFyreUI.exe",
+    "ProxiFyreUI.Managed.dll",
     "ProxiFyre.Configuration.dll",
-    "socksify.dll"
+    "socksify.dll",
+    "Newtonsoft.Json.dll",
+    "NLog.dll",
+    "Topshelf.dll"
 )
+$expectedConfigurationSha256 = [ordered]@{
+    "ProxiFyre.exe.config"   = "FEB7B159597D51A915D659A56599AA74D8B2104056B9E77F7FD9E1992600EEB4"
+    "ProxiFyreUI.exe.config" = "ECEB47269DB5D3E22728F6DC60EC05450783F8B3C29074666837B3E763E8F4A6"
+    "NLog.config"            = "BB92B3CF996D7DBCF1B94B34228F80478DD569E2CC84D44BDD994D08018917DC"
+}
+
+function Get-CertificatePublicKeySha256 {
+    param (
+        [Parameter(Mandatory = $true)]
+        [Security.Cryptography.X509Certificates.X509Certificate2]$Certificate
+    )
+
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha256.ComputeHash($Certificate.GetPublicKey())
+        return ([BitConverter]::ToString($hash)).Replace("-", "")
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function Get-ReleaseSigningCertificate {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Subject,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PublicKeySha256
+    )
+
+    $now = Get-Date
+    $matchingCertificates = @()
+    foreach ($candidate in @(Get-ChildItem -Path Cert:\CurrentUser\My)) {
+        if (-not $candidate.HasPrivateKey -or
+            $candidate.NotBefore -gt $now -or
+            $candidate.NotAfter -lt $now) {
+            continue
+        }
+
+        $simpleName = $candidate.GetNameInfo(
+            [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+            $false
+        )
+        if (-not [string]::Equals($simpleName, $Subject, [StringComparison]::Ordinal)) {
+            continue
+        }
+
+        $candidatePublicKeySha256 = Get-CertificatePublicKeySha256 -Certificate $candidate
+        if (-not [string]::Equals(
+            $candidatePublicKeySha256,
+            $PublicKeySha256,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            continue
+        }
+
+        $matchingCertificates += $candidate
+    }
+
+    if ($matchingCertificates.Count -eq 0) {
+        throw "No current-user signing certificate in Cert:\CurrentUser\My has subject '$Subject', a private key, a current validity period, and public-key SHA256 '$PublicKeySha256'."
+    }
+    if ($matchingCertificates.Count -gt 1) {
+        $thumbprints = ($matchingCertificates | ForEach-Object { $_.Thumbprint }) -join ", "
+        throw "Multiple current-user signing certificates match the pinned public key: $thumbprints. Remove the duplicate certificates before signing."
+    }
+
+    return $matchingCertificates[0]
+}
+
+function Assert-AuthenticodeSigner {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSubject,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedThumbprint,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedPublicKeySha256,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Context
+    )
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+        throw "Authenticode $Context failed for '$Path': $($signature.Status) ($($signature.StatusMessage))."
+    }
+    if ($null -eq $signature.SignerCertificate) {
+        throw "Authenticode $Context did not return a signer certificate for '$Path'."
+    }
+
+    $signer = $signature.SignerCertificate
+    $signerSubject = $signer.GetNameInfo(
+        [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+        $false
+    )
+    $signerThumbprint = ([string]$signer.Thumbprint -replace '\s', '').ToUpperInvariant()
+    $signerPublicKeySha256 = Get-CertificatePublicKeySha256 -Certificate $signer
+
+    if (-not [string]::Equals($signerSubject, $ExpectedSubject, [StringComparison]::Ordinal) -or
+        -not [string]::Equals($signerThumbprint, $ExpectedThumbprint, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals(
+            $signerPublicKeySha256,
+            $ExpectedPublicKeySha256,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Authenticode $Context for '$Path' is not bound to the selected release-signing certificate and pinned public key."
+    }
+}
+
+function Assert-ExpectedConfigurationHashes {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$RootPath,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$ExpectedHashes,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Context
+    )
+
+    foreach ($name in $ExpectedHashes.Keys) {
+        $path = Join-Path $RootPath $name
+        $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        if (-not [string]::Equals(
+            $actualHash,
+            [string]$ExpectedHashes[$name],
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "Configuration file '$name' in '$Context' has SHA256 '$actualHash'; expected '$($ExpectedHashes[$name])'. Update the runtime pin only after reviewing the configuration change."
+        }
+    }
+}
 
 function Assert-ExpectedFiles {
     param (
@@ -178,7 +325,6 @@ if (-not (Get-Module -ListAvailable PowerShellForGitHub)) {
     throw "The PowerShellForGitHub module is not installed."
 }
 Import-Module PowerShellForGitHub -ErrorAction Stop
-$webRequestSupportsBasicParsing = (Get-Command Invoke-WebRequest).Parameters.ContainsKey("UseBasicParsing")
 
 # Resolve the release and all source assets before doing any signing work. This
 # verifies GitHub authentication and prevents local work for an incomplete release.
@@ -200,16 +346,11 @@ foreach ($architecture in $architectures) {
     if ([int64]$matches[0].size -le 0) {
         throw "Release asset '$originalName' is empty."
     }
-    if ([string]::IsNullOrWhiteSpace([string]$matches[0].browser_download_url)) {
-        throw "Release asset '$originalName' has no download URL."
-    }
-
     $artifacts += [PSCustomObject]@{
         Architecture    = $architecture
         OriginalName   = $originalName
         OriginalAssetId = [int64]$matches[0].id
         OriginalLength  = [int64]$matches[0].size
-        DownloadUrl     = [string]$matches[0].browser_download_url
         SignedName      = $signedName
         SignedPath      = $null
         SignedLength    = [int64]0
@@ -239,6 +380,32 @@ if (-not $DryRun -and -not $PSCmdlet.ShouldProcess($operationTarget, $operation)
     return
 }
 
+# Tag CI creates a draft because release builds are intentionally unsigned and cannot
+# pass the production launcher's integrity policy. Keep legacy/public releases private
+# for the complete replacement transaction as well; any failure below leaves the
+# unsigned or partially updated release unpublished.
+if (-not $DryRun -and -not [bool]$release.draft) {
+    Write-Host "Moving $releaseTag back to draft while its assets are signed..."
+    Set-GitHubRelease `
+        -OwnerName $owner `
+        -RepositoryName $repository `
+        -Release ([int64]$release.id) `
+        -Draft:$true
+    $release = Get-GitHubRelease -OwnerName $owner -RepositoryName $repository -Tag $releaseTag
+    if (-not $release -or -not [bool]$release.draft) {
+        throw "Release '$releaseTag' could not be placed in draft state before signing."
+    }
+}
+
+$signingCertificate = Get-ReleaseSigningCertificate `
+    -Subject $certificateSubject `
+    -PublicKeySha256 $expectedPublicKeySha256
+$signingCertificateThumbprint = ([string]$signingCertificate.Thumbprint -replace '\s', '').ToUpperInvariant()
+if ($signingCertificateThumbprint -notmatch '^[0-9A-F]{40}$') {
+    throw "The selected signing certificate has an invalid SHA-1 thumbprint '$signingCertificateThumbprint'."
+}
+Write-Host "Using current-user signing certificate $signingCertificateThumbprint with pinned public-key SHA256 $expectedPublicKeySha256."
+
 $tempRoot = [IO.Path]::GetTempPath()
 $workspace = Join-Path $tempRoot "ProxiFyre-sign-$VersionTag-$([guid]::NewGuid().ToString('N'))"
 $dryRunOutputPath = $null
@@ -263,34 +430,45 @@ try {
         $verifyPath = Join-Path $workspace "$([IO.Path]::GetFileNameWithoutExtension($artifact.SignedName))-verify"
         $signedPath = Join-Path $workspace $artifact.SignedName
 
-        $webRequestParameters = @{
-            Uri     = $artifact.DownloadUrl
-            OutFile = $downloadPath
-        }
-        if ($webRequestSupportsBasicParsing) {
-            $webRequestParameters.UseBasicParsing = $true
-        }
-        Invoke-WebRequest @webRequestParameters
+        # Draft release assets are not available from their anonymous browser URL. Download
+        # through the module's asset API so it reuses the configured GitHub authentication.
+        Get-GitHubReleaseAsset `
+            -OwnerName $owner `
+            -RepositoryName $repository `
+            -Asset $artifact.OriginalAssetId `
+            -Path $downloadPath `
+            -Force | Out-Null
         if ([int64](Get-Item -LiteralPath $downloadPath).Length -ne $artifact.OriginalLength) {
             throw "Downloaded asset '$($artifact.OriginalName)' has an unexpected size."
         }
         Expand-Archive -LiteralPath $downloadPath -DestinationPath $extractPath -Force
         Assert-ExpectedFiles -RootPath $extractPath -Names $expectedFiles -Context $artifact.OriginalName
+        Assert-ExpectedConfigurationHashes `
+            -RootPath $extractPath `
+            -ExpectedHashes $expectedConfigurationSha256 `
+            -Context $artifact.OriginalName
 
         foreach ($name in $binariesToSign) {
             $binaryPath = Join-Path $extractPath $name
 
             Invoke-SignToolChecked -Operation "SHA-1 signing of '$name'" -Arguments @(
                 "sign", "/fd", "sha1", "/t", "http://timestamp.digicert.com",
-                "/n", $certificateSubject, $binaryPath
+                "/s", "My", "/sha1", $signingCertificateThumbprint, $binaryPath
             )
             Invoke-SignToolChecked -Operation "SHA-256 signing of '$name'" -Arguments @(
                 "sign", "/as", "/td", "sha256", "/fd", "sha256",
-                "/tr", "http://timestamp.digicert.com", "/n", $certificateSubject, $binaryPath
+                "/tr", "http://timestamp.digicert.com", "/s", "My",
+                "/sha1", $signingCertificateThumbprint, $binaryPath
             )
             Invoke-SignToolChecked -Operation "verification of '$name'" -Arguments @(
                 "verify", "/pa", "/all", "/v", $binaryPath
             )
+            Assert-AuthenticodeSigner `
+                -Path $binaryPath `
+                -ExpectedSubject $certificateSubject `
+                -ExpectedThumbprint $signingCertificateThumbprint `
+                -ExpectedPublicKeySha256 $expectedPublicKeySha256 `
+                -Context "post-sign verification"
         }
 
         $sourceFileSet = Get-RelativeFileSet -RootPath $extractPath
@@ -307,6 +485,10 @@ try {
 
         Expand-Archive -LiteralPath $signedPath -DestinationPath $verifyPath -Force
         Assert-ExpectedFiles -RootPath $verifyPath -Names $expectedFiles -Context $artifact.SignedName
+        Assert-ExpectedConfigurationHashes `
+            -RootPath $verifyPath `
+            -ExpectedHashes $expectedConfigurationSha256 `
+            -Context $artifact.SignedName
 
         $verifiedFileSet = Get-RelativeFileSet -RootPath $verifyPath
         $fileSetDifference = @(Compare-Object -ReferenceObject $sourceFileSet -DifferenceObject $verifiedFileSet)
@@ -315,9 +497,16 @@ try {
         }
 
         foreach ($name in $binariesToSign) {
+            $verifiedBinaryPath = Join-Path $verifyPath $name
             Invoke-SignToolChecked -Operation "archive verification of '$name'" -Arguments @(
-                "verify", "/pa", "/all", "/v", (Join-Path $verifyPath $name)
+                "verify", "/pa", "/all", "/v", $verifiedBinaryPath
             )
+            Assert-AuthenticodeSigner `
+                -Path $verifiedBinaryPath `
+                -ExpectedSubject $certificateSubject `
+                -ExpectedThumbprint $signingCertificateThumbprint `
+                -ExpectedPublicKeySha256 $expectedPublicKeySha256 `
+                -Context "repacked-archive verification"
         }
 
         $artifact.SignedPath = $signedPath
@@ -356,8 +545,16 @@ try {
         return
     }
 
-    # Re-check source asset IDs after signing so a concurrent release edit cannot
-    # cause this run to replace assets different from those it downloaded.
+    # Re-check the draft and source asset IDs after signing so a concurrent release
+    # edit cannot publish or replace assets different from those downloaded.
+    $currentRelease = Get-GitHubRelease `
+        -OwnerName $owner `
+        -RepositoryName $repository `
+        -Tag $releaseTag
+    if (-not $currentRelease -or [int64]$currentRelease.id -ne [int64]$release.id -or
+        -not [bool]$currentRelease.draft) {
+        throw "Release '$releaseTag' changed or was published while signing; no assets were replaced."
+    }
     $currentAssets = Get-CurrentReleaseAssets
     foreach ($artifact in $artifacts) {
         $currentOriginal = @($currentAssets | Where-Object { $_.name -eq $artifact.OriginalName })
@@ -430,7 +627,22 @@ try {
         }
     }
 
-    Write-Host "Release $releaseTag now contains the three verified signed archives."
+    Write-Host "Publishing $releaseTag with its three verified signed archives..."
+    Set-GitHubRelease `
+        -OwnerName $owner `
+        -RepositoryName $repository `
+        -Release ([int64]$release.id) `
+        -Draft:$false
+    $publishedRelease = Get-GitHubRelease `
+        -OwnerName $owner `
+        -RepositoryName $repository `
+        -Tag $releaseTag
+    if (-not $publishedRelease -or [int64]$publishedRelease.id -ne [int64]$release.id -or
+        [bool]$publishedRelease.draft) {
+        throw "The signed release assets were verified, but '$releaseTag' was not published."
+    }
+
+    Write-Host "Release $releaseTag is published with the three verified signed archives."
 }
 finally {
     try {

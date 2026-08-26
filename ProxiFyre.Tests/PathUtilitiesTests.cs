@@ -19,16 +19,39 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
-        public void UnquotedEnginePathWithSpacesAndFixedArgumentIsParsed()
+        public void UnquotedEnginePathWithSpacesIsRejectedAsAmbiguous()
+        {
+            string result;
+
+            Assert.That(ServiceImagePathParser.TryGetExecutablePath(
+                @"C:\Program Files\ProxiFyre\ProxiFyre.exe run-as-service", out result), Is.False);
+            Assert.That(result, Is.Null);
+        }
+
+        [Test]
+        public void UnquotedEnginePathWithoutSpacesCanIncludeFixedArguments()
         {
             var result = ServiceImagePathParser.GetExecutablePath(
-                @"C:\Program Files\ProxiFyre\ProxiFyre.exe run-as-service");
+                @"C:\ProxiFyre\ProxiFyre.exe run-as-service");
 
-            Assert.That(result, Is.EqualTo(@"C:\Program Files\ProxiFyre\ProxiFyre.exe"));
+            Assert.That(result, Is.EqualTo(@"C:\ProxiFyre\ProxiFyre.exe"));
+        }
+
+        [TestCase("ProxiFyre.exe")]
+        [TestCase(@".\ProxiFyre.exe")]
+        [TestCase(@"C:ProxiFyre.exe")]
+        [TestCase(@"\Program Files\ProxiFyre\ProxiFyre.exe")]
+        public void RelativeServiceImagePathsAreRejected(string value)
+        {
+            string result;
+
+            Assert.That(ServiceImagePathParser.TryGetExecutablePath(value, out result), Is.False);
+            Assert.That(result, Is.Null);
         }
 
         [TestCase("")]
         [TestCase(@"""C:\Program Files\ProxiFyre\ProxiFyre.exe --broken")]
+        [TestCase(@"""C:\Program Files\ProxiFyre\ProxiFyre.exe""unexpected")]
         [TestCase(@"C:\Program Files\ProxiFyre\not-an-executable.dll --service")]
         public void InvalidServiceImagePathIsRejected(string value)
         {

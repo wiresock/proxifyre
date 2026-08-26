@@ -110,9 +110,17 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="..\ProxiFyre.Configuration\ServiceInstallLocationPolicy.cs">
+      <Link>EngineServiceInstallLocationPolicy.cs</Link>
+    </Compile>
+    <Compile Include="NativeDependencyLoader.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);PROXIFYRE_ENGINE</DefineConstants>
+    <DefineConstants Condition="'$(Platform)' == 'x64'">$(DefineConstants);PROXIFYRE_REQUIRES_VCRUNTIME140_1</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
     <None Include="..\assets\ProxiFyre.ico">
       <Link>ProxiFyre.ico</Link>

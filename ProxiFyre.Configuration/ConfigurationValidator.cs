@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 
 namespace ProxiFyre.Configuration
 {
@@ -9,6 +10,15 @@ namespace ProxiFyre.Configuration
     /// </summary>
     public sealed class ConfigurationValidator
     {
+        /// <summary>
+        /// RFC 1929 stores each authentication field behind a single-byte length.
+        /// The C++/CLI bridge marshals managed credentials through the Windows ANSI
+        /// encoding before enforcing this limit.
+        /// </summary>
+        public const int Socks5CredentialMaximumEncodedBytes = 255;
+
+        private const uint ThreadAnsiCodePage = 3;
+        private const uint NoBestFitCharacters = 0x00000400;
         private static readonly string[] SupportedLogLevels = { "Error", "Warning", "Info", "Debug", "All" };
 
         public ValidationResult Validate(ProxiFyreConfiguration configuration)
@@ -152,11 +162,63 @@ namespace ProxiFyre.Configuration
                     index));
             }
 
+            ValidateCredentialLength(
+                rule.Username,
+                "AUTH_USERNAME_TOO_LONG",
+                "The username must encode to no more than 255 bytes for SOCKS5 authentication.",
+                prefix + ".username",
+                index,
+                issues);
+            ValidateCredentialLength(
+                rule.Password,
+                "AUTH_PASSWORD_TOO_LONG",
+                "The password must encode to no more than 255 bytes for SOCKS5 authentication.",
+                prefix + ".password",
+                index,
+                issues);
+
             ValidateApplications(rule.AppNames, prefix, index, issues);
             ValidateProtocols(rule.SupportedProtocols, prefix, index, issues);
             ValidateAddressFamilies(rule.SupportedAddressFamilies, prefix, index, issues);
             ValidateTransportAndTls(rule, prefix, index, issues);
         }
+
+        private static void ValidateCredentialLength(
+            string value,
+            string code,
+            string message,
+            string path,
+            int? ruleIndex,
+            ICollection<ValidationIssue> issues)
+        {
+            if (string.IsNullOrEmpty(value))
+                return;
+
+            // These arguments match msclr::interop::marshal_as<std::string>, so the
+            // service validates the bytes its unmanaged SOCKS5 layer will receive.
+            var encodedByteCount = WideCharToMultiByte(
+                ThreadAnsiCodePage,
+                NoBestFitCharacters,
+                value,
+                value.Length,
+                IntPtr.Zero,
+                0,
+                IntPtr.Zero,
+                IntPtr.Zero);
+            if (encodedByteCount == 0 || encodedByteCount > Socks5CredentialMaximumEncodedBytes)
+                issues.Add(Error(code, message, path, ruleIndex));
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        private static extern int WideCharToMultiByte(
+            uint codePage,
+            uint flags,
+            string wideCharacters,
+            int wideCharacterCount,
+            IntPtr multiByteCharacters,
+            int multiByteCharacterCapacity,
+            IntPtr defaultCharacter,
+            IntPtr usedDefaultCharacter);
 
         private static void ValidateApplications(
             IList<string> appNames,

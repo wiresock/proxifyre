@@ -76,6 +76,7 @@
     <Compile Include="EndpointParser.cs" />
     <Compile Include="Models.cs" />
     <Compile Include="PathUtilities.cs" />
+    <Compile Include="ServiceInstallLocationPolicy.cs" />
     <Compile Include="Validation.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>

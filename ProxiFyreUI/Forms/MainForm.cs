@@ -36,8 +36,13 @@ namespace ProxiFyreUI.Forms
         private bool _engineStartupFailed;
         private bool _packetFilterUnavailable;
         private bool _exiting;
+        private bool _exitRequested;
+        private bool _exitCloseScheduled;
         private bool _cleanedUp;
+        private int _operationDepth;
+        private int _configurationDialogDepth;
         private int _refreshingStatus;
+        private int _logViewGeneration;
 
         public MainForm()
             : this(new UiSettingsStore(), new EngineLocator(), new ProxiFyreServiceController(),
@@ -56,7 +61,8 @@ namespace ProxiFyreUI.Forms
             _logTailer = logTailer;
             _diagnosticsBuilder = diagnosticsBuilder;
             _errorFormatter = new UserVisibleErrorFormatter(_diagnosticsBuilder);
-            _applyCoordinator = new ConfigurationApplyCoordinator(_workspace, _serviceController);
+            _applyCoordinator = new ConfigurationApplyCoordinator(_workspace, _serviceController,
+                IsRegisteredServiceEngine);
             _settings = _settingsStore.Load();
 
             InitializeComponent();
@@ -111,9 +117,23 @@ namespace ProxiFyreUI.Forms
 
         private void LoadWorkspace()
         {
+            var previousEnginePath = _workspace.EnginePath;
             var loaded = _workspace.Load(_engineLocation);
+            CompleteWorkspaceLoad(loaded, previousEnginePath);
+        }
+
+        private void CompleteWorkspaceLoad(WorkspaceLoadResult loaded, string previousEnginePath)
+        {
             BindConfiguration();
-            StartLogTailerIfNeeded();
+            if (!PathsEqual(previousEnginePath, _workspace.EnginePath))
+            {
+                ResetLogViewForEngineChange();
+                StartLogTailerIfNeeded();
+            }
+            else if (followLogsCheckBox.Checked && !_logTailer.IsRunning)
+            {
+                StartLogTailerIfNeeded();
+            }
             if (!loaded.LiveFileExists)
             {
                 var source = loaded.LoadedFromSample
@@ -210,10 +230,49 @@ namespace ProxiFyreUI.Forms
 
         private void MarkConfigurationChanged()
         {
+            // Busy-state checks belong before a mutation. Once the model has changed it must
+            // always be marked dirty, including when a modal dialog's nested message loop let
+            // a service operation begin between the initial guard and the commit.
             if (_suppressChanges)
                 return;
             _workspace.MarkDirty();
             UpdateAllStates();
+        }
+
+        private bool CanCommitDialogMutation(ProxiFyreConfiguration configuration)
+        {
+            if (!ConfigurationMutationBlocked && ReferenceEquals(_workspace.Configuration, configuration))
+                return true;
+
+            statusStripLabel.Text =
+                "The edit was not applied because a service or configuration operation occurred while the dialog was open.";
+            return false;
+        }
+
+        private DialogResult ShowConfigurationDialog(Form dialog)
+        {
+            return ShowConfigurationDialog(() => dialog.ShowDialog(this));
+        }
+
+        private DialogResult ShowConfigurationDialog(CommonDialog dialog)
+        {
+            return ShowConfigurationDialog(() => dialog.ShowDialog(this));
+        }
+
+        private DialogResult ShowConfigurationDialog(Func<DialogResult> showDialog)
+        {
+            _configurationDialogDepth++;
+            UpdateAllStates();
+            try
+            {
+                return showDialog();
+            }
+            finally
+            {
+                _configurationDialogDepth--;
+                UpdateAllStates();
+                ScheduleDeferredExitIfReady();
+            }
         }
 
         private void Workspace_DirtyStateChanged(object sender, EventArgs e)
@@ -223,7 +282,7 @@ namespace ProxiFyreUI.Forms
 
         private void RootConfigurationControlChanged(object sender, EventArgs e)
         {
-            if (_suppressChanges || _workspace.Configuration == null)
+            if (_suppressChanges || ConfigurationMutationBlocked || _workspace.Configuration == null)
                 return;
             ReadRootControlsIntoConfiguration();
             MarkConfigurationChanged();
@@ -241,32 +300,40 @@ namespace ProxiFyreUI.Forms
 
         private void AddRuleButton_Click(object sender, EventArgs e)
         {
-            if (!EnsureWorkspaceAvailable())
+            if (ConfigurationMutationBlocked || !EnsureWorkspaceAvailable())
                 return;
-            var count = _workspace.Configuration.Proxies.Count;
+            var configuration = _workspace.Configuration;
+            var count = configuration.Proxies.Count;
             using (var editor = new ProxyRuleEditorForm(null, count, count + 1))
             {
                 editor.Text = "Add proxy rule";
-                if (editor.ShowDialog(this) != DialogResult.OK)
+                if (ShowConfigurationDialog(editor) != DialogResult.OK)
                     return;
-                _workspace.Configuration.Proxies.Add(editor.ResultRule);
+                if (!CanCommitDialogMutation(configuration))
+                    return;
+                configuration.Proxies.Add(editor.ResultRule);
                 MarkConfigurationChanged();
-                RefreshRoutingGrid(_workspace.Configuration.Proxies.Count - 1);
+                RefreshRoutingGrid(configuration.Proxies.Count - 1);
             }
         }
 
         private void EditRuleButton_Click(object sender, EventArgs e)
         {
+            if (ConfigurationMutationBlocked)
+                return;
             var index = SelectedRuleIndex;
             if (index < 0 || _workspace.Configuration?.Proxies == null)
                 return;
-            using (var editor = new ProxyRuleEditorForm(_workspace.Configuration.Proxies[index], index,
-                _workspace.Configuration.Proxies.Count))
+            var configuration = _workspace.Configuration;
+            using (var editor = new ProxyRuleEditorForm(configuration.Proxies[index], index,
+                configuration.Proxies.Count))
             {
                 editor.Text = "Edit proxy rule";
-                if (editor.ShowDialog(this) != DialogResult.OK)
+                if (ShowConfigurationDialog(editor) != DialogResult.OK)
                     return;
-                _workspace.Configuration.Proxies[index] = editor.ResultRule;
+                if (!CanCommitDialogMutation(configuration))
+                    return;
+                configuration.Proxies[index] = editor.ResultRule;
                 MarkConfigurationChanged();
                 RefreshRoutingGrid(index);
             }
@@ -274,6 +341,8 @@ namespace ProxiFyreUI.Forms
 
         private void DuplicateRuleButton_Click(object sender, EventArgs e)
         {
+            if (ConfigurationMutationBlocked)
+                return;
             var index = SelectedRuleIndex;
             if (index < 0 || _workspace.Configuration?.Proxies == null)
                 return;
@@ -286,19 +355,26 @@ namespace ProxiFyreUI.Forms
 
         private void RemoveRuleButton_Click(object sender, EventArgs e)
         {
+            if (ConfigurationMutationBlocked)
+                return;
             var index = SelectedRuleIndex;
             if (index < 0 || _workspace.Configuration?.Proxies == null)
                 return;
+            var configuration = _workspace.Configuration;
             if (MessageBox.Show(this, "Remove the selected proxy rule?", "Remove proxy rule",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                 return;
-            _workspace.Configuration.Proxies.RemoveAt(index);
+            if (!CanCommitDialogMutation(configuration))
+                return;
+            configuration.Proxies.RemoveAt(index);
             MarkConfigurationChanged();
-            RefreshRoutingGrid(Math.Min(index, _workspace.Configuration.Proxies.Count - 1));
+            RefreshRoutingGrid(Math.Min(index, configuration.Proxies.Count - 1));
         }
 
         private void MoveRule(int direction)
         {
+            if (ConfigurationMutationBlocked)
+                return;
             var index = SelectedRuleIndex;
             var target = index + direction;
             var rules = _workspace.Configuration?.Proxies;
@@ -316,7 +392,7 @@ namespace ProxiFyreUI.Forms
 
         private void RoutingGrid_CellDoubleClick(object sender, DataGridViewCellEventArgs e)
         {
-            if (e.RowIndex >= 0)
+            if (!ConfigurationMutationBlocked && e.RowIndex >= 0)
                 EditRuleButton_Click(sender, EventArgs.Empty);
         }
 
@@ -327,6 +403,11 @@ namespace ProxiFyreUI.Forms
 
         private void RoutingGrid_KeyDown(object sender, KeyEventArgs e)
         {
+            if (ConfigurationMutationBlocked)
+            {
+                e.SuppressKeyPress = true;
+                return;
+            }
             if (e.KeyCode == Keys.Delete)
             {
                 RemoveRuleButton_Click(sender, EventArgs.Empty);
@@ -348,58 +429,70 @@ namespace ProxiFyreUI.Forms
         {
             var index = SelectedRuleIndex;
             var count = _workspace.Configuration?.Proxies?.Count ?? 0;
-            editRuleButton.Enabled = !_operationInProgress && index >= 0;
-            duplicateRuleButton.Enabled = !_operationInProgress && index >= 0;
-            removeRuleButton.Enabled = !_operationInProgress && index >= 0;
-            moveUpRuleButton.Enabled = !_operationInProgress && index > 0;
-            moveDownRuleButton.Enabled = !_operationInProgress && index >= 0 && index < count - 1;
-            addRuleButton.Enabled = !_operationInProgress && _workspace.Configuration != null;
+            var canEdit = !ConfigurationMutationBlocked;
+            editRuleButton.Enabled = canEdit && index >= 0;
+            duplicateRuleButton.Enabled = canEdit && index >= 0;
+            removeRuleButton.Enabled = canEdit && index >= 0;
+            moveUpRuleButton.Enabled = canEdit && index > 0;
+            moveDownRuleButton.Enabled = canEdit && index >= 0 && index < count - 1;
+            addRuleButton.Enabled = canEdit && _workspace.Configuration != null;
+            routingGrid.Enabled = canEdit;
         }
 
         private void AddRunningExclusionButton_Click(object sender, EventArgs e)
         {
-            if (!EnsureWorkspaceAvailable())
+            if (ConfigurationMutationBlocked || !EnsureWorkspaceAvailable())
                 return;
+            var configuration = _workspace.Configuration;
             using (var picker = new ProcessPickerForm())
             {
-                if (picker.ShowDialog(this) == DialogResult.OK)
-                    AddExclusions(picker.SelectedEntries);
+                if (ShowConfigurationDialog(picker) == DialogResult.OK)
+                    AddExclusions(configuration, picker.SelectedEntries);
             }
         }
 
         private void AddExecutableExclusionButton_Click(object sender, EventArgs e)
         {
+            if (ConfigurationMutationBlocked || !EnsureWorkspaceAvailable())
+                return;
+            var configuration = _workspace.Configuration;
             using (var dialog = CreateExecutableDialog())
             {
-                if (dialog.ShowDialog(this) == DialogResult.OK)
-                    AddExclusions(dialog.FileNames.Select(Path.GetFileName));
+                if (ShowConfigurationDialog(dialog) == DialogResult.OK)
+                    AddExclusions(configuration, dialog.FileNames.Select(Path.GetFileName));
             }
         }
 
         private void AddPathExclusionButton_Click(object sender, EventArgs e)
         {
+            if (ConfigurationMutationBlocked || !EnsureWorkspaceAvailable())
+                return;
+            var configuration = _workspace.Configuration;
             using (var dialog = CreateExecutableDialog())
             {
-                if (dialog.ShowDialog(this) == DialogResult.OK)
-                    AddExclusions(dialog.FileNames);
+                if (ShowConfigurationDialog(dialog) == DialogResult.OK)
+                    AddExclusions(configuration, dialog.FileNames);
             }
         }
 
         private void AddManualExclusionButton_Click(object sender, EventArgs e)
         {
+            if (ConfigurationMutationBlocked || !EnsureWorkspaceAvailable())
+                return;
+            var configuration = _workspace.Configuration;
             using (var dialog = new InputDialog("Add exclusion",
                 "Enter a process name or path substring. Exclusion matching is deliberately permissive:"))
             {
-                if (dialog.ShowDialog(this) == DialogResult.OK)
-                    AddExclusions(new[] { dialog.Value });
+                if (ShowConfigurationDialog(dialog) == DialogResult.OK)
+                    AddExclusions(configuration, new[] { dialog.Value });
             }
         }
 
-        private void AddExclusions(IEnumerable<string> values)
+        private void AddExclusions(ProxiFyreConfiguration configuration, IEnumerable<string> values)
         {
-            if (!EnsureWorkspaceAvailable())
+            if (!CanCommitDialogMutation(configuration))
                 return;
-            var exclusions = _workspace.Configuration.Excludes;
+            var exclusions = configuration.Excludes;
             var added = false;
             foreach (var value in values.Where(value => !string.IsNullOrWhiteSpace(value)))
             {
@@ -416,19 +509,29 @@ namespace ProxiFyreUI.Forms
 
         private void RemoveExclusionButton_Click(object sender, EventArgs e)
         {
+            if (ConfigurationMutationBlocked)
+                return;
             var index = exclusionsListBox.SelectedIndex;
             if (index < 0 || _workspace.Configuration?.Excludes == null)
                 return;
+            var configuration = _workspace.Configuration;
             if (MessageBox.Show(this, "Remove the selected exclusion?", "Remove exclusion",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                 return;
-            _workspace.Configuration.Excludes.RemoveAt(index);
+            if (!CanCommitDialogMutation(configuration))
+                return;
+            configuration.Excludes.RemoveAt(index);
             MarkConfigurationChanged();
-            RefreshExclusionsList(Math.Min(index, _workspace.Configuration.Excludes.Count - 1));
+            RefreshExclusionsList(Math.Min(index, configuration.Excludes.Count - 1));
         }
 
         private void ExclusionsListBox_KeyDown(object sender, KeyEventArgs e)
         {
+            if (ConfigurationMutationBlocked)
+            {
+                e.SuppressKeyPress = true;
+                return;
+            }
             if (e.KeyCode == Keys.Delete)
             {
                 RemoveExclusionButton_Click(sender, EventArgs.Empty);
@@ -440,15 +543,38 @@ namespace ProxiFyreUI.Forms
 
         private void UpdateExclusionButtons()
         {
-            removeExclusionButton.Enabled = !_operationInProgress && exclusionsListBox.SelectedIndex >= 0;
+            var canEdit = !ConfigurationMutationBlocked && _workspace.Configuration != null;
+            addRunningExclusionButton.Enabled = canEdit;
+            addExecutableExclusionButton.Enabled = canEdit;
+            addPathExclusionButton.Enabled = canEdit;
+            addManualExclusionButton.Enabled = canEdit;
+            removeExclusionButton.Enabled = canEdit && exclusionsListBox.SelectedIndex >= 0;
+            exclusionsListBox.Enabled = canEdit;
         }
 
         private async void StartServiceButton_Click(object sender, EventArgs e)
         {
-            if (!CanUseSavedConfiguration("start"))
+            if (_operationInProgress)
                 return;
-            await RunServiceOperationAsync(() => _serviceController.StartAsync(
-                ApplicationConstants.ServiceOperationTimeout, _lifetimeCancellation.Token), true);
+
+            SetOperationState(true);
+            try
+            {
+                if (!await EnsureInstalledServiceEngineCurrentAsync("start") ||
+                    !CanUseSavedConfiguration("start"))
+                    return;
+                var expectedEnginePath = _workspace.EnginePath;
+                Func<bool> registrationGuard = () =>
+                    IsRegisteredServiceEngine(expectedEnginePath);
+                await RunServiceOperationAsync(() => _serviceController.StartAsync(
+                        expectedEnginePath, registrationGuard,
+                        ApplicationConstants.ServiceOperationTimeout, _lifetimeCancellation.Token), true,
+                    true, expectedEnginePath, registrationGuard);
+            }
+            finally
+            {
+                SetOperationState(false);
+            }
         }
 
         private async void StopServiceButton_Click(object sender, EventArgs e)
@@ -459,18 +585,46 @@ namespace ProxiFyreUI.Forms
 
         private async void RestartServiceButton_Click(object sender, EventArgs e)
         {
-            if (!CanUseSavedConfiguration("restart"))
+            if (_operationInProgress)
                 return;
-            await RunServiceOperationAsync(() => _serviceController.RestartAsync(
-                ApplicationConstants.ServiceOperationTimeout, _lifetimeCancellation.Token), true);
+
+            SetOperationState(true);
+            try
+            {
+                if (!await EnsureInstalledServiceEngineCurrentAsync("restart") ||
+                    !CanUseSavedConfiguration("restart"))
+                    return;
+                var expectedEnginePath = _workspace.EnginePath;
+                Func<bool> registrationGuard = () =>
+                    IsRegisteredServiceEngine(expectedEnginePath);
+                await RunServiceOperationAsync(() => _serviceController.RestartAsync(
+                        expectedEnginePath, registrationGuard,
+                        ApplicationConstants.ServiceOperationTimeout, _lifetimeCancellation.Token), true,
+                    true, expectedEnginePath, registrationGuard);
+            }
+            finally
+            {
+                SetOperationState(false);
+            }
         }
 
         private async void InstallServiceButton_Click(object sender, EventArgs e)
         {
-            await InstallServiceAsync(false);
+            if (_operationInProgress)
+                return;
+
+            SetOperationState(true);
+            try
+            {
+                await InstallServiceAsync();
+            }
+            finally
+            {
+                SetOperationState(false);
+            }
         }
 
-        private async Task<bool> InstallServiceAsync(bool startAfterInstall)
+        private async Task<bool> InstallServiceAsync()
         {
             await RefreshServiceStatusAsync();
             if (!_serviceStatus.IsInstallationKnown)
@@ -495,67 +649,164 @@ namespace ProxiFyreUI.Forms
 
             var installed = await RunServiceOperationAsync(() => _serviceController.InstallAsync(
                 _engineLocation.Path, ApplicationConstants.ServiceOperationTimeout, _lifetimeCancellation.Token), false);
-            if (!installed || !startAfterInstall)
-                return installed;
-
-            return await RunServiceOperationAsync(() => _serviceController.StartAsync(
-                ApplicationConstants.ServiceOperationTimeout, _lifetimeCancellation.Token), true);
+            return installed;
         }
 
         private async void UninstallServiceButton_Click(object sender, EventArgs e)
         {
-            await RefreshServiceStatusAsync();
-            if (!_serviceStatus.IsInstallationKnown)
-            {
-                MessageBox.Show(this,
-                    "The Windows service installation state could not be verified. No uninstall command was run.",
-                    "Service state unavailable", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            if (!_serviceStatus.IsInstalled)
-            {
-                MessageBox.Show(this, "The ProxiFyre service is not installed.",
-                    "Service not installed", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-            if (_engineLocation == null || !_engineLocation.IsResolved)
-            {
-                MessageBox.Show(this,
-                    "The installed service executable is missing or could not be verified as a trusted ProxiFyre.exe. " +
-                    "Repair the service registration or restore the registered executable before uninstalling it.",
-                    "Trusted engine unavailable", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            if (MessageBox.Show(this,
-                "Uninstall the ProxiFyre Windows service?\r\n\r\nThe configuration, backup, and log files will not be deleted.",
-                "Uninstall service", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            if (_operationInProgress)
                 return;
 
-            await RunServiceOperationAsync(() => _serviceController.UninstallAsync(
-                _engineLocation.Path, ApplicationConstants.ServiceOperationTimeout, _lifetimeCancellation.Token), false);
+            SetOperationState(true);
+            try
+            {
+                var verifiedStatus = await GetServiceStatusForMutationAsync();
+                if (verifiedStatus == null)
+                    return;
+                if (!verifiedStatus.IsInstalled)
+                {
+                    MessageBox.Show(this, "The ProxiFyre service is not installed.",
+                        "Service not installed", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                string registrationSnapshot;
+                try
+                {
+                    registrationSnapshot = _engineLocator.GetRegisteredServiceImagePath();
+                }
+                catch (Exception ex)
+                {
+                    ShowError("The service registration could not be read. No uninstall command was run.", ex);
+                    return;
+                }
+                EngineLocation registeredEngine;
+                try
+                {
+                    registeredEngine = _engineLocator.Resolve(_settings);
+                }
+                catch (Exception ex)
+                {
+                    ShowError("The registered service executable could not be resolved. " +
+                              "No uninstall command was run.", ex);
+                    return;
+                }
+                var useRegisteredEngine = registeredEngine.Source ==
+                                          ProxiFyreUI.Infrastructure.EngineLocationSource.ServiceRegistration &&
+                                          registeredEngine.IsResolved;
+                var uninstallEngine = registeredEngine;
+                Func<bool> registrationSnapshotGuard;
+                string expectedRegisteredEnginePath = null;
+
+                if (useRegisteredEngine)
+                {
+                    registrationSnapshotGuard = () =>
+                        IsServiceRegistrationSnapshotCurrent(registrationSnapshot);
+                    expectedRegisteredEnginePath = registeredEngine.Path;
+                    if (MessageBox.Show(this,
+                        "Uninstall the ProxiFyre Windows service?\r\n\r\nThe configuration, backup, and log files will not be deleted.",
+                        "Uninstall service", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                        MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                        return;
+                }
+                else
+                {
+                    uninstallEngine = _engineLocator.ResolveTrustedUninstallFallback(_settings,
+                        _engineLocation?.Path);
+                    if (!uninstallEngine.IsResolved)
+                        uninstallEngine = BrowseForTrustedUninstallEngine();
+                    if (uninstallEngine == null || !uninstallEngine.IsResolved)
+                        return;
+
+                    var registrationProblem = !string.IsNullOrWhiteSpace(registeredEngine.Error)
+                        ? registeredEngine.Error
+                        : "The installed service does not contain a usable registered executable path.";
+                    var fallbackMessage = registrationProblem + "\r\n\r\n" +
+                        "To remove the broken service registration, ProxiFyreUI can use this separately trusted executable:\r\n\r\n" +
+                        uninstallEngine.Path + "\r\n\r\n" +
+                        "It will be launched only with the single fixed argument: uninstall\r\n" +
+                        "No command-line arguments from the service registration will be used. " +
+                        "The configuration, backup, and log files will not be deleted.\r\n\r\nContinue?";
+                    if (MessageBox.Show(this, fallbackMessage, "Use trusted fallback to uninstall service",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                        MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                        return;
+
+                    var finalStatus = await GetServiceStatusForMutationAsync();
+                    if (finalStatus == null || !finalStatus.IsInstalled)
+                    {
+                        MessageBox.Show(this,
+                            "The service installation changed before uninstall could begin. No command was run.",
+                            "Service state changed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    if (!IsBrokenServiceRegistrationSnapshotCurrent(registrationSnapshot))
+                    {
+                        ShowServiceEngineChanged("The service registration or registered executable changed while " +
+                                                 "uninstall was being confirmed. No command was run; review the " +
+                                                 "current registration and try again.");
+                        return;
+                    }
+                    registrationSnapshotGuard = () =>
+                        IsBrokenServiceRegistrationSnapshotCurrent(registrationSnapshot);
+                }
+
+                await RunServiceOperationAsync(() => _serviceController.UninstallAsync(
+                        uninstallEngine.Path, registrationSnapshotGuard,
+                        ApplicationConstants.ServiceOperationTimeout, _lifetimeCancellation.Token),
+                    false, true, expectedRegisteredEnginePath,
+                    registrationSnapshotGuard);
+            }
+            finally
+            {
+                SetOperationState(false);
+            }
         }
 
         private async Task<bool> RunServiceOperationAsync(Func<Task<ServiceOperationResult>> operation,
-            bool marksAppliedOnSuccess, bool showSuccess = true)
+            bool marksAppliedOnSuccess, bool showSuccess = true,
+            string expectedRegisteredEnginePath = null,
+            Func<bool> serviceRegistrationGuard = null)
         {
             var expectedConfiguration = marksAppliedOnSuccess ? _workspace.CurrentFingerprint : null;
             SetOperationState(true);
             try
             {
+                if (!string.IsNullOrWhiteSpace(expectedRegisteredEnginePath) &&
+                    !IsRegisteredServiceEngine(expectedRegisteredEnginePath))
+                {
+                    ShowServiceEngineChanged("The service operation was not started because the registered " +
+                                             "ProxiFyre executable changed. Refresh the engine location and try again.");
+                    return false;
+                }
+                if (serviceRegistrationGuard != null && !serviceRegistrationGuard())
+                {
+                    ShowServiceEngineChanged("The service registration or registered executable changed before " +
+                                             "the operation could begin. No command was run; review the current " +
+                                             "registration and try again.");
+                    return false;
+                }
+
                 var result = await operation();
-                _serviceStatus = result.Status ?? await _serviceController.GetStatusAsync(_lifetimeCancellation.Token);
+                ObserveServiceStatus(result.Status ??
+                    await _serviceController.GetStatusAsync(_lifetimeCancellation.Token));
                 if (result.Success)
                 {
-                    _engineStartupFailed = false;
-                    _packetFilterUnavailable = false;
+                    ClearServiceFailureIndicators();
+                    var engineStillCurrent = !marksAppliedOnSuccess ||
+                                             IsRegisteredServiceEngine(expectedRegisteredEnginePath);
                     var appliedStateConfirmed = !marksAppliedOnSuccess ||
-                                                (_serviceStatus.IsRunning &&
+                                                (result.ConfirmsConfigurationReloaded &&
+                                                 engineStillCurrent && _serviceStatus.IsRunning &&
                                                  _workspace.TryMarkApplied(expectedConfiguration));
                     if (!appliedStateConfirmed)
                     {
-                        statusStripLabel.Text =
-                            "The service operation completed, but the saved configuration could not be confirmed as applied.";
+                        _workspace.InvalidateAppliedConfirmation();
+                        statusStripLabel.Text = !engineStillCurrent
+                            ? "The service operation completed, but the registered executable changed; apply state is unknown."
+                            : !result.ConfirmsConfigurationReloaded
+                                ? "The service is running, but this operation did not reload app-config.json. Restart it to apply and confirm the saved configuration."
+                                : "The service operation completed, but the saved configuration could not be confirmed as applied.";
                     }
                     else if (showSuccess)
                     {
@@ -564,13 +815,7 @@ namespace ProxiFyreUI.Forms
                 }
                 else
                 {
-                    var dependencyUnavailable =
-                        result.FailureKind == ServiceOperationFailureKind.DependencyUnavailable;
-                    if (marksAppliedOnSuccess || dependencyUnavailable)
-                    {
-                        _engineStartupFailed = true;
-                        _packetFilterUnavailable = dependencyUnavailable;
-                    }
+                    RecordServiceFailure(result);
                     statusStripLabel.Text = result.Message ?? "The service operation failed.";
                     ShowServiceFailure(result);
                 }
@@ -602,16 +847,24 @@ namespace ProxiFyreUI.Forms
 
         private void ReloadButton_Click(object sender, EventArgs e)
         {
-            if (!ConfirmDiscardUnsaved("reload the configuration from disk"))
+            if (ConfigurationMutationBlocked)
                 return;
+
+            SetOperationState(true);
             try
             {
+                if (!ConfirmDiscardUnsaved("reload the configuration from disk"))
+                    return;
                 LoadWorkspace();
                 statusStripLabel.Text = "Configuration reloaded from disk.";
             }
             catch (Exception ex)
             {
                 ShowError("The configuration could not be reloaded.", ex);
+            }
+            finally
+            {
+                SetOperationState(false);
             }
         }
 
@@ -631,13 +884,24 @@ namespace ProxiFyreUI.Forms
 
         private void SaveButton_Click(object sender, EventArgs e)
         {
-            var save = SaveWithPrompts();
-            if (save?.Status == WorkspaceSaveStatus.Saved)
+            if (ConfigurationMutationBlocked)
+                return;
+
+            SetOperationState(true);
+            try
             {
-                statusStripLabel.Text = _serviceStatus.IsRunning
-                    ? "Configuration saved. Restart the service to apply it."
-                    : "Configuration saved. It will be used on the next service start.";
-                UpdateAllStates();
+                var save = SaveWithPrompts();
+                if (save?.Status == WorkspaceSaveStatus.Saved)
+                {
+                    statusStripLabel.Text = _serviceStatus.IsRunning
+                        ? "Configuration saved. Restart the service to apply it."
+                        : "Configuration saved. It will be used on the next service start.";
+                    UpdateAllStates();
+                }
+            }
+            finally
+            {
+                SetOperationState(false);
             }
         }
 
@@ -653,6 +917,9 @@ namespace ProxiFyreUI.Forms
             SetOperationState(true);
             try
             {
+                if (!await EnsureInstalledServiceEngineCurrentAsync("apply the configuration"))
+                    return;
+
                 var save = SaveWithPrompts();
                 if (save == null || save.Status != WorkspaceSaveStatus.Saved)
                     return;
@@ -690,8 +957,7 @@ namespace ProxiFyreUI.Forms
 
                 if (applied.Outcome == ConfigurationApplyOutcome.Applied)
                 {
-                    _engineStartupFailed = false;
-                    _packetFilterUnavailable = false;
+                    ClearServiceFailureIndicators();
                     statusStripLabel.Text = "Configuration applied; the service reports Running.";
                     UpdateAllStates();
                     return;
@@ -704,12 +970,27 @@ namespace ProxiFyreUI.Forms
                     return;
                 }
 
+                if (applied.Outcome == ConfigurationApplyOutcome.ServiceEngineChanged)
+                {
+                    ShowServiceEngineChanged(applied.ServiceResult == null
+                        ? "The registered ProxiFyre executable changed before the service operation. No service change was attempted."
+                        : "The registered ProxiFyre executable changed during the service operation. The saved configuration was not marked as applied.");
+                    return;
+                }
+
+                if (applied.Outcome == ConfigurationApplyOutcome.ConfigurationReloadNotConfirmed)
+                {
+                    statusStripLabel.Text =
+                        "The service is running, but it was already started elsewhere and this apply did not reload app-config.json. Run Apply & Restart again.";
+                    UpdateAllStates();
+                    return;
+                }
+
                 if (applied.Outcome == ConfigurationApplyOutcome.DependencyUnavailable)
                 {
                     if (applied.ServiceResult != null)
                         ShowServiceFailure(applied.ServiceResult);
-                    _engineStartupFailed = true;
-                    _packetFilterUnavailable = true;
+                    RecordServiceFailure(applied.ServiceResult);
                     statusStripLabel.Text =
                         "Configuration saved, but Windows Packet Filter is unavailable. No configuration rollback was attempted.";
                     UpdateAllStates();
@@ -720,6 +1001,7 @@ namespace ProxiFyreUI.Forms
                 {
                     if (applied.ServiceResult != null)
                         ShowServiceFailure(applied.ServiceResult);
+                    RecordServiceFailure(applied.ServiceResult);
                     statusStripLabel.Text = "Configuration saved, but the service could not be installed. The backup was kept.";
                     UpdateAllStates();
                     return;
@@ -729,7 +1011,8 @@ namespace ProxiFyreUI.Forms
                 {
                     if (applied.ServiceResult != null)
                         ShowServiceFailure(applied.ServiceResult);
-                    statusStripLabel.Text =
+                    RecordServiceFailure(applied.ServiceResult);
+                    statusStripLabel.Text = applied.ServiceResult?.Message ??
                         "Configuration saved, but the Windows service state could not be verified. No service change was attempted.";
                     UpdateAllStates();
                     return;
@@ -755,12 +1038,11 @@ namespace ProxiFyreUI.Forms
 
                 if (applied.ServiceResult != null)
                     ShowServiceFailure(applied.ServiceResult);
-                _engineStartupFailed = true;
-                _packetFilterUnavailable = false;
+                RecordServiceFailure(applied.ServiceResult);
 
                 if (!save.BackupCreated || string.IsNullOrWhiteSpace(save.BackupPath))
                 {
-                    statusStripLabel.Text = "Configuration saved, but service startup failed. No previous live file was available to roll back.";
+                    statusStripLabel.Text = "Configuration saved, but the service restart failed. No previous live file was available to roll back.";
                     return;
                 }
 
@@ -771,7 +1053,7 @@ namespace ProxiFyreUI.Forms
                     MessageBoxDefaultButton.Button1);
                 if (rollback != DialogResult.Yes)
                 {
-                    statusStripLabel.Text = "Configuration saved, but service startup failed. The backup was kept for recovery.";
+                    statusStripLabel.Text = "Configuration saved, but the service restart failed. The backup was kept for recovery.";
                     return;
                 }
 
@@ -800,8 +1082,38 @@ namespace ProxiFyreUI.Forms
 
                 if (rolledBack.Outcome == ConfigurationApplyOutcome.RolledBackConfigurationChanged)
                 {
+                    // TryRollback already replaced the working model with the backup. Keep the
+                    // controls in sync even though the live file then changed again externally.
+                    BindConfiguration();
                     statusStripLabel.Text =
                         "The rollback file changed during restart; applied state is unknown. Reload from disk.";
+                    UpdateAllStates();
+                    return;
+                }
+
+                if (rolledBack.Outcome == ConfigurationApplyOutcome.ServiceEngineChanged)
+                {
+                    ShowServiceEngineChanged(
+                        "The registered ProxiFyre executable changed before rollback. The saved configuration remains pending.");
+                    BindConfiguration();
+                    return;
+                }
+
+                if (rolledBack.Outcome == ConfigurationApplyOutcome.RolledBackServiceEngineChanged)
+                {
+                    ShowServiceEngineChanged(rolledBack.ServiceResult == null
+                        ? "The previous configuration was restored, but the registered ProxiFyre executable changed before it could be restarted. Apply state is unknown."
+                        : "The previous configuration was restored, but the registered ProxiFyre executable changed during the rollback restart. Apply state is unknown.");
+                    BindConfiguration();
+                    return;
+                }
+
+                if (rolledBack.Outcome ==
+                    ConfigurationApplyOutcome.RolledBackConfigurationReloadNotConfirmed)
+                {
+                    BindConfiguration();
+                    statusStripLabel.Text =
+                        "The previous configuration was restored, but the running service did not reload it. Restart the service to confirm the restored configuration.";
                     UpdateAllStates();
                     return;
                 }
@@ -810,11 +1122,13 @@ namespace ProxiFyreUI.Forms
                 var rollbackRestarted = rolledBack.Outcome == ConfigurationApplyOutcome.RolledBackAndRunning;
                 if (!rollbackRestarted && rolledBack.ServiceResult != null)
                     ShowServiceFailure(rolledBack.ServiceResult);
-                _engineStartupFailed = !rollbackRestarted;
-                _packetFilterUnavailable = false;
+                if (rollbackRestarted)
+                    ClearServiceFailureIndicators();
+                else
+                    RecordServiceFailure(rolledBack.ServiceResult);
                 statusStripLabel.Text = rollbackRestarted
                     ? "The previous configuration was restored and the service is running."
-                    : "The previous configuration was restored, but the service still failed to start.";
+                    : "The previous configuration was restored, but the service restart still failed.";
                 UpdateAllStates();
             }
             catch (OperationCanceledException)
@@ -882,47 +1196,64 @@ namespace ProxiFyreUI.Forms
 
         private async void BrowseEngineButton_Click(object sender, EventArgs e)
         {
-            await RefreshServiceStatusAsync();
-            if (!_serviceStatus.IsInstallationKnown)
-            {
-                MessageBox.Show(this,
-                    "The Windows service installation state could not be verified. The engine location was not changed.",
-                    "Service state unavailable", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            if (_serviceStatus.IsInstalled)
-            {
-                MessageBox.Show(this,
-                    "The GUI uses the executable registered for the installed service. Uninstall or re-register the service before selecting a different engine.",
-                    "Installed service controls engine location", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-            if (!ConfirmDiscardUnsaved("change the ProxiFyre engine location"))
+            if (_operationInProgress)
                 return;
 
-            using (var dialog = new OpenFileDialog
+            SetOperationState(true);
+            try
             {
-                Title = "Select ProxiFyre engine",
-                Filter = "ProxiFyre engine (" + ProxiFyrePaths.EngineExecutableName + ")|" +
-                         ProxiFyrePaths.EngineExecutableName,
-                CheckFileExists = true,
-                Multiselect = false
-            })
-            {
-                if (dialog.ShowDialog(this) != DialogResult.OK)
+                var verifiedStatus = await GetServiceStatusForMutationAsync();
+                if (verifiedStatus == null)
                     return;
-                var location = _engineLocator.ValidateUserSelection(dialog.FileName);
-                if (!location.IsResolved)
+                if (verifiedStatus.IsInstalled)
                 {
-                    MessageBox.Show(this, location.Error, "Invalid engine", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show(this,
+                        "The GUI uses the executable registered for the installed service. Uninstall or re-register the service before selecting a different engine.",
+                        "Installed service controls engine location", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
-                _settings.SelectedEnginePath = location.Path;
-                TrySaveSettings();
-                _engineLocation = location;
-                UpdateResolvedPaths();
-                try { LoadWorkspace(); }
-                catch (Exception ex) { ShowError("The selected engine configuration could not be loaded.", ex); }
+                if (!ConfirmDiscardUnsaved("change the ProxiFyre engine location"))
+                    return;
+
+                using (var dialog = new OpenFileDialog
+                {
+                    Title = "Select ProxiFyre engine",
+                    Filter = "ProxiFyre engine (" + ProxiFyrePaths.EngineExecutableName + ")|" +
+                             ProxiFyrePaths.EngineExecutableName,
+                    CheckFileExists = true,
+                    Multiselect = false
+                })
+                {
+                    if (dialog.ShowDialog(this) != DialogResult.OK)
+                        return;
+                    var location = _engineLocator.ValidateUserSelection(dialog.FileName);
+                    if (!location.IsResolved)
+                    {
+                        MessageBox.Show(this, location.Error, "Invalid engine", MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    try
+                    {
+                        var previousEnginePath = _workspace.EnginePath;
+                        var loaded = _workspace.Load(location);
+                        _engineLocation = location;
+                        _settings.SelectedEnginePath = location.Path;
+                        TrySaveSettings();
+                        UpdateResolvedPaths();
+                        CompleteWorkspaceLoad(loaded, previousEnginePath);
+                    }
+                    catch (Exception ex)
+                    {
+                        ShowError("The selected engine configuration could not be loaded. " +
+                                  "The previous engine and working configuration were preserved.", ex);
+                    }
+                }
+            }
+            finally
+            {
+                SetOperationState(false);
             }
         }
 
@@ -992,6 +1323,17 @@ namespace ProxiFyreUI.Forms
                 _logTailer.Start(_workspace.LogDirectoryPath);
         }
 
+        private void ResetLogViewForEngineChange()
+        {
+            Interlocked.Increment(ref _logViewGeneration);
+            _logTailer.Stop();
+            _logLines.Clear();
+            logRichTextBox.Clear();
+            logStatusLabel.Text = followLogsCheckBox.Checked
+                ? "Loading logs for the selected engine…"
+                : "Following paused. Log view cleared for the selected engine.";
+        }
+
         private void FollowLogsCheckBox_CheckedChanged(object sender, EventArgs e)
         {
             _settings.FollowLogs = followLogsCheckBox.Checked;
@@ -1007,8 +1349,14 @@ namespace ProxiFyreUI.Forms
 
         private void LogTailer_LinesRead(object sender, LogLinesEventArgs e)
         {
+            var viewGeneration = Volatile.Read(ref _logViewGeneration);
             TryPostToUi(() =>
             {
+                if (viewGeneration != Volatile.Read(ref _logViewGeneration) ||
+                    e.Generation != _logTailer.Generation ||
+                    !PathsEqual(e.SourceDirectoryPath, _workspace.LogDirectoryPath) ||
+                    !PathsEqual(Path.GetDirectoryName(e.FilePath), e.SourceDirectoryPath))
+                    return;
                 if (e.Reset)
                     _logLines.Clear();
                 foreach (var line in e.Lines)
@@ -1021,9 +1369,16 @@ namespace ProxiFyreUI.Forms
             });
         }
 
-        private void LogTailer_StatusChanged(object sender, string status)
+        private void LogTailer_StatusChanged(object sender, LogStatusEventArgs e)
         {
-            TryPostToUi(() => logStatusLabel.Text = status);
+            var viewGeneration = Volatile.Read(ref _logViewGeneration);
+            TryPostToUi(() =>
+            {
+                if (viewGeneration == Volatile.Read(ref _logViewGeneration) &&
+                    e.Generation == _logTailer.Generation &&
+                    PathsEqual(e.SourceDirectoryPath, _workspace.LogDirectoryPath))
+                    logStatusLabel.Text = e.Status;
+            });
         }
 
         private void TryPostToUi(Action action)
@@ -1057,7 +1412,7 @@ namespace ProxiFyreUI.Forms
             var level = logLevelFilterComboBox.SelectedItem?.ToString() ?? "All levels";
             var visible = _logLines.Where(line =>
                 (filter.Length == 0 || line.IndexOf(filter, StringComparison.CurrentCultureIgnoreCase) >= 0) &&
-                MatchesLogLevel(line, level));
+                LogLevelMatcher.Matches(line, level));
             logRichTextBox.Lines = visible.ToArray();
             if (followLogsCheckBox.Checked && logRichTextBox.TextLength > 0)
             {
@@ -1087,7 +1442,220 @@ namespace ProxiFyreUI.Forms
 
         private void ReloadLogsButton_Click(object sender, EventArgs e)
         {
-            _logTailer.Reload();
+            _logTailer.Reload(_workspace.LogDirectoryPath);
+        }
+
+        private async Task<bool> EnsureInstalledServiceEngineCurrentAsync(string operation)
+        {
+            var verifiedStatus = await GetServiceStatusForMutationAsync();
+            if (verifiedStatus == null)
+                return false;
+            if (verifiedStatus.State == ProxiFyreServiceState.DeletionPending)
+            {
+                MessageBox.Show(this,
+                    "The ProxiFyre service is marked for deletion. Wait for Windows to finish removing it before attempting to " +
+                    operation + ".",
+                    "Service deletion pending", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return false;
+            }
+            if (!verifiedStatus.IsInstalled)
+                return true;
+
+            var registeredEngine = GetRegisteredServiceEngine();
+            if (registeredEngine == null)
+                return false;
+
+            var workspaceMatches = PathsEqual(_workspace.EnginePath, registeredEngine.Path) &&
+                                   _workspace.Configuration != null;
+            var formMatches = PathsEqual(_engineLocation?.Path, registeredEngine.Path);
+            if (workspaceMatches && formMatches)
+                return true;
+
+            if (_workspace.IsDirty && MessageBox.Show(this,
+                "The installed service now points to a different ProxiFyre executable:\r\n\r\n" +
+                registeredEngine.Path + "\r\n\r\nDiscard the unsaved edits for the previous engine and load the " +
+                "registered engine before attempting to " + operation + "?",
+                "Service engine changed", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            {
+                statusStripLabel.Text = "The service operation was cancelled; unsaved edits were preserved.";
+                return false;
+            }
+
+            try
+            {
+                var previousEnginePath = _workspace.EnginePath;
+                var loaded = _workspace.Load(registeredEngine);
+                _engineLocation = registeredEngine;
+                UpdateResolvedPaths();
+                CompleteWorkspaceLoad(loaded, previousEnginePath);
+                statusStripLabel.Text = "Loaded the configuration for the executable registered by the service.";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ShowError("The registered service engine configuration could not be loaded. " +
+                          "The previous engine and working configuration were preserved, and no service change was attempted.",
+                    ex);
+                return false;
+            }
+        }
+
+        private async Task<ServiceStatusInfo> GetServiceStatusForMutationAsync()
+        {
+            ServiceStatusInfo verifiedStatus;
+            try
+            {
+                verifiedStatus = await _serviceController.GetStatusAsync(_lifetimeCancellation.Token);
+                ObserveServiceStatus(verifiedStatus);
+                UpdateAllStates();
+            }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
+            catch (Exception ex)
+            {
+                verifiedStatus = new ServiceStatusInfo(ProxiFyreServiceState.Error, ex.Message);
+                ObserveServiceStatus(verifiedStatus);
+                UpdateAllStates();
+            }
+
+            if (verifiedStatus.IsInstallationKnown)
+                return verifiedStatus;
+
+            MessageBox.Show(this,
+                "The Windows service installation state could not be verified. No service change was attempted.",
+                "Service state unavailable", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return null;
+        }
+
+        private EngineLocation GetRegisteredServiceEngine()
+        {
+            var location = _engineLocator.Resolve(_settings);
+            if (location.Source == ProxiFyreUI.Infrastructure.EngineLocationSource.ServiceRegistration && location.IsResolved)
+                return location;
+
+            var detail = location.Source == ProxiFyreUI.Infrastructure.EngineLocationSource.ServiceRegistration &&
+                         !string.IsNullOrWhiteSpace(location.Error)
+                ? "\r\n\r\n" + location.Error
+                : string.Empty;
+            MessageBox.Show(this,
+                "The executable registered for the installed ProxiFyre service could not be verified. " +
+                "No service change was attempted." + detail,
+                "Registered engine unavailable", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return null;
+        }
+
+        private EngineLocation BrowseForTrustedUninstallEngine()
+        {
+            using (var dialog = new OpenFileDialog
+            {
+                Title = "Select trusted ProxiFyre engine for service uninstall",
+                Filter = "ProxiFyre engine (" + ProxiFyrePaths.EngineExecutableName + ")|" +
+                         ProxiFyrePaths.EngineExecutableName,
+                CheckFileExists = true,
+                Multiselect = false
+            })
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                    return null;
+
+                var location = _engineLocator.ValidateUserSelection(dialog.FileName);
+                if (location.IsResolved)
+                    return location;
+
+                MessageBox.Show(this, location.Error,
+                    "Untrusted uninstall executable", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return null;
+            }
+        }
+
+        private bool IsServiceRegistrationSnapshotCurrent(string expectedImagePath)
+        {
+            try
+            {
+                return string.Equals(expectedImagePath,
+                    _engineLocator.GetRegisteredServiceImagePath(), StringComparison.Ordinal);
+            }
+            catch
+            {
+                // A fallback executable is allowed only while the broken registration can be
+                // shown to be the same one the user confirmed.
+                return false;
+            }
+        }
+
+        private bool IsBrokenServiceRegistrationSnapshotCurrent(string expectedImagePath)
+        {
+            if (!IsServiceRegistrationSnapshotCurrent(expectedImagePath))
+                return false;
+            try
+            {
+                var current = _engineLocator.Resolve(_settings);
+                return current.Source !=
+                           ProxiFyreUI.Infrastructure.EngineLocationSource.ServiceRegistration ||
+                       !current.IsResolved;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool IsRegisteredServiceEngine(string expectedPath)
+        {
+            try
+            {
+                return _engineLocator.IsRegisteredServiceExecutable(expectedPath);
+            }
+            catch
+            {
+                // Registration access failures and malformed values must never preserve an
+                // applied-state confirmation or authorize a lifecycle operation.
+                return false;
+            }
+        }
+
+        private void ShowServiceEngineChanged(string message)
+        {
+            statusStripLabel.Text = message;
+            MessageBox.Show(this, message, "Service engine changed", MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            UpdateAllStates();
+        }
+
+        private void ObserveServiceStatus(ServiceStatusInfo status)
+        {
+            _serviceStatus = status ?? new ServiceStatusInfo(ProxiFyreServiceState.Unknown);
+            if (!_serviceStatus.IsRunning ||
+                (_workspace.HasConfirmedApplied &&
+                 (!_workspace.IsFingerprintCurrent(_workspace.CurrentFingerprint) ||
+                  !IsRegisteredServiceEngine(_workspace.EnginePath))))
+                _workspace.InvalidateAppliedConfirmation();
+            if (_serviceStatus.IsRunning ||
+                _serviceStatus.State == ProxiFyreServiceState.NotInstalled ||
+                _serviceStatus.State == ProxiFyreServiceState.DeletionPending)
+                ClearServiceFailureIndicators();
+        }
+
+        private void RecordServiceFailure(ServiceOperationResult result)
+        {
+            if (_serviceStatus.IsRunning)
+            {
+                ClearServiceFailureIndicators();
+                return;
+            }
+
+            _packetFilterUnavailable = result?.FailureKind ==
+                                       ServiceOperationFailureKind.DependencyUnavailable;
+            _engineStartupFailed = ServiceOperationFailureClassifier.IsEngineStartupFailure(result);
+        }
+
+        private void ClearServiceFailureIndicators()
+        {
+            _engineStartupFailed = false;
+            _packetFilterUnavailable = false;
         }
 
         private async void ServiceRefreshTimer_Tick(object sender, EventArgs e)
@@ -1101,7 +1669,7 @@ namespace ProxiFyreUI.Forms
                 return;
             try
             {
-                _serviceStatus = await _serviceController.GetStatusAsync(_lifetimeCancellation.Token);
+                ObserveServiceStatus(await _serviceController.GetStatusAsync(_lifetimeCancellation.Token));
                 UpdateAllStates();
             }
             catch (OperationCanceledException)
@@ -1109,7 +1677,7 @@ namespace ProxiFyreUI.Forms
             }
             catch (Exception ex)
             {
-                _serviceStatus = new ServiceStatusInfo(ProxiFyreServiceState.Error, ex.Message);
+                ObserveServiceStatus(new ServiceStatusInfo(ProxiFyreServiceState.Error, ex.Message));
                 UpdateAllStates();
             }
             finally
@@ -1155,7 +1723,8 @@ namespace ProxiFyreUI.Forms
             var pending = _serviceStatus.State == ProxiFyreServiceState.StartPending ||
                           _serviceStatus.State == ProxiFyreServiceState.StopPending ||
                           _serviceStatus.State == ProxiFyreServiceState.PausePending ||
-                          _serviceStatus.State == ProxiFyreServiceState.ContinuePending;
+                          _serviceStatus.State == ProxiFyreServiceState.ContinuePending ||
+                          _serviceStatus.State == ProxiFyreServiceState.DeletionPending;
             startServiceButton.Enabled = !_operationInProgress && !pending &&
                 _serviceStatus.IsInstalled && _serviceStatus.State == ProxiFyreServiceState.Stopped;
             stopServiceButton.Enabled = !_operationInProgress && !pending &&
@@ -1165,7 +1734,7 @@ namespace ProxiFyreUI.Forms
                 !_serviceStatus.IsInstalled &&
                 _engineLocation?.IsResolved == true;
             var canUninstallService = !_operationInProgress && !pending && _serviceStatus.IsInstalled &&
-                                      _engineLocation?.IsResolved == true;
+                                      _serviceStatus.IsInstallationKnown;
             headerUninstallServiceButton.Enabled = canUninstallService;
             uninstallServiceButton.Enabled = canUninstallService;
             browseEngineButton.Enabled = !_operationInProgress && _serviceStatus.IsInstallationKnown &&
@@ -1174,20 +1743,32 @@ namespace ProxiFyreUI.Forms
             trayStopMenuItem.Enabled = stopServiceButton.Enabled;
             trayRestartMenuItem.Enabled = restartServiceButton.Enabled;
             saveButton.Enabled = !_operationInProgress && _workspace.Configuration != null;
-            applyRestartButton.Enabled = saveButton.Enabled;
+            applyRestartButton.Enabled = saveButton.Enabled &&
+                                         _serviceStatus.State != ProxiFyreServiceState.DeletionPending;
             reloadButton.Enabled = !_operationInProgress && _workspace.HasConfigurationPath;
             validateButton.Enabled = !_operationInProgress && _workspace.Configuration != null;
+            logLevelComboBox.Enabled = !ConfigurationMutationBlocked && _workspace.Configuration != null;
+            bypassLanCheckBox.Enabled = !ConfigurationMutationBlocked && _workspace.Configuration != null;
+            trayExitMenuItem.Enabled = !_exitRequested && _configurationDialogDepth == 0;
             UpdateRoutingButtons();
             UpdateExclusionButtons();
         }
 
         private void SetOperationState(bool busy)
         {
-            _operationInProgress = busy || _applyWorkflowInProgress;
-            UseWaitCursor = busy;
-            operationProgressBar.Visible = busy;
+            if (busy)
+                _operationDepth++;
+            else if (_operationDepth > 0)
+                _operationDepth--;
+
+            _operationInProgress = _operationDepth > 0 || _applyWorkflowInProgress;
+            UseWaitCursor = _operationInProgress;
+            operationProgressBar.Visible = _operationInProgress;
             UpdateAllStates();
+            ScheduleDeferredExitIfReady();
         }
+
+        private bool ConfigurationMutationBlocked => _operationInProgress || _applyWorkflowInProgress;
 
         private void UpdateResolvedPaths()
         {
@@ -1215,9 +1796,11 @@ namespace ProxiFyreUI.Forms
                 return false;
             }
             ValidationResult liveValidation;
+            bool hasExternalChanges;
             try
             {
                 liveValidation = _workspace.ValidateLiveFile();
+                hasExternalChanges = _workspace.HasExternalChanges();
             }
             catch (Exception ex)
             {
@@ -1232,7 +1815,7 @@ namespace ProxiFyreUI.Forms
                     "Saved configuration is invalid", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return false;
             }
-            if (_workspace.HasExternalChanges() && MessageBox.Show(this,
+            if (hasExternalChanges && MessageBox.Show(this,
                 "app-config.json changed outside ProxiFyreUI. The external file is valid, but this window is showing an older version.\r\n\r\n" +
                 "Continue using the externally changed file?",
                 "External configuration change", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
@@ -1315,12 +1898,31 @@ namespace ProxiFyreUI.Forms
 
         private void TrayExitMenuItem_Click(object sender, EventArgs e)
         {
+            if (_operationInProgress || _applyWorkflowInProgress || _configurationDialogDepth > 0)
+            {
+                _exitRequested = true;
+                trayExitMenuItem.Enabled = false;
+                statusStripLabel.Text = _configurationDialogDepth > 0
+                    ? "Exit requested. Finish the open editor; unsaved changes will be confirmed before ProxiFyreUI closes."
+                    : "Exit requested. ProxiFyreUI will close after the current service operation finishes.";
+                return;
+            }
+
             _exiting = true;
             Close();
         }
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
+            if (e.CloseReason == CloseReason.WindowsShutDown)
+            {
+                // Windows is already terminating the interactive session. Do not put a modal
+                // unsaved-edits prompt in the shutdown path; just cancel local work and release
+                // UI resources best-effort.
+                Cleanup();
+                return;
+            }
+
             if (!_exiting && e.CloseReason == CloseReason.UserClosing && _settings.MinimizeToTray)
             {
                 e.Cancel = true;
@@ -1329,10 +1931,27 @@ namespace ProxiFyreUI.Forms
                 return;
             }
 
+            if (_operationInProgress || _applyWorkflowInProgress || _configurationDialogDepth > 0)
+            {
+                e.Cancel = true;
+                if (_exiting)
+                    _exitRequested = true;
+                _exiting = false;
+                statusStripLabel.Text = _exitRequested
+                    ? (_configurationDialogDepth > 0
+                        ? "Exit requested. Finish the open editor; unsaved changes will be confirmed before ProxiFyreUI closes."
+                        : "Exit requested. ProxiFyreUI will close after the current service operation finishes.")
+                    : "Finish the open editor or wait for the current service operation before closing ProxiFyreUI.";
+                UpdateAllStates();
+                return;
+            }
+
             if (!ConfirmDiscardUnsaved("exit ProxiFyreUI"))
             {
                 e.Cancel = true;
                 _exiting = false;
+                _exitRequested = false;
+                UpdateAllStates();
                 return;
             }
             Cleanup();
@@ -1355,6 +1974,26 @@ namespace ProxiFyreUI.Forms
             notifyIcon.Dispose();
             _applicationIcon.Dispose();
             _lifetimeCancellation.Dispose();
+        }
+
+        private void ScheduleDeferredExitIfReady()
+        {
+            if (!_exitRequested || _operationInProgress || _applyWorkflowInProgress ||
+                _configurationDialogDepth > 0 ||
+                _exitCloseScheduled || _cleanedUp || Disposing || IsDisposed || !IsHandleCreated)
+                return;
+
+            _exitCloseScheduled = true;
+            BeginInvoke((Action)(() =>
+            {
+                _exitCloseScheduled = false;
+                if (!_exitRequested || _operationInProgress || _applyWorkflowInProgress ||
+                    _configurationDialogDepth > 0 ||
+                    _cleanedUp || Disposing || IsDisposed)
+                    return;
+                _exiting = true;
+                Close();
+            }));
         }
 
         private static string FormatApplications(IList<string> applications)
@@ -1387,19 +2026,33 @@ namespace ProxiFyreUI.Forms
             return values == null ? fallback : values.Count == 0 ? "<none>" : string.Join(", ", values);
         }
 
-        private static bool MatchesLogLevel(string line, string level)
-        {
-            if (level == "All levels")
-                return true;
-            return line.IndexOf(level, StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   (level == "Warning" && line.IndexOf("WARN", StringComparison.OrdinalIgnoreCase) >= 0);
-        }
-
         private static bool IsWarningOrError(string line)
         {
+            string level;
+            if (LogLevelMatcher.TryGetLevel(line, out level))
+                return string.Equals(level, "Warning", StringComparison.OrdinalIgnoreCase) ||
+                       string.Equals(level, "Error", StringComparison.OrdinalIgnoreCase);
             return line.IndexOf("warn", StringComparison.OrdinalIgnoreCase) >= 0 ||
                    line.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0 ||
                    line.IndexOf("fail", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool PathsEqual(string first, string second)
+        {
+            if (string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(second))
+                return false;
+            try
+            {
+                return string.Equals(Path.GetFullPath(first).TrimEnd(Path.DirectorySeparatorChar,
+                        Path.AltDirectorySeparatorChar),
+                    Path.GetFullPath(second).TrimEnd(Path.DirectorySeparatorChar,
+                        Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException ||
+                                       ex is PathTooLongException)
+            {
+                return false;
+            }
         }
 
         private static OpenFileDialog CreateExecutableDialog()
