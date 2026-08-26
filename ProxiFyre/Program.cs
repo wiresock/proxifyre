@@ -58,8 +58,21 @@ namespace ProxiFyre
             // Handle the global log level from the configuration
             _logLevel = MapLogLevel(ConfigurationValueParser.GetLogLevel(serviceSettings.LogLevel));
 
-            // Get an instance of the Socksifier
-            _socksify = Socksifier.Socksifier.GetInstance(_logLevel);
+            // Native construction opens the NDISRD device before Start() is called. Translate
+            // initialization failures here so direct console/service starts always leave an
+            // actionable engine log instead of only an SCM startup failure.
+            try
+            {
+                _socksify = Socksifier.Socksifier.GetInstance(_logLevel);
+            }
+            catch (Exception ex)
+            {
+                const string message =
+                    "Failed to initialize the ProxiFyre proxy engine. Ensure the Windows Packet Filter " +
+                    "(NDISRD) driver is installed and available, then restart the service.";
+                LoggerInstance.Error(ex, message);
+                throw new InvalidOperationException(message, ex);
+            }
 
             // Attach the LogPrinter method to the LogEvent event
             _socksify.LogEvent += LogPrinter;
@@ -350,6 +363,7 @@ namespace ProxiFyre
                         x.SetDescription("ProxiFyre - SOCKS5 ProxiFyre Service");
                         x.SetDisplayName("ProxiFyre Service");
                         x.SetServiceName(ProxiFyrePaths.ServiceName);
+                        x.DependsOn(ProxiFyrePaths.WindowsPacketFilterServiceName);
                     });
                 }
                 finally

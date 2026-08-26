@@ -53,7 +53,7 @@ SOCKS5-over-TLS protects the TCP control connection (including the UDP `ASSOCIAT
 
 **Save** validates the complete model and refuses to write when errors exist. It writes a temporary file in the configuration directory, flushes it, preserves the prior live file as `app-config.json.bak`, and replaces the live file atomically. If the service is running, the UI reports that a restart is still required.
 
-**Apply & Restart** performs the same validated atomic save, then stops and starts the installed service while waiting for the actual SCM states. It reports success only when the SCM reports `Running`. If startup fails after the save, the GUI offers to restore the backup and performs at most one controlled restart using the restored configuration.
+**Apply & Restart** performs the same validated atomic save, then stops and starts the installed service while waiting for the actual SCM states. It reports success only when the SCM reports `Running`. Before changing service state, the GUI opens `\\.\NDISRD` with the same non-invasive capability probe used by the native engine. If Windows Packet Filter is unavailable, the saved configuration remains pending and the GUI reports the dependency immediately without stopping the service or offering a configuration rollback. Other startup failures may still offer to restore the backup and perform at most one controlled restart using the restored configuration.
 
 The workspace fingerprints the file when it is loaded. If another process changes it before a save, the GUI offers to reload, explicitly overwrite, or cancel. It never silently overwrites an externally modified configuration.
 
@@ -89,7 +89,8 @@ Tests write to `bin\tests\<architecture>\<configuration>\` and do not require th
 - **Access denied:** restart the GUI and approve the administrator prompt. Check directory ACLs if the engine is installed outside the normal application directory.
 - **Configuration invalid:** open the validation details. The GUI will not save or start a new invalid rule set.
 - **Saved, restart required:** choose **Apply & Restart** or restart the service after completing related edits.
-- **Engine startup failed:** the service may have rejected configuration or failed to initialize the Windows Packet Filter driver. Review recent lines on the Logs tab and verify the driver is installed and running.
+- **Windows Packet Filter unavailable:** install WinpkFilter from `https://github.com/wiresock/ndisapi/releases`, restart Windows if requested, and retry. The GUI checks the `NDISRD` device before install/start/restart and does not treat a missing driver as a configuration failure.
+- **Engine startup failed:** the service may have rejected configuration or encountered another native initialization error. A service that returns to `Stopped` during startup is reported immediately; review recent lines on the Logs tab.
 - **No log file yet:** start the service or use **Reload** after the engine creates its `logs` directory. The follower continues checking for creation and rotation.
 - **External change detected:** reload to accept the on-disk file, overwrite only if the other edit is known to be obsolete, or cancel and compare both versions first.
 - **Recursive timeouts with another VPN:** add the other VPN's carrier/tunnel process to Exclusions.

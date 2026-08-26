@@ -160,6 +160,38 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
+        public async Task MissingPacketFilterNeverRollsBackConfigurationOrRetriesRestart()
+        {
+            var workspace = CreateEditedWorkspace("driver-missing.example:4580");
+            var dependencyFailure = ServiceOperationResult.Failed(
+                StoppedStatus(),
+                "Windows Packet Filter is not available.",
+                "The NDISRD device could not be opened.", null, false,
+                ServiceOperationFailureKind.DependencyUnavailable);
+            using (var service = FakeServiceController.Installed(dependencyFailure,
+                       ServiceOperationResult.Completed(RunningStatus(), "Unexpected retry.")))
+            {
+                var coordinator = new ConfigurationApplyCoordinator(workspace, service);
+
+                var result = await coordinator.SaveAndApplyAsync(false, _enginePath, false, true,
+                    OperationTimeout, CancellationToken.None);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(result.Outcome,
+                        Is.EqualTo(ConfigurationApplyOutcome.DependencyUnavailable));
+                    Assert.That(result.RollbackAttempted, Is.False);
+                    Assert.That(result.WasRolledBack, Is.False);
+                    Assert.That(service.RestartCalls, Is.EqualTo(1));
+                    Assert.That(ReadEndpoint(_configurationPath),
+                        Is.EqualTo("driver-missing.example:4580"));
+                    Assert.That(workspace.RestartRequired, Is.True);
+                    Assert.That(workspace.HasConfirmedApplied, Is.False);
+                });
+            }
+        }
+
+        [Test]
         public async Task FailedRestartCanRollbackAndPerformsOnlyOneControlledRetry()
         {
             var workspace = CreateEditedWorkspace("bad.example:5080");
@@ -362,6 +394,35 @@ namespace ProxiFyre.Tests
                     Assert.That(service.RestartCalls, Is.Zero);
                     Assert.That(workspace.RestartRequired, Is.False);
                     Assert.That(workspace.HasConfirmedApplied, Is.True);
+                });
+            }
+        }
+
+        [Test]
+        public async Task MissingPacketFilterPreventsPartialInstallAndStartWorkflow()
+        {
+            var workspace = CreateEditedWorkspace("driver-required.example:7130");
+            using (var service = FakeServiceController.NotInstalled())
+            {
+                service.InstallResult = ServiceOperationResult.Failed(
+                    new ServiceStatusInfo(ProxiFyreServiceState.NotInstalled),
+                    "Windows Packet Filter is not available.", null, null, false,
+                    ServiceOperationFailureKind.DependencyUnavailable);
+                var coordinator = new ConfigurationApplyCoordinator(workspace, service);
+
+                var result = await coordinator.SaveAndApplyAsync(false, _enginePath, true, false,
+                    OperationTimeout, CancellationToken.None);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(result.Outcome,
+                        Is.EqualTo(ConfigurationApplyOutcome.DependencyUnavailable));
+                    Assert.That(service.InstallCalls, Is.EqualTo(1));
+                    Assert.That(service.StartCalls, Is.Zero);
+                    Assert.That(service.RestartCalls, Is.Zero);
+                    Assert.That(result.RollbackAttempted, Is.False);
+                    Assert.That(workspace.RestartRequired, Is.True);
+                    Assert.That(workspace.HasConfirmedApplied, Is.False);
                 });
             }
         }

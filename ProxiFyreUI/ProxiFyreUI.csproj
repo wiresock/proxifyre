@@ -67,6 +67,7 @@
     <Compile Include="Infrastructure\ServiceManagement.cs" />
     <Compile Include="Infrastructure\UiSettings.cs" />
     <Compile Include="Infrastructure\UserVisibleErrorFormatter.cs" />
+    <Compile Include="Infrastructure\WindowsPacketFilterProbe.cs" />
     <Compile Include="Forms\InputDialog.cs"><SubType>Form</SubType></Compile>
     <Compile Include="Forms\InputDialog.Designer.cs"><DependentUpon>InputDialog.cs</DependentUpon></Compile>
     <Compile Include="Forms\MainForm.cs"><SubType>Form</SubType></Compile>

@@ -24,6 +24,45 @@ namespace ProxiFyreUI.Infrastructure
         Error
     }
 
+    public enum ServiceOperationFailureKind
+    {
+        None,
+        General,
+        TimedOut,
+        DependencyUnavailable,
+        StartupFailed
+    }
+
+    public enum ServiceStartupObservation
+    {
+        Pending,
+        Running,
+        Failed
+    }
+
+    public static class ServiceStartupStateClassifier
+    {
+        public static ServiceStartupObservation Classify(ProxiFyreServiceState state)
+        {
+            if (state == ProxiFyreServiceState.Running)
+                return ServiceStartupObservation.Running;
+            return state == ProxiFyreServiceState.StartPending
+                ? ServiceStartupObservation.Pending
+                : ServiceStartupObservation.Failed;
+        }
+    }
+
+    public static class ServiceOperationFailureClassifier
+    {
+        public static ServiceOperationFailureKind Classify(Exception exception)
+        {
+            var native = exception as Win32Exception ?? exception?.InnerException as Win32Exception;
+            return native != null && (native.NativeErrorCode == 1068 || native.NativeErrorCode == 1075)
+                ? ServiceOperationFailureKind.DependencyUnavailable
+                : ServiceOperationFailureKind.General;
+        }
+    }
+
     public sealed class ServiceStatusInfo
     {
         public ServiceStatusInfo(ProxiFyreServiceState state, string error = null)
@@ -61,7 +100,7 @@ namespace ProxiFyreUI.Infrastructure
     public sealed class ServiceOperationResult
     {
         private ServiceOperationResult(bool success, ServiceStatusInfo status, string message,
-            string details, int? exitCode, bool timedOut)
+            string details, int? exitCode, bool timedOut, ServiceOperationFailureKind failureKind)
         {
             Success = success;
             Status = status;
@@ -69,6 +108,7 @@ namespace ProxiFyreUI.Infrastructure
             Details = details;
             ExitCode = exitCode;
             TimedOut = timedOut;
+            FailureKind = failureKind;
         }
 
         public bool Success { get; }
@@ -77,15 +117,22 @@ namespace ProxiFyreUI.Infrastructure
         public string Details { get; }
         public int? ExitCode { get; }
         public bool TimedOut { get; }
+        public ServiceOperationFailureKind FailureKind { get; }
 
         public static ServiceOperationResult Completed(ServiceStatusInfo status, string message, string details = null, int? exitCode = null)
         {
-            return new ServiceOperationResult(true, status, message, details, exitCode, false);
+            return new ServiceOperationResult(true, status, message, details, exitCode, false,
+                ServiceOperationFailureKind.None);
         }
 
-        public static ServiceOperationResult Failed(ServiceStatusInfo status, string message, string details = null, int? exitCode = null, bool timedOut = false)
+        public static ServiceOperationResult Failed(ServiceStatusInfo status, string message,
+            string details = null, int? exitCode = null, bool timedOut = false,
+            ServiceOperationFailureKind failureKind = ServiceOperationFailureKind.General)
         {
-            return new ServiceOperationResult(false, status, message, details, exitCode, timedOut);
+            if (timedOut && failureKind == ServiceOperationFailureKind.General)
+                failureKind = ServiceOperationFailureKind.TimedOut;
+            return new ServiceOperationResult(false, status, message, details, exitCode, timedOut,
+                failureKind);
         }
     }
 
@@ -102,7 +149,19 @@ namespace ProxiFyreUI.Infrastructure
     public sealed class ProxiFyreServiceController : IProxiFyreServiceController
     {
         private readonly SemaphoreSlim _operationGate = new SemaphoreSlim(1, 1);
+        private readonly IWindowsPacketFilterProbe _packetFilterProbe;
         private bool _disposed;
+
+        public ProxiFyreServiceController()
+            : this(new WindowsPacketFilterProbe())
+        {
+        }
+
+        public ProxiFyreServiceController(IWindowsPacketFilterProbe packetFilterProbe)
+        {
+            _packetFilterProbe = packetFilterProbe ??
+                                 throw new ArgumentNullException(nameof(packetFilterProbe));
+        }
 
         public Task<ServiceStatusInfo> GetStatusAsync(CancellationToken cancellationToken)
         {
@@ -128,7 +187,7 @@ namespace ProxiFyreUI.Infrastructure
         public Task<ServiceOperationResult> InstallAsync(string enginePath, TimeSpan timeout, CancellationToken cancellationToken)
         {
             ValidateLifecycleExecutable(enginePath);
-            return RunExclusiveAsync(() => RunLifecycleCommandCore(enginePath, "install", timeout, cancellationToken), cancellationToken);
+            return RunExclusiveAsync(() => InstallCore(enginePath, timeout, cancellationToken), cancellationToken);
         }
 
         public Task<ServiceOperationResult> UninstallAsync(string enginePath, TimeSpan timeout, CancellationToken cancellationToken)
@@ -161,16 +220,28 @@ namespace ProxiFyreUI.Infrastructure
             if (status.State == ProxiFyreServiceState.Running)
                 return ServiceOperationResult.Completed(status, "The ProxiFyre service is already running.");
 
+            var dependencyFailure = GetPacketFilterDependencyFailure(status);
+            if (dependencyFailure != null)
+                return dependencyFailure;
+
             try
             {
                 using (var controller = new ServiceController(ProxiFyrePaths.ServiceName))
                 {
                     controller.Start();
-                    if (!WaitForStatus(controller, ServiceControllerStatus.Running, timeout, cancellationToken))
+                    var startup = WaitForStartup(controller, timeout, cancellationToken);
+                    if (startup == ServiceStartupWaitResult.TimedOut)
                     {
                         var current = GetStatusCore(cancellationToken);
                         return ServiceOperationResult.Failed(current,
                             "The service did not reach Running before the timeout.", null, null, true);
+                    }
+                    if (startup == ServiceStartupWaitResult.Failed)
+                    {
+                        var current = GetStatusCore(cancellationToken);
+                        return ServiceOperationResult.Failed(current,
+                            "The service stopped during startup. Review the recent engine logs for the underlying error.",
+                            null, null, false, ServiceOperationFailureKind.StartupFailed);
                     }
                 }
 
@@ -225,6 +296,10 @@ namespace ProxiFyreUI.Infrastructure
             if (!status.IsInstalled)
                 return ServiceOperationResult.Failed(status, "The ProxiFyre service is not installed.");
 
+            var dependencyFailure = GetPacketFilterDependencyFailure(status);
+            if (dependencyFailure != null)
+                return dependencyFailure;
+
             if (status.State != ProxiFyreServiceState.Stopped)
             {
                 var stop = StopCore(timeout, cancellationToken);
@@ -241,6 +316,28 @@ namespace ProxiFyreUI.Infrastructure
             return start.Success
                 ? ServiceOperationResult.Completed(start.Status, "The ProxiFyre service restarted successfully.")
                 : start;
+        }
+
+        private ServiceOperationResult InstallCore(string enginePath, TimeSpan timeout,
+            CancellationToken cancellationToken)
+        {
+            var status = GetStatusCore(cancellationToken);
+            if (!status.IsInstallationKnown)
+                return InstallationStateUnavailable(status);
+
+            var dependencyFailure = GetPacketFilterDependencyFailure(status);
+            return dependencyFailure ??
+                   RunLifecycleCommandCore(enginePath, "install", timeout, cancellationToken);
+        }
+
+        private ServiceOperationResult GetPacketFilterDependencyFailure(ServiceStatusInfo serviceStatus)
+        {
+            var dependency = _packetFilterProbe.GetStatus();
+            if (dependency.IsAvailable)
+                return null;
+
+            return ServiceOperationResult.Failed(serviceStatus, dependency.StartupMessage,
+                dependency.Details, null, false, ServiceOperationFailureKind.DependencyUnavailable);
         }
 
         private ServiceOperationResult RunLifecycleCommandCore(string enginePath, string command,
@@ -361,7 +458,9 @@ namespace ProxiFyreUI.Infrastructure
             try { status = GetStatusCore(cancellationToken); }
             catch { status = new ServiceStatusInfo(ProxiFyreServiceState.Error, exception.Message); }
 
-            return ServiceOperationResult.Failed(status, FriendlyServiceError(message, exception), exception.ToString());
+            return ServiceOperationResult.Failed(status, FriendlyServiceError(message, exception),
+                exception.ToString(), null, false,
+                ServiceOperationFailureClassifier.Classify(exception));
         }
 
         private static string FriendlyServiceError(string prefix, Exception exception)
@@ -375,6 +474,10 @@ namespace ProxiFyreUI.Infrastructure
                     return prefix + " The service is marked for deletion; close service-management tools and retry.";
                 if (native.NativeErrorCode == 2)
                     return prefix + " The registered service executable could not be found.";
+                if (native.NativeErrorCode == 1068 || native.NativeErrorCode == 1075)
+                    return prefix + " The Windows Packet Filter (NDISRD) dependency is unavailable. " +
+                           "Install WinpkFilter from " + WindowsPacketFilterStatus.DownloadUrl +
+                           ", restart Windows if requested, and try again.";
             }
 
             return prefix + " " + exception.Message;
@@ -416,6 +519,38 @@ namespace ProxiFyreUI.Infrastructure
 
             controller.Refresh();
             return controller.Status == target;
+        }
+
+        private enum ServiceStartupWaitResult
+        {
+            Running,
+            Failed,
+            TimedOut
+        }
+
+        private static ServiceStartupWaitResult WaitForStartup(ServiceController controller,
+            TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            while (stopwatch.Elapsed < timeout)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                controller.Refresh();
+                var observation = ServiceStartupStateClassifier.Classify(MapStatus(controller.Status));
+                if (observation == ServiceStartupObservation.Running)
+                    return ServiceStartupWaitResult.Running;
+                if (observation == ServiceStartupObservation.Failed)
+                    return ServiceStartupWaitResult.Failed;
+                Thread.Sleep(150);
+            }
+
+            controller.Refresh();
+            var finalObservation = ServiceStartupStateClassifier.Classify(MapStatus(controller.Status));
+            if (finalObservation == ServiceStartupObservation.Running)
+                return ServiceStartupWaitResult.Running;
+            return finalObservation == ServiceStartupObservation.Failed
+                ? ServiceStartupWaitResult.Failed
+                : ServiceStartupWaitResult.TimedOut;
         }
 
         private static ProxiFyreServiceState MapStatus(ServiceControllerStatus status)

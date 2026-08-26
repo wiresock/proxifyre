@@ -6,6 +6,7 @@ namespace ProxiFyre.Configuration
     public static class ProxiFyrePaths
     {
         public const string ServiceName = "ProxiFyreService";
+        public const string WindowsPacketFilterServiceName = "NDISRD";
         public const string EngineExecutableName = "ProxiFyre.exe";
         public const string ConfigurationFileName = "app-config.json";
         public const string SampleConfigurationFileName = "app-config.sample.json";

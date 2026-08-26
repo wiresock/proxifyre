@@ -14,6 +14,7 @@ namespace ProxiFyreUI.Infrastructure
         SavedConfigurationChangedBeforeApply,
         SavedConfigurationChangedDuringApply,
         ServiceStatusUnavailable,
+        DependencyUnavailable,
         SaveFailed,
         InstallFailed,
         ServiceRestartFailed,
@@ -128,7 +129,9 @@ namespace ProxiFyreUI.Infrastructure
                     {
                         SaveResult = save,
                         ServiceResult = install,
-                        Outcome = ConfigurationApplyOutcome.InstallFailed
+                        Outcome = install.FailureKind == ServiceOperationFailureKind.DependencyUnavailable
+                            ? ConfigurationApplyOutcome.DependencyUnavailable
+                            : ConfigurationApplyOutcome.InstallFailed
                     };
                 }
 
@@ -262,6 +265,16 @@ namespace ProxiFyreUI.Infrastructure
             ServiceOperationResult serviceResult, bool rollbackOnFailure, TimeSpan timeout,
             Stopwatch operationClock, CancellationToken cancellationToken)
         {
+            if (serviceResult?.FailureKind == ServiceOperationFailureKind.DependencyUnavailable)
+            {
+                return new ConfigurationApplyResult
+                {
+                    SaveResult = save,
+                    ServiceResult = serviceResult,
+                    Outcome = ConfigurationApplyOutcome.DependencyUnavailable
+                };
+            }
+
             if (!rollbackOnFailure)
             {
                 return new ConfigurationApplyResult

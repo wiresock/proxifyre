@@ -34,6 +34,7 @@ namespace ProxiFyreUI.Forms
         private bool _operationInProgress;
         private bool _applyWorkflowInProgress;
         private bool _engineStartupFailed;
+        private bool _packetFilterUnavailable;
         private bool _exiting;
         private bool _cleanedUp;
         private int _refreshingStatus;
@@ -547,6 +548,7 @@ namespace ProxiFyreUI.Forms
                 if (result.Success)
                 {
                     _engineStartupFailed = false;
+                    _packetFilterUnavailable = false;
                     var appliedStateConfirmed = !marksAppliedOnSuccess ||
                                                 (_serviceStatus.IsRunning &&
                                                  _workspace.TryMarkApplied(expectedConfiguration));
@@ -562,8 +564,14 @@ namespace ProxiFyreUI.Forms
                 }
                 else
                 {
-                    if (marksAppliedOnSuccess)
+                    var dependencyUnavailable =
+                        result.FailureKind == ServiceOperationFailureKind.DependencyUnavailable;
+                    if (marksAppliedOnSuccess || dependencyUnavailable)
+                    {
                         _engineStartupFailed = true;
+                        _packetFilterUnavailable = dependencyUnavailable;
+                    }
+                    statusStripLabel.Text = result.Message ?? "The service operation failed.";
                     ShowServiceFailure(result);
                 }
                 UpdateAllStates();
@@ -683,6 +691,7 @@ namespace ProxiFyreUI.Forms
                 if (applied.Outcome == ConfigurationApplyOutcome.Applied)
                 {
                     _engineStartupFailed = false;
+                    _packetFilterUnavailable = false;
                     statusStripLabel.Text = "Configuration applied; the service reports Running.";
                     UpdateAllStates();
                     return;
@@ -691,6 +700,18 @@ namespace ProxiFyreUI.Forms
                 if (applied.Outcome == ConfigurationApplyOutcome.SavedServiceNotInstalled)
                 {
                     statusStripLabel.Text = "Configuration saved; install and start the service to apply it.";
+                    UpdateAllStates();
+                    return;
+                }
+
+                if (applied.Outcome == ConfigurationApplyOutcome.DependencyUnavailable)
+                {
+                    if (applied.ServiceResult != null)
+                        ShowServiceFailure(applied.ServiceResult);
+                    _engineStartupFailed = true;
+                    _packetFilterUnavailable = true;
+                    statusStripLabel.Text =
+                        "Configuration saved, but Windows Packet Filter is unavailable. No configuration rollback was attempted.";
                     UpdateAllStates();
                     return;
                 }
@@ -735,6 +756,7 @@ namespace ProxiFyreUI.Forms
                 if (applied.ServiceResult != null)
                     ShowServiceFailure(applied.ServiceResult);
                 _engineStartupFailed = true;
+                _packetFilterUnavailable = false;
 
                 if (!save.BackupCreated || string.IsNullOrWhiteSpace(save.BackupPath))
                 {
@@ -789,6 +811,7 @@ namespace ProxiFyreUI.Forms
                 if (!rollbackRestarted && rolledBack.ServiceResult != null)
                     ShowServiceFailure(rolledBack.ServiceResult);
                 _engineStartupFailed = !rollbackRestarted;
+                _packetFilterUnavailable = false;
                 statusStripLabel.Text = rollbackRestarted
                     ? "The previous configuration was restored and the service is running."
                     : "The previous configuration was restored, but the service still failed to start.";
@@ -1086,7 +1109,9 @@ namespace ProxiFyreUI.Forms
             configurationStateValueLabel.ForeColor = validation?.HasErrors == true ? Color.DarkRed :
                 validation != null ? Color.DarkGreen : SystemColors.ControlText;
 
-            if (_engineStartupFailed)
+            if (_packetFilterUnavailable)
+                changesStateValueLabel.Text = "Packet filter unavailable";
+            else if (_engineStartupFailed)
                 changesStateValueLabel.Text = "Engine startup failed";
             else if (_workspace.IsDirty)
                 changesStateValueLabel.Text = "Unsaved changes";
