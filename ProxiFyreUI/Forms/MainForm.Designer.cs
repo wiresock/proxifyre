@@ -15,6 +15,7 @@ namespace ProxiFyreUI.Forms
         private System.Windows.Forms.Button stopServiceButton;
         private System.Windows.Forms.Button restartServiceButton;
         private System.Windows.Forms.Button installServiceButton;
+        private System.Windows.Forms.Button headerUninstallServiceButton;
         private System.Windows.Forms.TabControl mainTabControl;
         private System.Windows.Forms.TabPage routingTabPage;
         private System.Windows.Forms.Panel routingButtonsPanel;
@@ -116,6 +117,7 @@ namespace ProxiFyreUI.Forms
         {
             this.components = new System.ComponentModel.Container();
             this.headerPanel = new System.Windows.Forms.Panel();
+            this.headerUninstallServiceButton = new System.Windows.Forms.Button();
             this.installServiceButton = new System.Windows.Forms.Button();
             this.restartServiceButton = new System.Windows.Forms.Button();
             this.stopServiceButton = new System.Windows.Forms.Button();
@@ -235,6 +237,7 @@ namespace ProxiFyreUI.Forms
             this.trayContextMenu.SuspendLayout();
             this.SuspendLayout();
             // headerPanel
+            this.headerPanel.Controls.Add(this.headerUninstallServiceButton);
             this.headerPanel.Controls.Add(this.installServiceButton);
             this.headerPanel.Controls.Add(this.restartServiceButton);
             this.headerPanel.Controls.Add(this.stopServiceButton);
@@ -326,6 +329,13 @@ namespace ProxiFyreUI.Forms
             this.installServiceButton.Text = "Install service";
             this.installServiceButton.UseVisualStyleBackColor = true;
             this.installServiceButton.Click += new System.EventHandler(this.InstallServiceButton_Click);
+            this.headerUninstallServiceButton.Location = new System.Drawing.Point(399, 59);
+            this.headerUninstallServiceButton.Name = "headerUninstallServiceButton";
+            this.headerUninstallServiceButton.Size = new System.Drawing.Size(128, 29);
+            this.headerUninstallServiceButton.TabIndex = 11;
+            this.headerUninstallServiceButton.Text = "Uninstall service…";
+            this.headerUninstallServiceButton.UseVisualStyleBackColor = true;
+            this.headerUninstallServiceButton.Click += new System.EventHandler(this.UninstallServiceButton_Click);
             // tab control
             this.mainTabControl.Controls.Add(this.routingTabPage);
             this.mainTabControl.Controls.Add(this.exclusionsTabPage);

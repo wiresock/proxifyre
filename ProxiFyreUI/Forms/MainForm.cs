@@ -1139,8 +1139,10 @@ namespace ProxiFyreUI.Forms
             installServiceButton.Enabled = !_operationInProgress && _serviceStatus.IsInstallationKnown &&
                 !_serviceStatus.IsInstalled &&
                 _engineLocation?.IsResolved == true;
-            uninstallServiceButton.Enabled = !_operationInProgress && _serviceStatus.IsInstalled &&
-                _engineLocation?.IsResolved == true;
+            var canUninstallService = !_operationInProgress && !pending && _serviceStatus.IsInstalled &&
+                                      _engineLocation?.IsResolved == true;
+            headerUninstallServiceButton.Enabled = canUninstallService;
+            uninstallServiceButton.Enabled = canUninstallService;
             browseEngineButton.Enabled = !_operationInProgress && _serviceStatus.IsInstallationKnown &&
                 !_serviceStatus.IsInstalled;
             trayStartMenuItem.Enabled = startServiceButton.Enabled;

@@ -18,6 +18,8 @@ ProxiFyreUI.exe ------------> ProxiFyre.Configuration.dll
 
 The GUI requests administrator privileges at startup. This is required to manage a Windows service and to update a configuration beside an engine installed in a protected directory. SOCKS5 credentials remain in the existing plaintext JSON schema because the engine must be able to read them. The GUI masks passwords and omits them from logs, tooltips, and diagnostics.
 
+The primary service controls include explicit install and uninstall actions. Uninstall requires confirmation and removes only the Windows service registration; `app-config.json`, its backup, and engine logs are preserved. The same uninstall action remains available under **Settings / Diagnostics**.
+
 ## Engine and configuration discovery
 
 The GUI resolves the engine in this order:
