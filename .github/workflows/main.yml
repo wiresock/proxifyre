@@ -48,8 +48,19 @@ jobs:
       - name: Install NuGet CLI
         run: choco install nuget.commandline
 
-      - name: Restore NuGet Packages
-        run: nuget restore socksify.sln
+      - name: Restore legacy NuGet packages
+        shell: pwsh
+        run: |
+          @(
+            'ProxiFyre.Configuration\packages.config',
+            'ProxiFyre\packages.config',
+            'ProxiFyre.Tests\packages.config'
+          ) | ForEach-Object {
+            nuget restore $_ -PackagesDirectory packages -NonInteractive
+            if ($LASTEXITCODE -ne 0) {
+              throw "NuGet restore failed for $_ with exit code $LASTEXITCODE."
+            }
+          }
 
       - name: Restore pinned WiX packages
         shell: pwsh

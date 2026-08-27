@@ -237,7 +237,9 @@ Rules can use normal SOCKS5 over TCP or SOCKS5-over-TLS. A TLS certificate pin i
 Release output is written to `bin\exe\<x86|x64|ARM64>\<Debug|Release>\`. Restore, build, and test from a Visual Studio developer shell with:
 
 ```powershell
-nuget restore socksify.sln
+nuget restore ProxiFyre.Configuration\packages.config -PackagesDirectory packages -NonInteractive
+nuget restore ProxiFyre\packages.config -PackagesDirectory packages -NonInteractive
+nuget restore ProxiFyre.Tests\packages.config -PackagesDirectory packages -NonInteractive
 msbuild socksify.sln -t:Rebuild -v:minimal -p:Configuration=Release -p:Platform=x64 -p:Version=2.4.0
 vstest.console.exe bin\tests\x64\Release\ProxiFyre.Tests.dll /TestAdapterPath:packages\NUnit3TestAdapter.4.6.0\build\net462 /Platform:x64
 pwsh -File scripts\Build-Installer.ps1 -Platform x64 -Version 2.4.0
