@@ -14,6 +14,8 @@ As of **v2.3.0**, ProxiFyre also proxies **IPv6** destinations. Previously only 
 
 As of **v2.4.0**, ProxiFyre supports native **SOCKS5-over-TLS** upstreams through Windows SChannel, including encrypted TCP `CONNECT` relays and TLS-protected UDP `ASSOCIATE` control channels. This transport is compatible with [Alighieri](https://github.com/wiresock/alighieri) TLS listeners; normal unencrypted SOCKS5 remains the default.
 
+As of **v2.5.0**, ProxiFyre includes an elevated Windows Forms management application for editing and validating routing rules, managing `ProxiFyreService`, following logs, and using notification-area controls. The release also adds architecture-specific WiX MSI packages and a recommended online setup executable that installs ProxiFyre after acquiring verified Visual C++ and Windows Packet Filter prerequisites when needed.
+
 **Requirements and limitations:**
 
 - **Your client host must already have working IPv6 connectivity.** ProxiFyre redirects the IPv6 packets your applications actually transmit — it does *not* create IPv6 reachability. On an **IPv4-only host**, your applications never emit global IPv6 traffic, so there is nothing to redirect and you will still see IPv4-only egress even for IPv6-capable destinations. (This is inherent to the packet-filter design: it intercepts transmitted packets, it does not originate connections on the application's behalf.)
@@ -199,14 +201,26 @@ For public certificates, omit `tlsPinnedSha256` and leave `tlsAllowInvalidCertif
 
 ## Quick Start Guide
 
-Use the architecture-matched WiX bootstrapper for normal installation:
+### Choose a release asset
 
-1. From the [GitHub Releases page](https://github.com/wiresock/proxifyre/releases), download `ProxiFyre-<version>-win-<x86|x64|arm64>-setup.exe` for the machine's native Windows architecture and its `.sha256` sidecar. Setup rejects a mismatched native architecture before acquiring a kernel driver.
-2. Verify the setup executable's SHA-256 before elevation. ProxiFyre's first-party binaries and installers are deliberately unsigned, so Windows can display **Unknown publisher**. A checksum is meaningful as publisher provenance only when its expected value comes from a trusted release record or an independent channel.
-3. Run the setup executable as an administrator. Windows 7 requires Service Pack 1; install current servicing-stack and SHA-2 support updates and reboot first. WiX Burn detects and, when needed, downloads the pinned architecture-matched [Microsoft Visual C++ 2015-2022 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170) and official Windows Packet Filter 3.6.2.1 MSI from the upstream [`v3.6.2` release](https://github.com/wiresock/ndisapi/releases/tag/v3.6.2). It verifies each acquired payload against the digest bound into setup before installing ProxiFyre.
+For a `v2.5.0` release, CI publishes only after the x86, x64, and ARM64 build/package jobs all succeed. Pull-request and manual runs retain CI artifacts without creating a GitHub release; a release tag must exactly match the repository version (`v2.5.0`), after which the tag job gathers all 18 files, uploads them to a draft, and publishes the release only after every upload succeeds. Each architecture has three first-party artifacts and a `.sha256` sidecar for each one:
+
+- **Recommended online setup:** `ProxiFyre-2.5.0-win-<x86|x64|arm64>-setup.exe` installs prerequisites when needed and then installs ProxiFyre.
+- **Standalone MSI:** `ProxiFyre-2.5.0-win-<x86|x64|arm64>.msi` is for administrator-managed deployment, including offline deployment after all prerequisites have already been provisioned. The MSI does not download them.
+- **Release ZIP payload:** `ProxiFyre-v2.5.0-<x86|x64|ARM64>.zip` contains the application files only. It is not an offline installer: it does not provision prerequisites, register the service, create firewall rules or shortcuts, or establish the protected installation directory required by the Release GUI. Prefer setup; advanced ZIP deployment must stage the complete payload in an administrator-protected directory on a fixed local volume as described in [docs/gui.md](docs/gui.md).
+
+ProxiFyre's first-party binaries and packages are deliberately unsigned, so Windows can display **Unknown publisher**. Verify the selected artifact against its `.sha256` sidecar before elevation. A checksum establishes publisher provenance only when the expected value comes from a trusted release record or an independent channel.
+
+### Install with setup
+
+1. Install the required .NET Framework first: **4.7.2 or later on x86/x64**, or **4.8.1 or later on ARM64**. ProxiFyre Setup checks this requirement but does not download or install .NET Framework.
+2. From the [GitHub Releases page](https://github.com/wiresock/proxifyre/releases), download the setup executable matching the machine's native Windows architecture and its `.sha256` sidecar. Setup rejects a mismatched architecture before acquiring the kernel driver.
+3. Verify the checksum, run setup as an administrator, and accept the **Unknown publisher** prompt only after that verification. WiX Burn detects and, when needed, downloads the pinned architecture-matched [Microsoft Visual C++ 2015-2022 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170) and official Windows Packet Filter 3.6.2.1 MSI from the upstream [`v3.6.2` release](https://github.com/wiresock/ndisapi/releases/tag/v3.6.2). Burn verifies the acquired bytes against the digests embedded in setup before executing either prerequisite.
 4. Open **ProxiFyre** from the Start Menu, create or review `app-config.json`, and start the service from the GUI. The service is installed with demand/manual start and is intentionally left stopped until a valid configuration exists.
 
-If the target machine is offline, install any missing architecture-matched Visual C++ runtime and Windows Packet Filter prerequisite manually, then retry. The standalone ProxiFyre MSI is independently usable only after both are present; it fails with an actionable prerequisite message instead of downloading another package.
+Windows 7 is supported only with Service Pack 1; install current servicing-stack and SHA-2 support updates and reboot first. Setup temporarily enables the current user's TLS 1.2 WinINet protocol bit during acquisition and restores the previous value afterward. If, on Windows 7 only, the pinned Visual C++ payload exhausts its normal HTTPS retries with WinINet error `12029`, setup makes one final request by changing only that exact Microsoft content-addressed URL's scheme to HTTP. Windows Packet Filter remains HTTPS, and Burn still requires the exact embedded SHA-512 before it will execute the Visual C++ package. This narrow fallback does not apply to another payload, host, path, error, or Windows version.
+
+For an offline or centrally managed installation, provision the architecture-matched .NET Framework, Visual C++ runtime, and Windows Packet Filter first, then deploy the standalone MSI. It fails with an actionable prerequisite message instead of downloading another package.
 
 The MSI creates two declarative inbound program rules for installed `ProxiFyre.exe`: `ProxiFyre (TCP-In)` and `ProxiFyre (UDP-In)`. Both apply to Domain, Private, and Public profiles, use dynamic/any ports because the redirect listeners are allocated at runtime, and deny edge traversal. No rule is created for the GUI and no arbitrary global port is opened. Repair and upgrade reconcile the same rules; uninstall removes only those two ProxiFyre-owned rules.
 
@@ -218,13 +232,13 @@ For standalone-MSI deployment, exact payload details, prerequisite detection, ha
 
 ### Logging
 
-Logs are saved in the application folder under the `/logs` directory. The details and verbosity of the logs depend on the configuration set in the `app-config.json` file.
+Logs are saved beside `ProxiFyre.exe` in the `.\logs` directory. The details and verbosity of the logs depend on the configuration set in `app-config.json`.
 
 ---
 
 ## ProxiFyre GUI
 
-`ProxiFyreUI.exe` is the small native integrity host for the Windows Forms management application included with each architecture-specific release. Before starting .NET Framework it sanitizes CLR-control environment variables, rejects unexpected app-local executable modules, validates the fixed CLR configuration hash, and locks `ProxiFyreUI.Managed.dll` plus its managed dependencies against replacement. ProxiFyre's first-party modules are unsigned; the MSI-protected installation directory and published artifact SHA-256 are therefore important parts of the release boundary. The application requires administrator approval and .NET Framework 4.7.2 on x86/x64 or 4.8.1 on ARM64. The GUI edits configuration, controls `ProxiFyreService`, follows logs, opens the active log file, and provides notification-area controls; `ProxiFyre.exe` remains the console/service networking engine. The GUI does not load or call `socksify.dll`. For each Windows identity and terminal session, only one GUI instance runs per application major/minor version; launching it again restores the existing window from the notification area.
+`ProxiFyreUI.exe` is the small native integrity host for the Windows Forms management application included with each architecture-specific release. Before starting .NET Framework it sanitizes CLR-control environment variables, rejects unexpected app-local executable modules, validates the fixed CLR configuration hash, and locks `ProxiFyreUI.Managed.dll` plus its managed dependencies against replacement. ProxiFyre's first-party modules are unsigned; the MSI-protected installation directory and published artifact SHA-256 are therefore important parts of the release boundary. The application requires administrator approval and .NET Framework 4.7.2 on x86/x64 or 4.8.1 on ARM64. The GUI edits configuration, controls `ProxiFyreService`, follows logs, opens the active log file, and provides notification-area controls; `ProxiFyre.exe` remains the console/service networking engine. The GUI does not load or call `socksify.dll`. For each Windows identity and terminal session, only one GUI instance runs; launching it again restores the existing window from the notification area.
 
 The GUI locates the engine from the installed service registration first, then beside the GUI, then from the last explicitly selected path. Use **Browse for ProxiFyre.exe** when the engine is installed elsewhere. The Diagnostics tab shows the resolved engine, `app-config.json`, and `logs` paths. GUI preferences are stored separately under `%LocalAppData%\ProxiFyreUI`.
 
@@ -244,9 +258,11 @@ nuget restore ProxiFyre\packages.config -PackagesDirectory packages -NonInteract
 nuget restore ProxiFyre.Tests\packages.config -PackagesDirectory packages -NonInteractive
 msbuild ProxiFyreSetupBootstrapper\ProxiFyreSetupBootstrapper.vcxproj -t:Restore -v:minimal -p:RestoreLockedMode=true -p:RestoreConfigFile="$PWD\NuGet.Installer.Config"
 msbuild ProxiFyreSetupEngineExtension\ProxiFyreSetupEngineExtension.vcxproj -t:Restore -v:minimal -p:RestoreLockedMode=true -p:RestoreConfigFile="$PWD\NuGet.Installer.Config"
-msbuild socksify.sln -t:Rebuild -v:minimal -p:Configuration=Release -p:Platform=x64 -p:Version=2.4.0
+dotnet restore ProxiFyre.Installer\ProxiFyre.Installer.wixproj --configfile NuGet.Installer.Config --locked-mode
+dotnet restore ProxiFyre.Bundle\ProxiFyre.Bundle.wixproj --configfile NuGet.Installer.Config --locked-mode
+msbuild socksify.sln -t:Rebuild -v:minimal -p:Configuration=Release -p:Platform=x64 -p:Version=2.5.0 -p:Repository=wiresock/proxifyre
 vstest.console.exe bin\tests\x64\Release\ProxiFyre.Tests.dll /TestAdapterPath:packages\NUnit3TestAdapter.4.6.0\build\net462 /Platform:x64
-pwsh -File scripts\Build-Installer.ps1 -Platform x64 -Version 2.4.0
+pwsh -File scripts\Build-Installer.ps1 -Platform x64 -Version 2.5.0 -NoRestore
 ```
 
 Use `x86` in place of `x64` when running on a matching host. Build the ARM64 payload on x64 if the toolchain is installed, but run ARM64 tests only on Windows ARM64. See [docs/gui.md](docs/gui.md) for GUI architecture and behavior, and [docs/installer.md](docs/installer.md) for packaging, deployment, verification, and lifecycle testing.
@@ -255,25 +271,27 @@ Use `x86` in place of `x64` when running on a matching host. Build the ARM64 pay
 
 ## Build Prerequisites
 
-Before starting the build process, ensure the following requirements are met:
+Before starting the build process, install:
 
-1. **Install vcpkg:** You can download and install vcpkg from the official website [here](https://vcpkg.io/en/getting-started.html).
+1. **Visual Studio 2022** with the **Desktop development with C++** and **.NET desktop development** workloads, the v143 toolset, an appropriate Windows SDK, and the .NET Framework 4.7.2 targeting pack.
+2. **NuGet CLI**, available through `choco install nuget.commandline` or from [nuget.org](https://www.nuget.org/downloads).
+3. **vcpkg** and the required Microsoft GSL and Boost.Pool triplets:
 
-2. **Install Microsoft GSL library via vcpkg:** Once vcpkg is installed, use it to download and install the Microsoft GSL library. Run the following commands in your terminal:
-
-   ```
+   ```powershell
+   vcpkg integrate install
    vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows
+   vcpkg install boost-pool:x86-windows boost-pool:x64-windows boost-pool:arm64-windows
    ```
 
-3. **Install PowerShell 7 and a .NET SDK:** installer packaging runs `pwsh` and restores the pinned WiX Toolset 6.0.2 SDK/extensions through `dotnet`.
+4. **PowerShell 7** and a **.NET SDK** capable of restoring the pinned WiX Toolset 6.0.2 SDK and extensions.
 
-4. **Add online NuGet Package Source:** In some cases, you may need to add an online NuGet Package Source. To do this, navigate to `Visual Studio -> Tools -> Options -> NuGet Package Manager -> Package Sources` and add `https://api.nuget.org/v3/index.json`. Installer restore is restricted by `NuGet.Installer.Config` and package lock files.
+The legacy managed packages restore through NuGet CLI. Installer restore is restricted to `https://api.nuget.org/v3/index.json` by `NuGet.Installer.Config` and the committed package lock files.
 
 ---
 
 ## Projects
 
-This repository consists of nine production, UI, test, and packaging projects:
+This repository consists of eleven production, UI, test, and packaging projects:
 
 ### 1. ndisapi.lib
 
@@ -310,3 +328,11 @@ This WiX Toolset 6.0.2 project builds the architecture-specific MSI containing t
 ### 9. ProxiFyre.Bundle
 
 This WiX Toolset 6.0.2 Burn project builds the user-facing setup executable that conditionally acquires the pinned official Visual C++ runtime and Windows Packet Filter prerequisites before chaining the ProxiFyre MSI.
+
+### 10. ProxiFyreSetupBootstrapper
+
+This architecture-specific, static-runtime WixStdBA functions DLL manages the temporary Windows 7 TLS 1.2 setting and the narrowly scoped final Visual C++ acquisition fallback after exhausted WinINet `12029` retries.
+
+### 11. ProxiFyreSetupEngineExtension
+
+This architecture-specific, static-runtime Burn engine extension conservatively repairs only the malformed all-zero WinINet LAN-route state inside the setup process, without rewriting the user's Internet Options.

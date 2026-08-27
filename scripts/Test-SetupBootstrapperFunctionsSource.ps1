@@ -19,6 +19,8 @@ if ($setDownloadSourceCalls.Count -ne 1 -or
 
 foreach ($requiredGuard in @(
         'IsWindows7()',
+        'OSVERSIONINFOEXW',
+        'VER_NT_WORKSTATION',
         'BOOTSTRAPPER_CACHE_OPERATION_DOWNLOAD',
         'ERROR_INTERNET_CANNOT_CONNECT',
         'BOOTSTRAPPER_CACHEACQUIRECOMPLETE_ACTION_NONE',
@@ -30,6 +32,10 @@ foreach ($requiredGuard in @(
     if ($source -notmatch [regex]::Escape($requiredGuard)) {
         throw "The Windows 7 Visual C++ transport guard is missing '$requiredGuard'."
     }
+}
+
+if ($source -notmatch '(?s)bool\s+IsWindows7\s*\(\s*\).*?OSVERSIONINFOEXW\s+version.*?dwMajorVersion\s*==\s*6.*?dwMinorVersion\s*==\s*1.*?wProductType\s*==\s*VER_NT_WORKSTATION') {
+    throw 'The Windows 7 transport guard must exclude Windows Server 2008 R2.'
 }
 
 $httpLiterals = [regex]::Matches($source, 'L"http://[^"\r\n]+"')

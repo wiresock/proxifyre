@@ -31,12 +31,12 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
-    <Version Condition="'$(Version)'==''">0.0.0</Version>
     <ProxiFyrePlatform Condition="'$(Platform)'=='Win32'">x86</ProxiFyrePlatform>
     <ProxiFyrePlatform Condition="'$(ProxiFyrePlatform)'==''">$(Platform)</ProxiFyrePlatform>
     <OutDir>$(ProjectDir)..\bin\exe\$(ProxiFyrePlatform)\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)..\bin\obj\ProxiFyreUILauncher\$(ProxiFyrePlatform)\$(Configuration)\</IntDir>
     <TargetName>ProxiFyreUI</TargetName>
+    <ProxiFyreApplicationManifest>$(IntDir)ProxiFyreUI.app.manifest</ProxiFyreApplicationManifest>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
     <ClCompile>
@@ -47,7 +47,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>_DEBUG;PROXIFYRE_VERSION_STRING=\&quot;$(Version)\&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;PROXIFYRE_VERSION_STRING=\&quot;$(Version)\&quot;;PROXIFYRE_VERSION_NUMERIC=$(ProxiFyreVersionTuple);%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -56,7 +56,7 @@
       <AdditionalDependencies>user32.lib;ole32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
-      <AdditionalManifestFiles>$(ProjectDir)..\ProxiFyreUI\app.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
+      <AdditionalManifestFiles>$(ProxiFyreApplicationManifest);%(AdditionalManifestFiles)</AdditionalManifestFiles>
     </Manifest>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
@@ -70,7 +70,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>PROXIFYRE_VERSION_STRING=\&quot;$(Version)\&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>PROXIFYRE_VERSION_STRING=\&quot;$(Version)\&quot;;PROXIFYRE_VERSION_NUMERIC=$(ProxiFyreVersionTuple);%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -81,7 +81,7 @@
       <AdditionalDependencies>user32.lib;ole32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
-      <AdditionalManifestFiles>$(ProjectDir)..\ProxiFyreUI\app.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
+      <AdditionalManifestFiles>$(ProxiFyreApplicationManifest);%(AdditionalManifestFiles)</AdditionalManifestFiles>
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -89,5 +89,12 @@
     <ResourceCompile Include="Resources.rc" />
     <ClInclude Include="resource.h" />
   </ItemGroup>
+  <Target Name="GenerateVersionedApplicationManifest" BeforeTargets="ComputeManifestInputsTargets">
+    <MakeDir Directories="$(IntDir)" />
+    <PropertyGroup>
+      <_ProxiFyreApplicationManifestContent>$([System.IO.File]::ReadAllText('$(ProjectDir)..\ProxiFyreUI\app.manifest').Replace('@@PROXIFYRE_VERSION@@', '$(Version)'))</_ProxiFyreApplicationManifestContent>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(ProxiFyreApplicationManifest)" Lines="$(_ProxiFyreApplicationManifestContent)" Overwrite="true" Encoding="UTF-8" />
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

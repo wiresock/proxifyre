@@ -42,6 +42,11 @@
     <IntDir>$(ProjectDir)..\bin\obj\ProxiFyreSetupEngineExtension\$(ProxiFyrePlatform)\$(Configuration)\</IntDir>
     <TargetName>ProxiFyreSetup.EngineExtension</TargetName>
   </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ResourceCompile>
+      <PreprocessorDefinitions>PROXIFYRE_VERSION_STRING=\&quot;$(Version)\&quot;;PROXIFYRE_VERSION_NUMERIC=$(ProxiFyreVersionTuple);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
@@ -81,6 +86,7 @@
   <ItemGroup>
     <ClCompile Include="BootstrapperExtension.cpp" />
     <None Include="BootstrapperExtension.def" />
+    <ResourceCompile Include="Version.rc" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="WixToolset.BootstrapperExtensionApi" Version="6.0.2" />

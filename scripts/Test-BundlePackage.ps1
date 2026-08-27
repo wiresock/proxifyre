@@ -69,6 +69,41 @@ function Get-PeArchitecture {
     finally { $stream.Dispose() }
 }
 
+function Assert-ReleaseVersion {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $DisplayName
+    )
+
+    $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+    foreach ($propertyName in @('FileVersion', 'ProductVersion')) {
+        $actualVersionText = [string] $versionInfo.$propertyName
+        [Version] $actualVersion = $null
+        if (-not [Version]::TryParse($actualVersionText, [ref] $actualVersion) -or
+            $actualVersion.Major -ne [int]([Version]$Version).Major -or
+            $actualVersion.Minor -ne [int]([Version]$Version).Minor -or
+            $actualVersion.Build -ne [int]([Version]$Version).Build -or
+            $actualVersion.Revision -notin @(-1, 0)) {
+            throw "$DisplayName has $propertyName '$actualVersionText'; expected '$Version'."
+        }
+    }
+
+    $expectedFixedVersion = "$Version.0"
+    $actualFixedVersions = @{
+        FileVersion = '{0}.{1}.{2}.{3}' -f $versionInfo.FileMajorPart,
+            $versionInfo.FileMinorPart, $versionInfo.FileBuildPart,
+            $versionInfo.FilePrivatePart
+        ProductVersion = '{0}.{1}.{2}.{3}' -f $versionInfo.ProductMajorPart,
+            $versionInfo.ProductMinorPart, $versionInfo.ProductBuildPart,
+            $versionInfo.ProductPrivatePart
+    }
+    foreach ($fixedVersionName in $actualFixedVersions.Keys) {
+        if ($actualFixedVersions[$fixedVersionName] -cne $expectedFixedVersion) {
+            throw "$DisplayName has fixed $fixedVersionName '$($actualFixedVersions[$fixedVersionName])'; expected '$expectedFixedVersion'."
+        }
+    }
+}
+
 function Find-Dumpbin {
     $command = Get-Command dumpbin.exe -ErrorAction SilentlyContinue |
         Select-Object -First 1 -ExpandProperty Source
@@ -165,6 +200,10 @@ try {
         $bootstrapperNamespace))
 
     $root = $manifest.SelectSingleNode('/b:BurnManifest', $namespace)
+    $registration = $manifest.SelectSingleNode(
+        '/b:BurnManifest/b:Registration', $namespace)
+    $registrationArp = $manifest.SelectSingleNode(
+        '/b:BurnManifest/b:Registration/b:Arp', $namespace)
     $bootstrapperFunctionsPayload = $manifest.SelectSingleNode(
         '/b:BurnManifest/b:UX/b:Payload[@Id="ProxiFyreSetupBootstrapperFunctions"]',
         $namespace)
@@ -241,7 +280,7 @@ try {
             $proxifyrePackage, $proxifyreArpSuppression, $proxifyreBundleMarker,
             $driverSearch, $serviceSearch, $bundleProperties,
             $bootstrapperFunctionsPayload, $engineExtensionEntry,
-            $engineExtensionPayload)) {
+            $engineExtensionPayload, $registration, $registrationArp)) {
         if ($null -eq $requiredNode) {
             throw 'The bundle is missing required prerequisite, application, or detection authoring.'
         }
@@ -254,6 +293,10 @@ try {
     }
     if ($bundleProperties.GetAttribute('DisplayName') -cne 'ProxiFyre') {
         throw 'The bundle display name must avoid the duplicated "Setup Setup" WixStdBA title.'
+    }
+    if ($registration.GetAttribute('Version') -cne $Version -or
+        $registrationArp.GetAttribute('DisplayVersion') -cne $Version) {
+        throw "The Burn registration and display versions must both equal $Version."
     }
     if ($bootstrapperFunctionsEntries.Count -ne 1 -or
         $bootstrapperFunctionsEntries[0].GetAttribute('PayloadId') -cne
@@ -269,6 +312,8 @@ try {
     if ((Get-PeArchitecture -Path $bootstrapperFunctionsPath) -cne $Architecture) {
         throw 'The WixStdBA functions payload architecture does not match the bundle engine.'
     }
+    Assert-ReleaseVersion -Path $bootstrapperFunctionsPath `
+        -DisplayName 'ProxiFyreSetup.BAFunctions.dll'
     if ($engineExtensionPayload.GetAttribute('FilePath') -cne
             'ProxiFyreSetup.EngineExtension.dll' -or
         -not [string]::IsNullOrEmpty(
@@ -284,6 +329,8 @@ try {
     if ((Get-PeArchitecture -Path $engineExtensionPath) -cne $Architecture) {
         throw 'The setup engine extension architecture does not match the bundle engine.'
     }
+    Assert-ReleaseVersion -Path $engineExtensionPath `
+        -DisplayName 'ProxiFyreSetup.EngineExtension.dll'
     $dumpbin = Find-Dumpbin
     if ([string]::IsNullOrWhiteSpace($dumpbin)) {
         throw 'dumpbin.exe was not found; Visual Studio C++ tools are required to validate the setup functions.'

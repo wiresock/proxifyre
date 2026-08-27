@@ -70,7 +70,7 @@ The workspace fingerprints the file when it is loaded. If another process change
 
 Engine logs are stored in the `logs` directory beside `ProxiFyre.exe`. `Info` records service lifecycle and configuration summaries; `Debug` additionally records per-connection routing, proxy negotiation, and relay details. The Logs tab reads a bounded tail with read/write sharing, follows appended content incrementally, switches to a newer daily file after rotation, and recovers from creation, truncation, or temporary locks. **Open log file** launches the file currently being followed, or the newest `.log`/`.txt` file when following is paused. The Logs-tab **View filter** changes only which already-written lines the GUI displays; it does not change the engine's logging verbosity or configuration and does not require a restart. Follow/pause, text filtering, copy, reload, clear-view, and open-folder actions affect only the viewer; clearing the view does not delete log files.
 
-Closing the window hides it in the notification area. The tray menu reflects the real service state and provides open, start, stop, restart, logs, and exit actions. Within each Windows identity and terminal session, ProxiFyre permits one GUI instance per application major/minor version; launching the same version again restores and activates the existing window, including a tray-hidden window. Exiting the GUI does not stop the engine service. Unsaved edits are checked before reload, engine changes, or application exit.
+Closing the window hides it in the notification area. The tray menu reflects the real service state and provides open, start, stop, restart, logs, and exit actions. Within each Windows identity and terminal session, ProxiFyre permits one GUI instance; launching it again restores and activates the existing window, including a tray-hidden window. Exiting the GUI does not stop the engine service. Unsaved edits are checked before reload, engine changes, or application exit.
 
 ## Build and test
 
@@ -82,31 +82,30 @@ From a Visual Studio developer shell:
 nuget restore ProxiFyre.Configuration\packages.config -PackagesDirectory packages -NonInteractive
 nuget restore ProxiFyre\packages.config -PackagesDirectory packages -NonInteractive
 nuget restore ProxiFyre.Tests\packages.config -PackagesDirectory packages -NonInteractive
-msbuild socksify.sln -t:Rebuild -v:minimal -p:Configuration=Release -p:Platform=x64 -p:Version=2.4.0
+
+msbuild ProxiFyreSetupBootstrapper\ProxiFyreSetupBootstrapper.vcxproj -t:Restore -v:minimal -p:RestoreLockedMode=true -p:RestoreConfigFile="$PWD\NuGet.Installer.Config"
+msbuild ProxiFyreSetupEngineExtension\ProxiFyreSetupEngineExtension.vcxproj -t:Restore -v:minimal -p:RestoreLockedMode=true -p:RestoreConfigFile="$PWD\NuGet.Installer.Config"
+dotnet restore ProxiFyre.Installer\ProxiFyre.Installer.wixproj --configfile NuGet.Installer.Config --locked-mode
+dotnet restore ProxiFyre.Bundle\ProxiFyre.Bundle.wixproj --configfile NuGet.Installer.Config --locked-mode
+
+msbuild socksify.sln -t:Rebuild -v:minimal -p:Configuration=Release -p:Platform=x64 -p:Version=2.5.0
 vstest.console.exe bin\tests\x64\Release\ProxiFyre.Tests.dll /TestAdapterPath:packages\NUnit3TestAdapter.4.6.0\build\net462 /Platform:x64
-pwsh -File scripts\Build-Installer.ps1 -Platform x64 -Version 2.4.0
+pwsh -File scripts\Build-Installer.ps1 -Platform x64 -Version 2.5.0 -NoRestore
 ```
 
-Replace `x64` with `x86` for tests on a matching host. The ARM64 payload can be cross-built when the Visual Studio toolchain is installed, but its tests must run on Windows ARM64 rather than an x64 CI host. Architecture-specific runtime files, including `ProxiFyre.exe`, the native `ProxiFyreUI.exe` host, `ProxiFyreUI.Managed.dll`, `socksify.dll`, `ProxiFyre.Configuration.dll`, managed dependencies, and the sample configuration, are placed in:
+The legacy `packages.config` projects, the two native setup helpers, and the two WiX projects are restored separately so their package-management models and locked installer dependency graph do not interfere with one another. `Directory.Build.props` is the repository version source; the explicit `2.5.0` arguments above make release validation unambiguous and must match it. Replace `x64` with `x86` for tests on a matching host. The ARM64 payload can be cross-built when the Visual Studio toolchain is installed, but its tests must run on Windows ARM64 rather than an x64 CI host. Architecture-specific runtime files, including `ProxiFyre.exe`, the native `ProxiFyreUI.exe` host, `ProxiFyreUI.Managed.dll`, `socksify.dll`, `ProxiFyre.Configuration.dll`, managed dependencies, and the sample configuration, are placed in:
 
 ```text
 bin\exe\<architecture>\Release\
 ```
 
-That Release directory is packaging output, not a developer launch directory. Because the
-first-party payload is unsigned, the elevated Release GUI refuses to load managed code from a
-user-writable extraction such as Downloads, `%TEMP%`, or the repository build tree. Use the setup
-package (recommended). For a Release ZIP test, an administrator must stage the complete archive
-on a fixed local volume in a protected per-machine directory: every directory component and
-payload file must be owned by `SYSTEM`, `Administrators`, or `TrustedInstaller`, and their ACLs
-must not let standard users replace files or change permissions. Create and protect a fresh
-destination before extracting into it; do not extract into a user-writable directory and tighten
-its ACL afterward, because existing mutation handles cannot be revoked. Use a Debug build for
-normal developer-tree testing.
+That Release directory feeds installer construction and release-ZIP creation; it is not a developer launch directory. The ZIP contains the application payload only. It is not an offline installer and does not install or detect the Visual C++ runtime, Windows Packet Filter, service registration, shortcuts, or firewall rules. Normal distribution uses the architecture-matched online `*-setup.exe`, which downloads and verifies missing prerequisites before installing the embedded MSI.
+
+Because the first-party payload is unsigned, the elevated Release GUI refuses to load managed code from a user-writable extraction such as Downloads, `%TEMP%`, or the repository build tree. For a Release ZIP test, an administrator must stage the complete archive on a fixed local volume in a protected per-machine directory: every directory component and payload file must be owned by `SYSTEM`, `Administrators`, or `TrustedInstaller`, and their ACLs must not let standard users replace files or change permissions. Create and protect a fresh destination before extracting into it; do not extract into a user-writable directory and tighten its ACL afterward, because existing mutation handles cannot be revoked. Use a Debug build for normal developer-tree testing.
 
 Tests write to `bin\tests\<architecture>\<configuration>\` and do not require the packet-filter driver, an installed service, administrator access, or a live SOCKS5 endpoint.
 
-The installer build writes the unsigned MSI, unsigned Burn setup executable, and SHA-256 sidecars to `bin\installer\<architecture>\Release\`. See [installer.md](installer.md) for the exact payload, pinned official Visual C++ and Windows Packet Filter acquisition flows, standalone-MSI requirements, firewall rules, upgrade/uninstall semantics, build options, and lifecycle validation matrix.
+The installer build writes the unsigned standalone MSI, unsigned online Burn setup executable, and SHA-256 sidecars to `bin\installer\<architecture>\Release\`. CI separately packages `bin\exe\<architecture>\Release\` as the application ZIP and publishes all three artifact types with checksums. Use setup for normal installation, the MSI for managed or offline deployment only when its prerequisites are already present, and the ZIP only for protected manual staging or payload inspection. See [installer.md](installer.md) for the exact payload, pinned official Visual C++ and Windows Packet Filter acquisition flows, standalone-MSI requirements, firewall rules, upgrade/uninstall semantics, build options, and lifecycle validation matrix.
 
 ## Troubleshooting
 

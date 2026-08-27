@@ -131,16 +131,54 @@ function Get-PeArchitecture {
     finally { $stream.Dispose() }
 }
 
+function Assert-ReleaseVersion {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $DisplayName
+    )
+
+    $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+    foreach ($propertyName in @('FileVersion', 'ProductVersion')) {
+        $actualVersionText = [string] $versionInfo.$propertyName
+        [Version] $actualVersion = $null
+        if (-not [Version]::TryParse($actualVersionText, [ref] $actualVersion) -or
+            $actualVersion.Major -ne [int] $versionMatch.Groups[1].Value -or
+            $actualVersion.Minor -ne [int] $versionMatch.Groups[2].Value -or
+            $actualVersion.Build -ne [int] $versionMatch.Groups[3].Value -or
+            $actualVersion.Revision -notin @(-1, 0)) {
+            throw "$DisplayName has $propertyName '$actualVersionText'; expected '$Version'. Rebuild the release payload with -p:Version=$Version."
+        }
+    }
+
+    $expectedFixedVersion = "$Version.0"
+    $actualFixedVersions = @{
+        FileVersion = '{0}.{1}.{2}.{3}' -f $versionInfo.FileMajorPart,
+            $versionInfo.FileMinorPart, $versionInfo.FileBuildPart,
+            $versionInfo.FilePrivatePart
+        ProductVersion = '{0}.{1}.{2}.{3}' -f $versionInfo.ProductMajorPart,
+            $versionInfo.ProductMinorPart, $versionInfo.ProductBuildPart,
+            $versionInfo.ProductPrivatePart
+    }
+    foreach ($fixedVersionName in $actualFixedVersions.Keys) {
+        if ($actualFixedVersions[$fixedVersionName] -cne $expectedFixedVersion) {
+            throw "$DisplayName has fixed $fixedVersionName '$($actualFixedVersions[$fixedVersionName])'; expected '$expectedFixedVersion'. Rebuild the release payload with -p:Version=$Version."
+        }
+    }
+}
+
 foreach ($architectureFile in @(
         'ProxiFyre.exe',
         'ProxiFyreUI.exe',
         'ProxiFyreUI.Managed.dll',
         'ProxiFyre.Configuration.dll',
         'socksify.dll')) {
-    $actualArchitecture = Get-PeArchitecture -Path (Join-Path $payloadPath $architectureFile)
+    $architecturePath = Join-Path $payloadPath $architectureFile
+    $actualArchitecture = Get-PeArchitecture -Path $architecturePath
     if ($actualArchitecture -cne $normalizedArchitecture) {
         throw "$architectureFile targets $actualArchitecture, not $normalizedArchitecture."
     }
+
+    Assert-ReleaseVersion -Path $architecturePath -DisplayName $architectureFile
 }
 $bootstrapperFunctionsArchitecture = Get-PeArchitecture -Path $bootstrapperFunctions
 if ($bootstrapperFunctionsArchitecture -cne $normalizedArchitecture) {
@@ -150,6 +188,10 @@ $bootstrapperExtensionArchitecture = Get-PeArchitecture -Path $bootstrapperExten
 if ($bootstrapperExtensionArchitecture -cne $normalizedArchitecture) {
     throw "Setup engine extension targets $bootstrapperExtensionArchitecture, not $normalizedArchitecture."
 }
+Assert-ReleaseVersion -Path $bootstrapperFunctions `
+    -DisplayName 'ProxiFyreSetup.BAFunctions.dll'
+Assert-ReleaseVersion -Path $bootstrapperExtension `
+    -DisplayName 'ProxiFyreSetup.EngineExtension.dll'
 
 & (Join-Path $PSScriptRoot 'Test-SetupEngineExtensionSource.ps1') `
     -SourcePath (Join-Path $repositoryRoot `

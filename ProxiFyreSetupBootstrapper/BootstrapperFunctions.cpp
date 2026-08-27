@@ -58,10 +58,11 @@ namespace
         if (rtlGetVersion == nullptr)
             return false;
 
-        OSVERSIONINFOW version{};
+        OSVERSIONINFOEXW version{};
         version.dwOSVersionInfoSize = sizeof(version);
-        return rtlGetVersion(&version) == 0 &&
-            version.dwMajorVersion == 6 && version.dwMinorVersion == 1;
+        return rtlGetVersion(reinterpret_cast<OSVERSIONINFOW*>(&version)) == 0 &&
+            version.dwMajorVersion == 6 && version.dwMinorVersion == 1 &&
+            version.wProductType == VER_NT_WORKSTATION;
     }
 
     bool IsHttpsUrl(const wchar_t* value)

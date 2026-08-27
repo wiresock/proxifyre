@@ -106,6 +106,7 @@
     <ItemGroup>
       <AssemblyAttributes Include="AssemblyVersion"><_Parameter1>$(Version)</_Parameter1></AssemblyAttributes>
       <AssemblyAttributes Include="AssemblyFileVersion"><_Parameter1>$(Version)</_Parameter1></AssemblyAttributes>
+      <AssemblyAttributes Include="AssemblyInformationalVersion"><_Parameter1>$(Version)</_Parameter1></AssemblyAttributes>
       <AssemblyAttributes Include="AssemblyMetadata"><_Parameter1>Repository</_Parameter1><_Parameter2>$(Repository)</_Parameter2></AssemblyAttributes>
     </ItemGroup>
     <MakeDir Directories="$(IntermediateOutputPath)" />

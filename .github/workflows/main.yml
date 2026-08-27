@@ -83,25 +83,30 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "WiX bundle restore failed with exit code $LASTEXITCODE." }
 
       - name: Parse Version
-        shell: bash
+        shell: pwsh
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          if [[ "$REF_TYPE" == "tag" ]]; then
-            if [[ "$REF_NAME" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-              VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
-            else
-              echo "Installer release tags must use vMAJOR.MINOR.PATCH. Prerelease suffixes cannot be represented safely by the three-part MSI ProductVersion." >&2
-              exit 1
-            fi
-            PACKAGE_LABEL="$REF_NAME"
-          else
-            VERSION="0.0.0"
-            PACKAGE_LABEL="ci-${{ github.run_id }}"
-          fi
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-          echo "PACKAGE_LABEL=${PACKAGE_LABEL}" >> $GITHUB_ENV
+          [xml] $versionProps = Get-Content -LiteralPath Directory.Build.props -Raw
+          $version = [string] $versionProps.Project.PropertyGroup.ProxiFyreReleaseVersion
+          if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw "Directory.Build.props contains invalid release version '$version'."
+          }
+
+          if ($env:REF_TYPE -eq 'tag') {
+            $expectedTag = "v$version"
+            if ($env:REF_NAME -cne $expectedTag) {
+              throw "Release tag '$($env:REF_NAME)' must match the repository version '$expectedTag'. Prerelease suffixes cannot be represented safely by the three-part MSI ProductVersion."
+            }
+            $packageLabel = $env:REF_NAME
+          }
+          else {
+            $packageLabel = 'ci-${{ github.run_id }}'
+          }
+
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PACKAGE_LABEL=$packageLabel" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build
         run: msbuild socksify.sln -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=${{ matrix.platform }} -property:Version=${{ env.VERSION }} -property:Repository=${{ github.repository }}
@@ -225,4 +230,5 @@ jobs:
           tag: ${{ github.ref_name }}
           token: ${{ github.token }}
           artifactErrorsFailBuild: true
+          generateReleaseNotes: true
           immutableCreate: true

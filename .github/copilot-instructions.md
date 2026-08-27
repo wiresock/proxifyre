@@ -1,6 +1,6 @@
 # ProxiFyre: SOCKS5 Proxifier for Windows
 
-ProxiFyre is a Windows-specific SOCKS5 proxifier application that builds upon the Windows Packet Filter's socksify demo. Its production projects are ndisapi.lib (Windows Packet Filter static library), socksify (.NET C++/CLI class library), ProxiFyre (C# console/service engine), ProxiFyre.Configuration (shared managed configuration library), and ProxiFyreUI (C# Windows Forms manager). ProxiFyre.Tests covers managed logic without requiring the driver or a live service.
+ProxiFyre is a Windows-specific SOCKS5 proxifier application that builds upon the Windows Packet Filter's socksify demo. The solution has 11 build projects: the packet-filter library, C++/CLI bridge, service engine, shared configuration library, managed UI, native UI launcher, managed tests, MSI, Burn bundle, and two native setup helpers. ProxiFyre.Tests covers managed logic without requiring the driver or a live service.
 
 **ALWAYS reference these instructions first and fallback to search or bash commands only when you encounter unexpected information that does not match the info here.**
 
@@ -8,22 +8,13 @@ ProxiFyre is a Windows-specific SOCKS5 proxifier application that builds upon th
 
 ### CRITICAL: Platform Requirements
 - **This application ONLY builds and runs on Windows**. Do not attempt to build on Linux/macOS.
-- Build requires: Windows, Visual Studio 2022 with MSBuild/C++ workloads, vcpkg, Windows Packet Filter (WinpkFilter)
+- Build requires Windows, Visual Studio 2022 with the MSBuild/C++ and .NET desktop workloads, the v143 toolset, a Windows SDK, the .NET Framework 4.7.2 targeting pack, NuGet CLI, vcpkg, PowerShell 7, and a .NET SDK that can restore WiX 6.0.2.
 - If you are in a Linux environment: **Document that builds cannot be completed** and focus on repository navigation and structure analysis only.
 
-### Prerequisites Installation (Windows Only)
-Install these dependencies in the following exact order:
+### Build Prerequisites (Windows Only)
 
-1. **Windows Packet Filter (WinpkFilter)**:
-   - Download from: `https://github.com/wiresock/ndisapi/releases`
-   - Follow installation instructions from the release page
-   - Required for ndisapi.lib functionality
-
-2. **Visual Studio 2022 Runtime Libraries**:
-   - Download from: `https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170`
-   - Install appropriate architecture version (x64, x86, or ARM64)
-
-3. **vcpkg Package Manager**:
+1. **Visual Studio 2022** with the workloads, toolset, SDK, and targeting pack listed above.
+2. **vcpkg Package Manager**:
    ```cmd
    git clone https://github.com/Microsoft/vcpkg.git
    cd vcpkg
@@ -31,44 +22,55 @@ Install these dependencies in the following exact order:
    .\vcpkg integrate install
    ```
 
-4. **Install Required vcpkg Packages**:
+3. **Install Required vcpkg Packages**:
    ```cmd
    .\vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows
    .\vcpkg install boost-pool:x86-windows boost-pool:x64-windows boost-pool:arm64-windows
    ```
    - **NEVER CANCEL**: Package installation takes 10-15 minutes. Set timeout to 30+ minutes.
 
-5. **NuGet CLI**:
+4. **NuGet CLI**:
    - Install via: `choco install nuget.commandline` or download from nuget.org
+5. **PowerShell 7 and a .NET SDK** capable of restoring the pinned WiX Toolset 6.0.2 SDK and extensions.
+
+Windows Packet Filter and the architecture-matched Visual C++ runtime are target runtime/manual integration-test prerequisites, not source-build prerequisites. `Build-Installer.ps1` downloads their official packages or accepts validated local copies as installer binding inputs; they do not need to be installed merely to compile or run the managed tests.
 
 ### Building the Application (Windows Only)
 
 **CRITICAL BUILD TIMING**: All build commands require extended timeouts. **NEVER CANCEL** builds in progress.
 
-1. **Restore NuGet Packages**:
-   ```cmd
-   nuget restore socksify.sln
+1. **Restore packages in isolated groups** from PowerShell. Do not replace this sequence with a solution-wide NuGet restore: the legacy `packages.config` projects, native setup helpers, and SDK-style WiX projects use different restore models, while installer restores must honor their lock files and `NuGet.Installer.Config`.
+   ```powershell
+   nuget restore ProxiFyre.Configuration\packages.config -PackagesDirectory packages -NonInteractive
+   nuget restore ProxiFyre\packages.config -PackagesDirectory packages -NonInteractive
+   nuget restore ProxiFyre.Tests\packages.config -PackagesDirectory packages -NonInteractive
+
+   msbuild ProxiFyreSetupBootstrapper\ProxiFyreSetupBootstrapper.vcxproj -target:Restore -verbosity:minimal -property:RestoreLockedMode=true -property:RestoreConfigFile="$PWD\NuGet.Installer.Config"
+   msbuild ProxiFyreSetupEngineExtension\ProxiFyreSetupEngineExtension.vcxproj -target:Restore -verbosity:minimal -property:RestoreLockedMode=true -property:RestoreConfigFile="$PWD\NuGet.Installer.Config"
+   dotnet restore ProxiFyre.Installer\ProxiFyre.Installer.wixproj --configfile NuGet.Installer.Config --locked-mode
+   dotnet restore ProxiFyre.Bundle\ProxiFyre.Bundle.wixproj --configfile NuGet.Installer.Config --locked-mode
    ```
    - Takes: 2-5 minutes. Set timeout to 10+ minutes.
 
-2. **Build the Solution**:
+2. **Build the solution**. `Directory.Build.props` is the single repository release-version source and currently declares `2.5.0`; normal local builds inherit it. An explicit version is appropriate for release verification and controlled tests, but it must match the repository value for a release:
    ```cmd
-   msbuild socksify.sln -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=x64
+   msbuild socksify.sln -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=x64 -property:Version=2.5.0
    ```
    - **NEVER CANCEL**: Build takes 5-8 minutes on average. Set timeout to 15+ minutes.
    - For other platforms, replace `x64` with `x86` or `ARM64`
    - Debug builds: Replace `Release` with `Debug`
 
-3. **Alternative Build Command**:
-   ```cmd
-   msbuild socksify.sln -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=x64 -property:Version=2.1.1
-   ```
-
-4. **Run managed tests** after the solution build:
+3. **Run managed tests** after the solution build:
    ```cmd
    vstest.console.exe bin\tests\x64\Release\ProxiFyre.Tests.dll /TestAdapterPath:packages\NUnit3TestAdapter.4.6.0\build\net462 /Platform:x64
    ```
    Use a test assembly matching the host architecture; an x64 runner must not attempt to execute the ARM64 test assembly. The tests must remain independent of `socksify.dll`, the packet-filter driver, SCM mutations, and a live SOCKS5 endpoint.
+
+4. **Build and validate the MSI and online setup** after the isolated restores and solution build:
+   ```powershell
+   pwsh -File scripts\Build-Installer.ps1 -Platform x64 -Version 2.5.0 -NoRestore
+   ```
+   The release tag must be exactly `v2.5.0` when `Directory.Build.props` declares `2.5.0`.
 
 ## Running the Application (Windows Only)
 
@@ -82,7 +84,7 @@ Install these dependencies in the following exact order:
 2. Run: `ProxiFyre.exe`
 3. **MANUAL VALIDATION**: Always test functionality by:
    - Creating a valid `app-config.json` with test SOCKS5 proxy settings
-   - Running the application and monitoring logs in `/logs` directory
+   - Running the application and monitoring logs in the `.\logs` directory beside `ProxiFyre.exe`
    - Verifying network traffic is routed through proxy using network monitoring tools
 
 ### Running as Windows Service
@@ -141,7 +143,7 @@ Create this file in the same directory as `ProxiFyre.exe`:
 
 ### Runtime Validation (Windows Only)
 - Always test with a working SOCKS5 proxy server
-- Monitor application logs in `/logs` directory
+- Monitor application logs in the `.\logs` directory beside `ProxiFyre.exe`
 - Test both TCP and UDP traffic routing if configured
 - Verify excluded applications bypass the proxy
 - Use network monitoring tools to confirm proxy routing
@@ -199,8 +201,17 @@ Create this file in the same directory as `ProxiFyre.exe`:
    - Pinned WiX 6.0.2 Burn setup that embeds the ProxiFyre MSI
    - Detects compatible Visual C++ and Windows Packet Filter prerequisites and otherwise acquires the verified official architecture-specific packages
 
+10. **ProxiFyreSetupBootstrapper** (`./ProxiFyreSetupBootstrapper/`):
+    - Statically linked native WixStdBA functions DLL embedded in setup
+    - Temporarily enables the Windows 7 WinINet TLS 1.2 bit and, only after the normal HTTPS retries end in error 12029 for the exact pinned Visual C++ payload, permits one digest-verified attempt at the same Microsoft content-addressed URL over HTTP
+
+11. **ProxiFyreSetupEngineExtension** (`./ProxiFyreSetupEngineExtension/`):
+    - Statically linked native Burn engine extension embedded in setup
+    - Applies a process-scoped DIRECT WinINet route only for the narrowly validated all-zero connection-flags state, without changing registry-backed Internet Options
+
 ### Important Files
 - `socksify.sln`: Main Visual Studio solution file
+- `Directory.Build.props`: Canonical repository release version and default repository metadata
 - `README.md`: User documentation and setup instructions
 - `docs/installer.md`: Installer architecture, build, prerequisite, lifecycle, and validation documentation
 - `scripts/Build-Installer.ps1`: Supported MSI/setup build and validation entry point
@@ -217,7 +228,7 @@ Create this file in the same directory as `ProxiFyre.exe`:
 ```bash
 # Root directory listing
 ls -la
-# Output includes ProxiFyre/, ProxiFyreUI/, ProxiFyre.Installer/, ProxiFyre.Bundle/, socksify/, ndisapi.lib/, include/, netlib/, scripts/, docs/, README.md, and socksify.sln
+# Output includes the engine, managed UI, native launcher, tests, MSI, bundle, both setup helpers, socksify, ndisapi.lib, include, netlib, scripts, docs, README.md, and socksify.sln
 
 # Key configuration files
 find . -name "*.json" -o -name "*.config" -o -name "packages.config"
@@ -225,7 +236,7 @@ find . -name "*.json" -o -name "*.config" -o -name "packages.config"
 
 # Project structure
 find . -name "*.csproj" -o -name "*.vcxproj" -o -name "*.wixproj" -o -name "*.sln"
-# Output additionally includes the managed UI/tests and WiX MSI/Burn projects
+# Output additionally includes the managed UI/tests, native launcher, WiX MSI/Burn projects, and both native setup helpers
 ```
 
 ### Source Code Analysis
@@ -262,7 +273,7 @@ find . -name "*.cpp" -o -name "*.h"
 - **Build Process**: ~5-8 minutes per platform (x86, x64, ARM64)
 - **vcpkg Dependencies**: ~10-15 minutes for installation
 - **Total Pipeline**: ~20-25 minutes for complete build across all platforms
-- **Artifacts**: Creates final unsigned architecture-specific ZIP, MSI, online prerequisite setup bundle, and SHA-256 files directly; releases do not require certificates, signing secrets, or a post-build signing pass
+- **Artifacts**: Creates an unsigned architecture-specific application ZIP, standalone MSI, online prerequisite setup bundle, and SHA-256 files. The ZIP is not an offline installer. Setup downloads and verifies the pinned Visual C++ and Windows Packet Filter packages when compatible prerequisites are missing; the standalone MSI and manually staged ZIP require prerequisites to be present. Releases do not require certificates, signing secrets, or a post-build signing pass.
 
 ### Build Matrix
 - Platforms: x86, x64, ARM64

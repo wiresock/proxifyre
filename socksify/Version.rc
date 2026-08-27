@@ -1,19 +1,12 @@
-#include "resource.h"
 #include <windows.h>
-
-IDI_PROXIFYRE_ICON ICON "..\\assets\\ProxiFyre.ico"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION PROXIFYRE_VERSION_NUMERIC
  PRODUCTVERSION PROXIFYRE_VERSION_NUMERIC
  FILEFLAGSMASK 0x3fL
-#ifdef _DEBUG
- FILEFLAGS VS_FF_DEBUG
-#else
  FILEFLAGS 0x0L
-#endif
  FILEOS VOS_NT_WINDOWS32
- FILETYPE VFT_APP
+ FILETYPE VFT_DLL
  FILESUBTYPE 0x0L
 BEGIN
   BLOCK "StringFileInfo"
@@ -21,10 +14,10 @@ BEGIN
     BLOCK "040904b0"
     BEGIN
       VALUE "CompanyName", "NT KERNEL\0"
-      VALUE "FileDescription", "ProxiFyre UI native integrity host\0"
+      VALUE "FileDescription", "ProxiFyre SOCKS routing bridge\0"
       VALUE "FileVersion", PROXIFYRE_VERSION_STRING "\0"
-      VALUE "InternalName", "ProxiFyreUI\0"
-      VALUE "OriginalFilename", "ProxiFyreUI.exe\0"
+      VALUE "InternalName", "socksify\0"
+      VALUE "OriginalFilename", "socksify.dll\0"
       VALUE "ProductName", "ProxiFyre\0"
       VALUE "ProductVersion", PROXIFYRE_VERSION_STRING "\0"
     END
