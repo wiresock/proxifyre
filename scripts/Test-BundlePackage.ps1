@@ -24,6 +24,45 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+function Get-PeArchitecture {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $reader = [IO.BinaryReader]::new($stream, [Text.Encoding]::UTF8, $true)
+        try {
+            if ($reader.ReadUInt16() -ne 0x5A4D) { throw "'$Path' is not a PE image." }
+            $stream.Position = 0x3c
+            $peOffset = $reader.ReadUInt32()
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x00004550) { throw "'$Path' has no PE signature." }
+            $machine = $reader.ReadUInt16()
+            switch ($machine) {
+                0x014c { 'x86' }
+                0x8664 { 'x64' }
+                0xaa64 { 'arm64' }
+                default { throw "'$Path' has an unsupported PE machine type." }
+            }
+        }
+        finally { $reader.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
+function Find-Dumpbin {
+    $command = Get-Command dumpbin.exe -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty Source
+    if (-not [string]::IsNullOrWhiteSpace($command)) { return $command }
+
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not [IO.File]::Exists($vswhere)) { return $null }
+    $matches = @(& $vswhere -latest -products * -find 'VC\Tools\MSVC\**\dumpbin.exe')
+    $preferred = $matches | Where-Object {
+        $_ -match '\\Hostx64\\x64\\dumpbin\.exe$'
+    } | Select-Object -First 1
+    if (-not [string]::IsNullOrWhiteSpace($preferred)) { return $preferred }
+    return $matches | Select-Object -First 1
+}
+
 $resolvedBundle = (Get-Item -LiteralPath $BundlePath -Force).FullName
 $globalPackagesFolder = if ([string]::IsNullOrWhiteSpace($env:NUGET_PACKAGES)) {
     Join-Path ([Environment]::GetFolderPath('UserProfile')) '.nuget\packages'
@@ -61,6 +100,27 @@ try {
     if (-not [IO.File]::Exists($bootstrapperDataPath)) {
         throw 'The extracted bundle does not contain bootstrapper application data.'
     }
+    $themePath = Join-Path $baDirectory 'thm.xml'
+    $windowIconPath = Join-Path $baDirectory 'ProxiFyre.ico'
+    $bootstrapperFunctionsPath = Join-Path $baDirectory 'ProxiFyreSetup.BAFunctions.dll'
+    if (-not [IO.File]::Exists($themePath) -or
+        -not [IO.File]::Exists($windowIconPath) -or
+        -not [IO.File]::Exists($bootstrapperFunctionsPath)) {
+        throw 'The extracted bootstrapper application is missing its custom theme, window icon, or setup functions.'
+    }
+    [xml]$theme = [IO.File]::ReadAllText($themePath)
+    $themeNamespace = [Xml.XmlNamespaceManager]::new($theme.NameTable)
+    $themeNamespace.AddNamespace('thm', 'http://wixtoolset.org/schemas/v4/thmutil')
+    $themeWindow = $theme.SelectSingleNode('/thm:Theme/thm:Window', $themeNamespace)
+    if ($null -eq $themeWindow -or
+        $themeWindow.GetAttribute('IconFile') -cne 'ProxiFyre.ico') {
+        throw 'The bootstrapper theme must use the ProxiFyre window/taskbar icon.'
+    }
+    $sourceIconPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'assets\ProxiFyre.ico'
+    if ((Get-FileHash -LiteralPath $windowIconPath -Algorithm SHA256).Hash -cne
+        (Get-FileHash -LiteralPath $sourceIconPath -Algorithm SHA256).Hash) {
+        throw 'The bootstrapper window icon differs from the canonical ProxiFyre asset.'
+    }
     [xml]$manifest = [IO.File]::ReadAllText($manifestPath)
     $namespace = [Xml.XmlNamespaceManager]::new($manifest.NameTable)
     $namespace.AddNamespace('b', 'http://wixtoolset.org/schemas/v4/2008/Burn')
@@ -75,8 +135,14 @@ try {
     $bundleProperties = $bootstrapperData.SelectSingleNode(
         '/ba:BootstrapperApplicationData/ba:WixBundleProperties',
         $bootstrapperNamespace)
+    $bootstrapperFunctionsEntries = @($bootstrapperData.SelectNodes(
+        '/ba:BootstrapperApplicationData/ba:WixBalBAFunctions',
+        $bootstrapperNamespace))
 
     $root = $manifest.SelectSingleNode('/b:BurnManifest', $namespace)
+    $bootstrapperFunctionsPayload = $manifest.SelectSingleNode(
+        '/b:BurnManifest/b:UX/b:Payload[@Id="ProxiFyreSetupBootstrapperFunctions"]',
+        $namespace)
     $visualCppPayload = $manifest.SelectSingleNode(
         '/b:BurnManifest/b:Payload[@Id="VisualCppRuntime"]', $namespace)
     $visualCppPackage = $manifest.SelectSingleNode(
@@ -142,7 +208,8 @@ try {
             $visualCppAtomicWaitSearch, $visualCppVcruntimeSearch,
             $visualCppVcruntime1Search, $wpfPayload, $wpfPackage, $proxifyrePayload,
             $proxifyrePackage, $proxifyreArpSuppression, $proxifyreBundleMarker,
-            $driverSearch, $serviceSearch, $bundleProperties)) {
+            $driverSearch, $serviceSearch, $bundleProperties,
+            $bootstrapperFunctionsPayload)) {
         if ($null -eq $requiredNode) {
             throw 'The bundle is missing required prerequisite, application, or detection authoring.'
         }
@@ -155,6 +222,35 @@ try {
     }
     if ($bundleProperties.GetAttribute('DisplayName') -cne 'ProxiFyre') {
         throw 'The bundle display name must avoid the duplicated "Setup Setup" WixStdBA title.'
+    }
+    if ($bootstrapperFunctionsEntries.Count -ne 1 -or
+        $bootstrapperFunctionsEntries[0].GetAttribute('PayloadId') -cne
+            'ProxiFyreSetupBootstrapperFunctions' -or
+        $bootstrapperFunctionsEntries[0].GetAttribute('FilePath') -cne
+            'ProxiFyreSetup.BAFunctions.dll' -or
+        $bootstrapperFunctionsPayload.GetAttribute('FilePath') -cne
+            'ProxiFyreSetup.BAFunctions.dll' -or
+        -not [string]::IsNullOrEmpty(
+            $bootstrapperFunctionsPayload.GetAttribute('DownloadUrl'))) {
+        throw 'The bundle must embed exactly one architecture-matched WixStdBA functions payload.'
+    }
+    if ((Get-PeArchitecture -Path $bootstrapperFunctionsPath) -cne $Architecture) {
+        throw 'The WixStdBA functions payload architecture does not match the bundle engine.'
+    }
+    $dumpbin = Find-Dumpbin
+    if ([string]::IsNullOrWhiteSpace($dumpbin)) {
+        throw 'dumpbin.exe was not found; Visual Studio C++ tools are required to validate the setup functions.'
+    }
+    $exports = (& $dumpbin /nologo /exports $bootstrapperFunctionsPath 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or
+        $exports -notmatch '(?m)\bBAFunctionsCreate\b' -or
+        $exports -notmatch '(?m)\bBAFunctionsDestroy\b') {
+        throw 'The WixStdBA functions payload is missing its required exports.'
+    }
+    $dependencies = (& $dumpbin /nologo /dependents $bootstrapperFunctionsPath 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or
+        $dependencies -match '(?im)^\s*(?:VCRUNTIME|MSVCP|UCRTBASE|api-ms-win-crt)') {
+        throw 'The setup functions must not depend on the Visual C++ runtime they help acquire.'
     }
     $expectedNativeArchitectureCondition = switch ($Architecture) {
         'x86' { '(NOT VersionNT64 AND NOT NativeMachine) OR NativeMachine = 332' }

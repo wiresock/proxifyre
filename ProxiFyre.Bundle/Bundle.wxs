@@ -23,9 +23,31 @@
     <BootstrapperApplication>
       <bal:WixStandardBootstrapperApplication
           Theme="hyperlinkLicense"
+          ThemeFile="HyperlinkLicenseTheme.xml"
           LicenseUrl="https://github.com/wiresock/proxifyre/blob/main/LICENSE"
           LogoFile="..\assets\ProxiFyre.ico"
           SuppressOptionsUI="yes" />
+      <!--
+        WiX 6 hosts WixStdBA out of process, so Bundle/@IconSourceFile does not
+        brand the bootstrapper window itself. Ship the same multi-size icon as
+        a BA payload and let the custom theme use it for the window/taskbar.
+      -->
+      <Payload
+          Id="ProxiFyreBundleWindowIcon"
+          Name="ProxiFyre.ico"
+          SourceFile="..\assets\ProxiFyre.ico"
+          Compressed="yes" />
+      <!--
+        Burn 6 inherits the current user's WinINet protocol selection. This
+        native hook enables TLS 1.2 only while Windows 7 is acquiring remote
+        HTTPS prerequisites, then restores the exact prior registry value.
+      -->
+      <Payload
+          Id="ProxiFyreSetupBootstrapperFunctions"
+          Name="ProxiFyreSetup.BAFunctions.dll"
+          SourceFile="$(BootstrapperFunctionsPath)"
+          Compressed="yes"
+          bal:BAFunctions="yes" />
     </BootstrapperApplication>
 
     <bal:Condition

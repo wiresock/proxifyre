@@ -12,14 +12,17 @@ The packaging uses WiX Toolset **6.0.2** through pinned SDK-style projects:
 
 - `ProxiFyre.Installer/ProxiFyre.Installer.wixproj` builds the per-architecture MSI.
 - `ProxiFyre.Bundle/ProxiFyre.Bundle.wixproj` builds the per-architecture Burn bootstrapper.
+- `ProxiFyreSetupBootstrapper/ProxiFyreSetupBootstrapper.vcxproj` builds the architecture-matched, static-runtime WixStdBA functions DLL used for Windows 7 HTTPS acquisition.
 - `scripts/Build-Installer.ps1` validates and stages a closed runtime payload, validates both prerequisite sources, builds both packages, and writes SHA-256 sidecars.
 - `scripts/Test-InstallerPackage.ps1` statically inspects the MSI database.
-- `scripts/Test-BundlePackage.ps1` extracts and verifies the Burn manifest, prerequisite metadata, and chain order.
+- `scripts/Test-BundlePackage.ps1` extracts and verifies the Burn manifest, prerequisite metadata, chain order, custom window icon, and native bootstrapper-functions payload.
 - `scripts/Test-UnsignedArtifacts.ps1` rejects Authenticode signatures on ProxiFyre's first-party release modules and packages.
 
 WiX 6 was selected because its SDK-style projects build cleanly from the Visual Studio 2022/.NET SDK environment, and its maintained Burn, Firewall, UI, and Util extensions cover the required bootstrapper, declarative firewall, feature-selection, and prerequisite searches. Package lock files and `NuGet.Installer.Config` pin restoration to the reviewed WiX 6.0.2 inputs.
 
 The MSI/bootstrapper model keeps Windows Installer deterministic: the MSI never downloads or launches another installer through a custom action. Burn owns acquisition and chaining, while the MSI remains independently deployable when administrators have already provisioned both prerequisites.
+
+WiX 6 runs WixStdBA in a separate process, whose window does not inherit `Bundle/@IconSourceFile`. ProxiFyre therefore supplies a custom copy of the WiX hyperlink-license theme whose `Window/@IconFile` references the canonical multi-size `ProxiFyre.ico` payload. Package inspection checks both the theme reference and the extracted icon bytes so the setup title bar and taskbar retain the application branding, including on Windows 7.
 
 ## Architecture-specific artifacts
 
@@ -34,13 +37,17 @@ ProxiFyre-2.4.0-win-x86-setup.exe.sha256
 
 The x64 and ARM64 directories use `x64` and `arm64` in the corresponding filenames. Use the package matching the machine's native Windows architecture. The bootstrapper checks that architecture before acquisition because Windows Packet Filter is a kernel driver; for example, the x86 setup deliberately does not use Windows' x86 emulation on an x64 machine. All five first-party architecture-bound PE files (`ProxiFyre.exe`, the native UI host, both managed assemblies, and `socksify.dll`) are checked against the requested architecture before packaging.
 
-WiX can also materialize the verified, uncompressed Visual C++ and Windows Packet Filter source payloads beside the local bundle as layout byproducts. They remain ignored build output and are not published as ProxiFyre release assets; the release workflow uploads only the four `ProxiFyre-*` files above, and setup acquires missing prerequisites from their pinned official URLs.
+WiX materializes the verified, uncompressed Visual C++ and Windows Packet Filter source payloads while linking the bundle. The packaging script confines those layout byproducts to its guarded temporary staging directory and deletes them after validation. The output directory therefore contains only the four `ProxiFyre-*` files above, and setup must acquire missing prerequisites from their pinned official URLs.
 
 ## Windows 7 baseline
 
 Windows 7 is supported only with Service Pack 1. Both setup and the standalone MSI reject Windows 7 RTM before acquiring or installing prerequisites. Before testing on Windows 7 SP1, install the current servicing-stack and SHA-2 support updates available for that image and reboot. In particular, [Microsoft's SHA-2 guidance](https://support.microsoft.com/en-us/topic/2019-sha-2-code-signing-support-requirement-for-windows-and-wsus-64d1c82d-31ee-c273-3930-69a4cde8e64f) documents KB4490628 and KB4474419 (or superseding updates) as the servicing baseline for post-2019 SHA-2 updates; this is a recommended fully patched baseline, not the cause of the Visual C++ detection failure fixed here.
 
 The pinned Visual C++ redistributable carries [the Universal CRT update](https://support.microsoft.com/en-us/servicing/os/windows/2020/04/update-for-universal-c-runtime-in-windows) needed by its runtime on Windows 7. If that prerequisite reports that a reboot is required, Burn schedules the reboot and the installation must be retried or completed after Windows restarts. VM validation must therefore include a clean Windows 7 SP1 x64 image, prerequisite installation, any requested reboot, and a second setup run.
+
+Burn uses the current user's WinINet protocol settings for remote payloads. On Windows 7 only, immediately before the first HTTPS prerequisite acquisition, ProxiFyre's native setup-functions DLL temporarily adds the TLS 1.2 bit to `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\SecureProtocols`. It records whether the value originally existed and its exact contents, restores that state when caching completes or setup exits, and avoids overwriting a concurrent Internet Options change. The helper uses the static C++ runtime so it can run before the Visual C++ prerequisite is present. Later Windows versions and cache-only/local installation paths are unchanged.
+
+This compatibility hook addresses the legacy Windows 7 protocol default; it cannot repair a missing route, blocked firewall, unusable proxy, certificate-trust failure, or an unreachable upstream server. A download log with HTTP status `0` and WinINet error `12029` should still be diagnosed as a connection-layer failure if enabling TLS 1.2 does not resolve it.
 
 ## MSI contents and behavior
 
@@ -177,6 +184,7 @@ From a Visual Studio developer shell:
 
 ```powershell
 nuget restore .\socksify.sln
+msbuild .\ProxiFyreSetupBootstrapper\ProxiFyreSetupBootstrapper.vcxproj -t:Restore -v:minimal -p:RestoreLockedMode=true -p:RestoreConfigFile="$PWD\NuGet.Installer.Config"
 msbuild .\socksify.sln -t:Rebuild -v:minimal -p:Configuration=Release -p:Platform=x64 -p:Version=2.4.0
 vstest.console.exe .\bin\tests\x64\Release\ProxiFyre.Tests.dll /TestAdapterPath:.\packages\NUnit3TestAdapter.4.6.0\build\net462 /Platform:x64
 pwsh -File .\scripts\Build-Installer.ps1 -Platform x64 -Version 2.4.0
@@ -217,7 +225,8 @@ Coverage labels used below:
 | Scenario | Expected result | Coverage |
 | --- | --- | --- |
 | Setup on Windows 7 RTM | Setup exits immediately with an actionable Windows 7 SP1/update message and acquires nothing. | Manual on a disposable VM; the compiled WixStdBA condition is automated/static. |
-| Clean setup on fully updated Windows 7 SP1 x64 | Burn installs any missing pinned VC/WPF prerequisites, honors a requested reboot, and then installs ProxiFyre successfully. | Manual on a disposable Windows 7 SP1 VM. |
+| Clean online setup on fully updated Windows 7 SP1 with TLS 1.2 initially disabled in Internet Options | Setup temporarily enables TLS 1.2 for the current user's WinINet downloads, installs any missing pinned VC/WPF prerequisites, and restores `SecureProtocols` byte-for-byte (including absence) after caching or cancellation. | Manual on a disposable Windows 7 SP1 VM; embedding, CPU architecture, exports, and static-runtime dependencies of the helper are automated/static. |
+| Setup window branding on Windows 7 | The setup title bar and taskbar use the canonical ProxiFyre icon rather than the generic WixStdBA host icon. | Manual on Windows 7; theme reference and extracted icon identity are automated/static. |
 | Clean setup with both prerequisites already installed | Burn skips the Visual C++ and WPF packages; ProxiFyre MSI installs successfully. | Manual; prerequisite version/search authoring is automated/static. |
 | ProxiFyre Setup chains the MSI after validating Visual C++ | Burn supplies `BURNMSIINSTALL=1` and the bundle supplies its prerequisite marker; the MSI does not repeat the inconsistent AppSearch launch gate, while all other launch conditions remain active. | Manual; Burn detection and the two-marker MSI bypass are automated/static. |
 | Clean standalone MSI with both prerequisites installed | MSI accepts both prerequisites and installs without network acquisition. | Manual; launch-condition presence is automated/static. |
@@ -272,7 +281,7 @@ Before repair, upgrade, and uninstall, record SHA-256 hashes of `app-config.json
 - The service is not automatically started because the user must first create or validate `app-config.json`.
 - A pre-MSI ZIP/manual installation requires a manual migration; major upgrade applies to MSI-installed versions.
 - Cross-architecture installation and in-place architecture switching are unsupported; uninstall the old architecture and install the setup matching native Windows.
-- Windows 7 must be SP1 and should have the current servicing-stack and SHA-2 support updates installed; Windows 7 is end-of-life, so this legacy path needs an explicit disposable-VM pass for each release.
+- Windows 7 must be SP1 and should have the current servicing-stack and SHA-2 support updates installed. The setup compensates for a disabled TLS 1.2 WinINet default during acquisition, but Windows 7 is end-of-life, so this legacy path still needs an explicit disposable-VM pass for each release.
 - Full install, repair, upgrade, firewall, driver, and uninstall behavior requires disposable-machine validation for every release and architecture.
 - Windows Packet Filter licensing and distribution terms remain the distributor's responsibility; this project does not assert redistribution rights.
 - Microsoft Visual C++ runtime redistribution is subject to the release publisher's applicable Visual Studio license; the project does not grant that right independently.

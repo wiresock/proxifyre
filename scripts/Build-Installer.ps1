@@ -11,6 +11,7 @@ param(
 
     [string] $PayloadDirectory,
     [string] $OutputDirectory,
+    [string] $BootstrapperFunctionsPath,
     [string] $WindowsPacketFilterMsiPath,
     [string] $VisualCppRedistributablePath,
     [switch] $NoRestore,
@@ -52,6 +53,19 @@ if (-not [IO.Directory]::Exists($payloadPath)) {
 $payloadRoot = Get-Item -LiteralPath $payloadPath -Force
 if (($payloadRoot.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "Payload directory '$payloadPath' must not be a reparse point."
+}
+if ([string]::IsNullOrWhiteSpace($BootstrapperFunctionsPath)) {
+    $payloadConfiguration = Split-Path -Leaf $payloadPath
+    $BootstrapperFunctionsPath = Join-Path $repositoryRoot (
+        "bin\setup\$dotnetPlatform\$payloadConfiguration\ProxiFyreSetup.BAFunctions.dll")
+}
+$bootstrapperFunctions = [IO.Path]::GetFullPath($BootstrapperFunctionsPath)
+if (-not [IO.File]::Exists($bootstrapperFunctions)) {
+    throw "Setup BAFunctions DLL '$bootstrapperFunctions' does not exist. Build ProxiFyreSetupBootstrapper for $dotnetPlatform first or pass -BootstrapperFunctionsPath."
+}
+$bootstrapperFunctionsItem = Get-Item -LiteralPath $bootstrapperFunctions -Force
+if (($bootstrapperFunctionsItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Setup BAFunctions DLL '$bootstrapperFunctions' must not be a reparse point."
 }
 
 $runtimeFiles = @(
@@ -113,6 +127,10 @@ foreach ($architectureFile in @(
     if ($actualArchitecture -cne $normalizedArchitecture) {
         throw "$architectureFile targets $actualArchitecture, not $normalizedArchitecture."
     }
+}
+$bootstrapperFunctionsArchitecture = Get-PeArchitecture -Path $bootstrapperFunctions
+if ($bootstrapperFunctionsArchitecture -cne $normalizedArchitecture) {
+    throw "Setup BAFunctions DLL targets $bootstrapperFunctionsArchitecture, not $normalizedArchitecture."
 }
 
 $wpfPackages = @{
@@ -191,6 +209,7 @@ $stagedPayload = Join-Path $temporaryRoot 'payload'
 $licenseRtf = Join-Path $temporaryRoot 'License.rtf'
 $installerIntermediate = Join-Path $temporaryRoot 'installer-obj'
 $bundleIntermediate = Join-Path $temporaryRoot 'bundle-obj'
+$bundleOutput = Join-Path $temporaryRoot 'bundle-output'
 $downloadedWpf = Join-Path $temporaryRoot $wpf.FileName
 $downloadedVisualCpp = Join-Path $temporaryRoot $visualCpp.FileName
 
@@ -198,12 +217,21 @@ $msiName = "ProxiFyre-$Version-win-$normalizedArchitecture.msi"
 $bundleName = "ProxiFyre-$Version-win-$normalizedArchitecture-setup.exe"
 $msiPath = Join-Path $outputPath $msiName
 $bundlePath = Join-Path $outputPath $bundleName
+$builtBundlePath = Join-Path $bundleOutput $bundleName
+
+foreach ($layoutPayloadName in @($wpf.FileName, $visualCpp.FileName)) {
+    $unexpectedLayoutPayload = Join-Path $outputPath $layoutPayloadName
+    if ([IO.File]::Exists($unexpectedLayoutPayload)) {
+        throw "Output directory '$outputPath' contains external prerequisite '$layoutPayloadName'. Move or remove it before building so the published directory remains online-only."
+    }
+}
 
 try {
     [IO.Directory]::CreateDirectory($temporaryRoot) | Out-Null
     [IO.Directory]::CreateDirectory($stagedPayload) | Out-Null
     [IO.Directory]::CreateDirectory($installerIntermediate) | Out-Null
     [IO.Directory]::CreateDirectory($bundleIntermediate) | Out-Null
+    [IO.Directory]::CreateDirectory($bundleOutput) | Out-Null
     [IO.Directory]::CreateDirectory($outputPath) | Out-Null
 
     $licenseText = [IO.File]::ReadAllText((Join-Path $repositoryRoot 'LICENSE'))
@@ -242,6 +270,8 @@ try {
     # publishers. ProxiFyre does not create, replace, or require those signatures.
     & (Join-Path $PSScriptRoot 'Test-UnsignedArtifacts.ps1') -Path $firstPartyModules |
         Write-Host
+    & (Join-Path $PSScriptRoot 'Test-UnsignedArtifacts.ps1') `
+        -Path $bootstrapperFunctions | Write-Host
 
     if ([string]::IsNullOrWhiteSpace($WindowsPacketFilterMsiPath)) {
         Write-Host "Downloading official Windows Packet Filter prerequisite metadata source from $($wpf.DownloadUrl)"
@@ -350,13 +380,14 @@ try {
         "--property:ProductArchitecture=$normalizedArchitecture",
         "--property:ProductVersion=$Version",
         "--property:ProxiFyreMsiPath=$msiPath",
+        "--property:BootstrapperFunctionsPath=$bootstrapperFunctions",
         "--property:WindowsPacketFilterMsiPath=$resolvedWpfPath",
         "--property:WindowsPacketFilterDownloadUrl=$($wpf.DownloadUrl)",
         "--property:VisualCppRedistributablePath=$resolvedVisualCppPath",
         "--property:VisualCppRedistributableDownloadUrl=$($visualCpp.DownloadUrl)",
         "--property:VisualCppRedistRegistryArchitecture=$($visualCpp.RegistryArchitecture)",
         '--property:PackagingInputsValidated=true',
-        "--property:OutputPath=$($outputPath.TrimEnd('\', '/'))\",
+        "--property:OutputPath=$($bundleOutput.TrimEnd('\', '/'))\",
         "--property:IntermediateOutputPath=$($bundleIntermediate.TrimEnd('\', '/'))\",
         "--property:OutputName=$([IO.Path]::GetFileNameWithoutExtension($bundleName))",
         '--property:ContinuousIntegrationBuild=true'
@@ -364,10 +395,12 @@ try {
     if ($NoRestore) { $bundleArguments += '--no-restore' }
     & dotnet @bundleArguments
     if ($LASTEXITCODE -ne 0) { throw "WiX bundle build failed with exit code $LASTEXITCODE." }
-    if (-not [IO.File]::Exists($bundlePath)) { throw "WiX did not produce '$bundlePath'." }
+    if (-not [IO.File]::Exists($builtBundlePath)) {
+        throw "WiX did not produce '$builtBundlePath'."
+    }
 
     & (Join-Path $PSScriptRoot 'Test-BundlePackage.ps1') `
-        -BundlePath $bundlePath `
+        -BundlePath $builtBundlePath `
         -Architecture $normalizedArchitecture `
         -Version $Version `
         -WindowsPacketFilterFileName $wpf.FileName `
@@ -382,7 +415,13 @@ try {
         -VisualCppRegistryArchitecture $visualCpp.RegistryArchitecture |
         Write-Host
 
-    & (Join-Path $PSScriptRoot 'Test-UnsignedArtifacts.ps1') -Path @($msiPath, $bundlePath) |
+    # WiX materializes uncompressed remote-payload sources beside its bundle.
+    # Keep that layout inside temporary staging so release/test output cannot
+    # silently become an offline layout that bypasses the online acquisition path.
+    [IO.File]::Copy($builtBundlePath, $bundlePath, $false)
+
+    & (Join-Path $PSScriptRoot 'Test-UnsignedArtifacts.ps1') `
+        -Path @($msiPath, $bundlePath) |
         Write-Host
 
     foreach ($artifact in @($msiPath, $bundlePath)) {

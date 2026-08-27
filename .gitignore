@@ -40,6 +40,9 @@
 *.nupkg
 *._
 *.xml
+# The WiX 6 bootstrapper needs a source-controlled custom theme to brand its
+# out-of-process window and taskbar icon.
+!ProxiFyre.Bundle/HyperlinkLicenseTheme.xml
 /wiresock_service/obj/Debug/.NETFramework,Version=v4.7.2.AssemblyAttributes.cs
 /wiresock_service/obj/Release/.NETFramework,Version=v4.7.2.AssemblyAttributes.cs
 /wiresock_service/obj/x64/Debug/.NETFramework,Version=v4.7.2.AssemblyAttributes.cs
