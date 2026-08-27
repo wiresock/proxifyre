@@ -876,7 +876,7 @@ namespace proxy
                 return false;
             }
 
-            NETLIB_INFO("SOCKS5Tls TCP CONNECT relay established");
+            NETLIB_DEBUG("SOCKS5Tls TCP CONNECT relay established");
             return true;
         }
 

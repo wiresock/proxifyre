@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Socksifier.h"
 #include "socksify_unmanaged.h"
+#include <exception>
 
 // ReSharper disable CppInconsistentNaming
 
@@ -15,7 +16,21 @@ Socksifier::Socksifier::Socksifier(LogLevel log_level)
     // (WaitOne(0)) until the managed side assigns LogEventInterval.
     log_event_interval_ = 1000;
 
-    unmanaged_ptr_ = socksify_unmanaged::get_instance(static_cast<log_level_mx>(log_level));
+    try
+    {
+        unmanaged_ptr_ = socksify_unmanaged::get_instance(static_cast<log_level_mx>(log_level));
+    }
+    catch (const std::exception& exception)
+    {
+        throw gcnew InvalidOperationException(String::Format(
+            "The native proxy engine could not be initialized: {0}",
+            gcnew String(exception.what())));
+    }
+    catch (...)
+    {
+        throw gcnew InvalidOperationException(
+            "The native proxy engine could not be initialized because of an unknown native error.");
+    }
 
     log_event_ = gcnew Threading::AutoResetEvent(false);
     unmanaged_ptr_->set_log_event(static_cast<HANDLE>(log_event_->SafeWaitHandle->DangerousGetHandle()));

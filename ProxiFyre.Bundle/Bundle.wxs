@@ -1,0 +1,256 @@
+<?xml version="1.0" encoding="utf-8"?>
+<?define VisualCppRuntimeRegistrationCondition = "VisualCppRuntimeInstalled = 1 AND (VisualCppRuntimeMajor > 14 OR (VisualCppRuntimeMajor = 14 AND (VisualCppRuntimeMinor > 44 OR (VisualCppRuntimeMinor = 44 AND VisualCppRuntimeBuild >= 35211))))" ?>
+<?if $(var.ProductArchitecture) = x64 ?>
+  <?define VisualCppRuntimeFilesCondition = "UniversalCrtVersion >= v10.0.10240.0 AND VisualCppMsvcp140Version >= v14.44.35211.0 AND VisualCppAtomicWaitVersion >= v14.44.35211.0 AND VisualCppVcruntime140Version >= v14.44.35211.0 AND VisualCppVcruntime1401Version >= v14.44.35211.0" ?>
+<?else?>
+  <?define VisualCppRuntimeFilesCondition = "UniversalCrtVersion >= v10.0.10240.0 AND VisualCppMsvcp140Version >= v14.44.35211.0 AND VisualCppAtomicWaitVersion >= v14.44.35211.0 AND VisualCppVcruntime140Version >= v14.44.35211.0" ?>
+<?endif?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     RequiredVersion="6.0.0">
+  <Bundle
+      Name="ProxiFyre"
+      Manufacturer="NT KERNEL"
+      Version="$(ProductVersion)"
+      UpgradeCode="{7E9A39B2-7668-4FE8-AA08-DBD80733E986}"
+      IconSourceFile="..\assets\ProxiFyre.ico"
+      AboutUrl="https://github.com/wiresock/proxifyre"
+      HelpUrl="https://github.com/wiresock/proxifyre/issues"
+      UpdateUrl="https://github.com/wiresock/proxifyre/releases"
+      Compressed="yes">
+
+    <!--
+      Burn performs prerequisite downloads in the engine process, while WiX 6
+      hosts WixStdBA and its BAFunctions out of process. This engine extension
+      repairs only the invalid all-zero WinINet connection-flags case with a
+      process-scoped DIRECT override; it never changes Internet Options.
+    -->
+    <BootstrapperExtension
+        Id="ProxiFyreSetupEngineExtension"
+        Name="ProxiFyreSetup.EngineExtension.dll"
+        SourceFile="$(BootstrapperExtensionPath)" />
+
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+          Theme="hyperlinkLicense"
+          ThemeFile="HyperlinkLicenseTheme.xml"
+          LicenseUrl="https://github.com/wiresock/proxifyre/blob/main/LICENSE"
+          LogoFile="..\assets\ProxiFyre.ico"
+          SuppressOptionsUI="yes" />
+      <!--
+        WiX 6 hosts WixStdBA out of process, so Bundle/@IconSourceFile does not
+        brand the bootstrapper window itself. Ship the same multi-size icon as
+        a BA payload and let the custom theme use it for the window/taskbar.
+      -->
+      <Payload
+          Id="ProxiFyreBundleWindowIcon"
+          Name="ProxiFyre.ico"
+          SourceFile="..\assets\ProxiFyre.ico"
+          Compressed="yes" />
+      <!--
+        Burn 6 inherits the current user's WinINet protocol selection, and its
+        downloader cannot negotiate with Microsoft's current VC CDN on some
+        Windows 7 systems. This native hook first enables TLS 1.2 and preserves
+        WixStdBA's normal HTTPS retries; only exhausted WinINet 12029 retries add
+        one final attempt of the same content-addressed Microsoft VC URL over
+        HTTP. Burn verifies the exact SHA-512 and restores the protocol value.
+      -->
+      <Payload
+          Id="ProxiFyreSetupBootstrapperFunctions"
+          Name="ProxiFyreSetup.BAFunctions.dll"
+          SourceFile="$(BootstrapperFunctionsPath)"
+          Compressed="yes"
+          bal:BAFunctions="yes" />
+    </BootstrapperApplication>
+
+    <bal:Condition
+        Condition="VersionNT &gt; v6.1 OR (VersionNT = v6.1 AND ServicePackLevel &gt;= 1)"
+        Message="ProxiFyre requires Windows 7 SP1 or later. On Windows 7, install current servicing-stack and SHA-2 support updates, reboot, and run setup again." />
+
+    <!--
+      Windows Packet Filter is a kernel driver and must match the native OS,
+      not merely an emulated user-mode process. Keep each setup artifact on its
+      corresponding native Windows architecture so Burn never acquires a WPF
+      package that the host cannot install.
+    -->
+    <?if $(var.ProductArchitecture) = x86 ?>
+      <bal:Condition
+          Condition="(NOT VersionNT64 AND NOT NativeMachine) OR NativeMachine = 332"
+          Message="This ProxiFyre x86 setup requires 32-bit Windows. Download the setup that matches the native Windows architecture." />
+    <?elseif $(var.ProductArchitecture) = x64 ?>
+      <bal:Condition
+          Condition="(VersionNT64 AND NOT NativeMachine) OR NativeMachine = 34404"
+          Message="This ProxiFyre x64 setup requires x64 Windows. Download the setup that matches the native Windows architecture." />
+    <?elseif $(var.ProductArchitecture) = arm64 ?>
+      <bal:Condition
+          Condition="NativeMachine = 43620"
+          Message="This ProxiFyre ARM64 setup requires ARM64 Windows. Download the setup that matches the native Windows architecture." />
+    <?else?>
+      <?error Unsupported ProductArchitecture for the native setup condition. ?>
+    <?endif?>
+
+    <!--
+      Search the native System32 path even from the x86 bundle. The driver API
+      encoding used by this repository is compatible from 3.6.1 through the
+      latest 3.x release; a future major is deliberately not assumed compatible.
+    -->
+    <util:RegistrySearch
+        Id="WindowsPacketFilterServiceSearch"
+        Root="HKLM"
+        Key="SYSTEM\CurrentControlSet\Services\NDISRD"
+        Value="ImagePath"
+        Variable="WindowsPacketFilterServiceImagePath"
+        Result="value"
+        Bitness="always64" />
+    <util:FileSearch
+        Id="WindowsPacketFilterDriverVersionSearch"
+        Path="[WindowsFolder]System32\drivers\ndisrd.sys"
+        Variable="WindowsPacketFilterDriverVersion"
+        Result="version"
+        DisableFileRedirection="yes" />
+
+    <!--
+      Visual C++ v14 runtime registration is written to both registry views by
+      Microsoft's x64/ARM64 redistributables. Always using the 32-bit view makes
+      this search identical for every native Burn engine architecture.
+    -->
+    <util:RegistrySearch
+        Id="VisualCppRuntimeInstalledSearch"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\$(VisualCppRedistRegistryArchitecture)"
+        Value="Installed"
+        Variable="VisualCppRuntimeInstalled"
+        Result="value"
+        Bitness="always32" />
+    <util:RegistrySearch
+        Id="VisualCppRuntimeMajorSearch"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\$(VisualCppRedistRegistryArchitecture)"
+        Value="Major"
+        Variable="VisualCppRuntimeMajor"
+        Result="value"
+        Bitness="always32" />
+    <util:RegistrySearch
+        Id="VisualCppRuntimeMinorSearch"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\$(VisualCppRedistRegistryArchitecture)"
+        Value="Minor"
+        Variable="VisualCppRuntimeMinor"
+        Result="value"
+        Bitness="always32" />
+    <util:RegistrySearch
+        Id="VisualCppRuntimeBuildSearch"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\$(VisualCppRedistRegistryArchitecture)"
+        Value="Bld"
+        Variable="VisualCppRuntimeBuild"
+        Result="value"
+        Bitness="always32" />
+    <!--
+      Mirror Microsoft's own VC_redist UCRT gate. On Windows 7 through 8.1 the
+      redistributable centrally deploys KB2999226; on newer Windows ucrtbase is
+      an inbox component. A missing UCRT must force the prerequisite to run even
+      when stale VC runtime registration remains.
+    -->
+    <util:FileSearch
+        Id="UniversalCrtVersionSearch"
+        Path="[WindowsFolder]System32\ucrtbase.dll"
+        Variable="UniversalCrtVersion"
+        Result="version"
+        DisableFileRedirection="yes" />
+    <util:FileSearch
+        Id="VisualCppMsvcp140VersionSearch"
+        Path="[WindowsFolder]System32\msvcp140.dll"
+        Variable="VisualCppMsvcp140Version"
+        Result="version"
+        DisableFileRedirection="yes" />
+    <util:FileSearch
+        Id="VisualCppAtomicWaitVersionSearch"
+        Path="[WindowsFolder]System32\msvcp140_atomic_wait.dll"
+        Variable="VisualCppAtomicWaitVersion"
+        Result="version"
+        DisableFileRedirection="yes" />
+    <util:FileSearch
+        Id="VisualCppVcruntime140VersionSearch"
+        Path="[WindowsFolder]System32\vcruntime140.dll"
+        Variable="VisualCppVcruntime140Version"
+        Result="version"
+        DisableFileRedirection="yes" />
+    <util:FileSearch
+        Id="VisualCppVcruntime1401VersionSearch"
+        Path="[WindowsFolder]System32\vcruntime140_1.dll"
+        Variable="VisualCppVcruntime1401Version"
+        Result="version"
+        DisableFileRedirection="yes" />
+
+    <Chain>
+      <!--
+        socksify.dll is C++/CLI and requires the architecture-matched Microsoft
+        Visual C++ v14 runtime. The prerequisite is a permanent shared machine
+        component and is acquired from a pinned, content-addressed Microsoft URL.
+      -->
+      <ExePackage
+          Id="VisualCppRuntime"
+          SourceFile="$(VisualCppRedistributablePath)"
+          DownloadUrl="$(VisualCppRedistributableDownloadUrl)"
+          Compressed="no"
+          Cache="keep"
+          PerMachine="yes"
+          Permanent="yes"
+          Vital="yes"
+          Bundle="yes"
+          InstallArguments="/quiet"
+          DetectCondition="$(var.VisualCppRuntimeFilesCondition)">
+        <CommandLine
+            Condition="$(var.VisualCppRuntimeRegistrationCondition)"
+            InstallArgument="/repair" />
+        <CommandLine
+            Condition="NOT ($(var.VisualCppRuntimeRegistrationCondition))"
+            InstallArgument="/install" />
+        <ExitCode Value="0" Behavior="success" />
+        <ExitCode Value="1641" Behavior="forceReboot" />
+        <!--
+          ERROR_SUCCESS_REBOOT_REQUIRED means the prerequisite completed but
+          its replacement DLLs may not be usable until Windows restarts. Treat
+          that as a chain-stopping, reboot-required result so the product MSI
+          cannot immediately fail its native-file launch condition. A second
+          setup run after the restart will detect the completed runtime.
+        -->
+        <ExitCode Value="3010" Behavior="errorScheduleReboot" />
+        <ExitCode Behavior="error" />
+      </ExePackage>
+
+      <!--
+        The source MSI is used only at build time so WiX can harvest its product
+        identity and payload digest. At runtime Burn acquires the same immutable
+        versioned asset from the official wiresock/ndisapi release URL.
+
+        Permanent=yes is intentional: WPF is a machine-wide shared dependency,
+        so uninstalling ProxiFyre never removes it from other applications.
+      -->
+      <MsiPackage
+          Id="WindowsPacketFilter"
+          SourceFile="$(WindowsPacketFilterMsiPath)"
+          DownloadUrl="$(WindowsPacketFilterDownloadUrl)"
+          Compressed="no"
+          Vital="yes"
+          Permanent="yes"
+          Visible="yes"
+          InstallCondition="NOT (WindowsPacketFilterServiceImagePath AND WindowsPacketFilterDriverVersion &gt;= v3.6.1.0 AND WindowsPacketFilterDriverVersion &lt; v4.0.0.0)" />
+      <MsiPackage
+          Id="ProxiFyreMsi"
+          SourceFile="$(ProxiFyreMsiPath)"
+          Compressed="yes"
+          Vital="yes"
+          Visible="no">
+        <!--
+          Scope the MSI's duplicate VC launch-condition bypass to this bundle.
+          Burn also supplies BURNMSIINSTALL=1; requiring both properties avoids
+          treating an unrelated third-party Burn wrapper as prerequisite proof.
+        -->
+        <MsiProperty Name="PROXIFYRE_SETUP_CHAIN" Value="1" />
+      </MsiPackage>
+    </Chain>
+  </Bundle>
+</Wix>

@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">x64</Platform>
+    <ProjectGuid>{7790E7D3-66F9-4E93-A9DB-967DDCECC76D}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <RootNamespace>ProxiFyreUI</RootNamespace>
+    <AssemblyName>ProxiFyreUI.Managed</AssemblyName>
+    <ApplicationIcon>..\assets\ProxiFyre.ico</ApplicationIcon>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
+    <DebugSymbols>true</DebugSymbols><DebugType>full</DebugType><Optimize>false</Optimize>
+    <OutputPath>..\bin\exe\x64\Debug\</OutputPath><DefineConstants>DEBUG;TRACE</DefineConstants>
+    <PlatformTarget>x64</PlatformTarget><LangVersion>7.3</LangVersion><Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+    <DebugType>pdbonly</DebugType><Optimize>true</Optimize>
+    <OutputPath>..\bin\exe\x64\Release\</OutputPath><DefineConstants>TRACE</DefineConstants>
+    <PlatformTarget>x64</PlatformTarget><LangVersion>7.3</LangVersion><Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <DebugSymbols>true</DebugSymbols><DebugType>full</DebugType><Optimize>false</Optimize>
+    <OutputPath>..\bin\exe\x86\Debug\</OutputPath><DefineConstants>DEBUG;TRACE</DefineConstants>
+    <PlatformTarget>x86</PlatformTarget><LangVersion>7.3</LangVersion><Prefer32Bit>true</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <DebugType>pdbonly</DebugType><Optimize>true</Optimize>
+    <OutputPath>..\bin\exe\x86\Release\</OutputPath><DefineConstants>TRACE</DefineConstants>
+    <PlatformTarget>x86</PlatformTarget><LangVersion>7.3</LangVersion><Prefer32Bit>true</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|ARM64'">
+    <DebugSymbols>true</DebugSymbols><DebugType>full</DebugType><Optimize>false</Optimize>
+    <OutputPath>..\bin\exe\ARM64\Debug\</OutputPath><DefineConstants>DEBUG;TRACE</DefineConstants>
+    <PlatformTarget>ARM64</PlatformTarget><LangVersion>7.3</LangVersion><Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|ARM64'">
+    <DebugType>pdbonly</DebugType><Optimize>true</Optimize>
+    <OutputPath>..\bin\exe\ARM64\Release\</OutputPath><DefineConstants>TRACE</DefineConstants>
+    <PlatformTarget>ARM64</PlatformTarget><LangVersion>7.3</LangVersion><Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Configuration" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.ServiceProcess" />
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="Infrastructure\ApplicationConstants.cs" />
+    <Compile Include="Infrastructure\ConfigurationApplyCoordinator.cs" />
+    <Compile Include="Infrastructure\ConfigurationWorkspace.cs" />
+    <Compile Include="Infrastructure\DiagnosticsBuilder.cs" />
+    <Compile Include="Infrastructure\EngineLocator.cs" />
+    <Compile Include="Infrastructure\InvalidCertificateConfirmationPolicy.cs" />
+    <Compile Include="Infrastructure\LogTailer.cs" />
+    <Compile Include="Infrastructure\LogLevelMatcher.cs" />
+    <Compile Include="Infrastructure\PayloadIntegrity.cs" />
+    <Compile Include="Infrastructure\ProcessCatalog.cs" />
+    <Compile Include="Infrastructure\ServiceManagement.cs" />
+    <Compile Include="Infrastructure\SingleInstanceCoordinator.cs" />
+    <Compile Include="Infrastructure\UiSettings.cs" />
+    <Compile Include="Infrastructure\UserVisibleErrorFormatter.cs" />
+    <Compile Include="Infrastructure\WinFormsFontBootstrap.cs" />
+    <Compile Include="Infrastructure\WindowsPacketFilterProbe.cs" />
+    <Compile Include="Forms\InputDialog.cs"><SubType>Form</SubType></Compile>
+    <Compile Include="Forms\InputDialog.Designer.cs"><DependentUpon>InputDialog.cs</DependentUpon></Compile>
+    <Compile Include="Forms\MainForm.cs"><SubType>Form</SubType></Compile>
+    <Compile Include="Forms\MainForm.Designer.cs"><DependentUpon>MainForm.cs</DependentUpon></Compile>
+    <Compile Include="Forms\ProcessPickerForm.cs"><SubType>Form</SubType></Compile>
+    <Compile Include="Forms\ProcessPickerForm.Designer.cs"><DependentUpon>ProcessPickerForm.cs</DependentUpon></Compile>
+    <Compile Include="Forms\ProxyRuleEditorForm.cs"><SubType>Form</SubType></Compile>
+    <Compile Include="Forms\ProxyRuleEditorForm.Designer.cs"><DependentUpon>ProxyRuleEditorForm.cs</DependentUpon></Compile>
+    <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="ProxiFyreUI.exe.config">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <None Include="..\assets\ProxiFyre.ico">
+      <Link>ProxiFyre.ico</Link>
+    </None>
+    <None Include="app.manifest" />
+    <None Include="..\app-config.sample.json">
+      <Link>app-config.sample.json</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ProxiFyre.Configuration\ProxiFyre.Configuration.csproj">
+      <Project>{E95E6D47-764D-48FB-9BE4-57EA71B575AF}</Project>
+      <Name>ProxiFyre.Configuration</Name>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <Target Name="BeforeBuild">
+    <ItemGroup>
+      <AssemblyAttributes Include="AssemblyVersion"><_Parameter1>$(Version)</_Parameter1></AssemblyAttributes>
+      <AssemblyAttributes Include="AssemblyFileVersion"><_Parameter1>$(Version)</_Parameter1></AssemblyAttributes>
+      <AssemblyAttributes Include="AssemblyInformationalVersion"><_Parameter1>$(Version)</_Parameter1></AssemblyAttributes>
+      <AssemblyAttributes Include="AssemblyMetadata"><_Parameter1>Repository</_Parameter1><_Parameter2>$(Repository)</_Parameter2></AssemblyAttributes>
+    </ItemGroup>
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <WriteCodeFragment Language="C#" OutputFile="$(IntermediateOutputPath)Version.cs" AssemblyAttributes="@(AssemblyAttributes)" />
+    <ItemGroup><Compile Include="$(IntermediateOutputPath)Version.cs" /></ItemGroup>
+  </Target>
+</Project>

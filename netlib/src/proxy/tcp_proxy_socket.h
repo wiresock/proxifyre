@@ -940,7 +940,7 @@ namespace proxy
 
                 release_self_references();
 
-                NETLIB_INFO("is_ready_for_removal: Session is ready for removal - all sockets closed and buffers cleared");
+                NETLIB_DEBUG("is_ready_for_removal: Session is ready for removal - all sockets closed and buffers cleared");
                 return true;
             }
             else
@@ -1093,7 +1093,7 @@ namespace proxy
 
                 if (data_relay_result)
                 {
-                    NETLIB_INFO("start: Proxy session started successfully with immediate data relay");
+                    NETLIB_DEBUG("start: Proxy session started successfully with immediate data relay");
                 }
                 else
                 {

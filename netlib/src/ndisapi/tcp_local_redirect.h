@@ -69,7 +69,7 @@ namespace ndisapi
                                     using namespace std::chrono_literals;
                                     if (current_time - a.second.second > 5min)
                                     {
-                                        NETLIB_INFO(
+                                        NETLIB_DEBUG(
                                             "DELETE TCP (timeout): {} -> {} : {}",
                                             ntohs(a.first.port),
                                             std::string{ a.first.ip },
@@ -224,7 +224,7 @@ namespace ndisapi
                             std::chrono::steady_clock::now()
                         }); result)
                     {
-                        NETLIB_INFO(
+                        NETLIB_DEBUG(
                             "NEW TCP: {}:{} -> {}:{}",
                             std::string{ T{ip_header->ip_src} },
                             ntohs(tcp_header->th_sport),
@@ -254,7 +254,7 @@ namespace ndisapi
                     if (tcp_header->th_flags & TH_RST || tcp_header->th_flags & TH_FIN)
                     {
                         // pass through but erase the corresponding entry
-                        NETLIB_INFO(
+                        NETLIB_DEBUG(
                             "DELETE TCP: {} -> {} : {}",
                             ntohs(it->first.port),
                             std::string{ it->first.ip },
@@ -306,7 +306,7 @@ namespace ndisapi
                             std::chrono::steady_clock::now()
                         }); result)
                     {
-                        NETLIB_INFO(
+                        NETLIB_DEBUG(
                             "NEW TCP: {}:{} -> {}:{}",
                             std::string{ T{ip_header->ip6_src} },
                             ntohs(tcp_header->th_sport),
@@ -333,7 +333,7 @@ namespace ndisapi
                     if (tcp_header->th_flags & TH_RST || tcp_header->th_flags & TH_FIN)
                     {
                         // pass through but erase the corresponding entry
-                        NETLIB_INFO(
+                        NETLIB_DEBUG(
                             "DELETE TCP: {}:{} -> {}:{}",
                             std::string{ it->first.ip },
                             ntohs(it->first.port),
@@ -410,7 +410,7 @@ namespace ndisapi
                 if (tcp_header->th_flags & TH_RST || tcp_header->th_flags & TH_FIN)
                 {
                     // pass through but erase the corresponding entry
-                    NETLIB_INFO(
+                    NETLIB_DEBUG(
                         "DELETE TCP: {} -> {} : {}",
                         ntohs(it->first.port),
                         std::string{ it->first.ip },
@@ -461,7 +461,7 @@ namespace ndisapi
                 if (tcp_header->th_flags & TH_RST || tcp_header->th_flags & TH_FIN)
                 {
                     // pass through but erase the corresponding entry
-                    NETLIB_INFO(
+                    NETLIB_DEBUG(
                         "DELETE TCP: {} -> {} : {}",
                         ntohs(it->first.port),
                         std::string{ it->first.ip },

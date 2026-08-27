@@ -878,7 +878,7 @@ namespace proxy
                 std::scoped_lock lock(lock_);
                 if (!proxy_sockets_.empty())
                 {
-                    NETLIB_INFO("Cancelling I/O on {} proxy sockets before draining", proxy_sockets_.size());
+                    NETLIB_DEBUG("Cancelling I/O on {} proxy sockets before draining", proxy_sockets_.size());
                     for (auto& entry : proxy_sockets_)
                     {
                         if (entry.second)
@@ -1553,7 +1553,7 @@ namespace proxy
                     return {};
                 }
 
-                NETLIB_INFO(
+                NETLIB_DEBUG(
                     "[SOCKS5]: associate_to_socks5_proxy: USERNAME/PASSWORD authentication SUCCESS");
             }
 
@@ -1699,7 +1699,7 @@ namespace proxy
             // family-correct offset above, so the relay port is correct regardless of the
             // ATYP the server selected, and no blocking DNS lookup is needed for an
             // ATYP=3 (domain) reply.
-            NETLIB_INFO(
+            NETLIB_DEBUG(
                 "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 ASSOCIATE SUCCESS endpoint: {}:{}",
                 socks_server_address,
                 bind_port);

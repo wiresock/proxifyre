@@ -29,10 +29,20 @@
 *.ipdb
 *.lib
 *.config
+# Source-controlled .NET project configuration files are exceptions to the
+# broad runtime/build-output rule above.
+!ProxiFyreUI/ProxiFyreUI.exe.config
+!ProxiFyre.Configuration/packages.config
+!ProxiFyre.Tests/App.config
+!ProxiFyre.Tests/packages.config
+!NuGet.Installer.Config
 *.p7s
 *.nupkg
 *._
 *.xml
+# The WiX 6 bootstrapper needs a source-controlled custom theme to brand its
+# out-of-process window and taskbar icon.
+!ProxiFyre.Bundle/HyperlinkLicenseTheme.xml
 /wiresock_service/obj/Debug/.NETFramework,Version=v4.7.2.AssemblyAttributes.cs
 /wiresock_service/obj/Release/.NETFramework,Version=v4.7.2.AssemblyAttributes.cs
 /wiresock_service/obj/x64/Debug/.NETFramework,Version=v4.7.2.AssemblyAttributes.cs
@@ -41,6 +51,8 @@
 /wiresock_service/obj/x86/Release/.NETFramework,Version=v4.7.2.AssemblyAttributes.cs
 ProxiFyre/bin
 ProxiFyre/obj
+**/bin/
+**/obj/
 .vs/
 /packages/
 

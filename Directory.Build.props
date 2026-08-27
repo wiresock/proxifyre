@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <PropertyGroup>
+    <!--
+      This is the repository release version. Local builds use it by default,
+      and release tags must match it exactly. An explicit /p:Version remains
+      available for controlled build/test scenarios.
+    -->
+    <ProxiFyreReleaseVersion>2.5.0</ProxiFyreReleaseVersion>
+    <Version Condition="'$(Version)' == ''">$(ProxiFyreReleaseVersion)</Version>
+    <ProxiFyreVersionTuple>$([System.String]::Copy('$(Version)').Replace('.', ',')),0</ProxiFyreVersionTuple>
+    <Repository Condition="'$(Repository)' == ''">wiresock/proxifyre</Repository>
+  </PropertyGroup>
+</Project>

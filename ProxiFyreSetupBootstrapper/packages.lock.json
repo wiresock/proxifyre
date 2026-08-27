@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "dependencies": {
+    "native,Version=v0.0": {
+      "WixToolset.WixStandardBootstrapperApplicationFunctionApi": {
+        "type": "Direct",
+        "requested": "[6.0.2, )",
+        "resolved": "6.0.2",
+        "contentHash": "TKQzNEHCK7jqV9SzoWOyREGXNXs40eRClilPv8DmaLnhJrr6U2h6/HGxZLJ8tf/WM3RnFHZtNV70oLoR4Hzt3w==",
+        "dependencies": {
+          "WixToolset.BootstrapperApplicationApi": "[6.0.2, 7.0.0)",
+          "WixToolset.DUtil": "[6.0.2, 7.0.0)"
+        }
+      },
+      "WixToolset.BootstrapperApplicationApi": {
+        "type": "Transitive",
+        "resolved": "6.0.2",
+        "contentHash": "k3Cpr12y4HFrgrBDFUhXCaJoMMz9iiE1qBAl83aqtGRllSKf04hvtX5P1t2dWh6V0Cm2Zh6vlfVnV5r4/IwLOw==",
+        "dependencies": {
+          "WixToolset.DUtil": "[6.0.2, 7.0.0)"
+        }
+      },
+      "WixToolset.DUtil": {
+        "type": "Transitive",
+        "resolved": "6.0.2",
+        "contentHash": "HSmlDLMnpDnxEIKEcddZHpUWCiXt1jXOmZCAVtLcVjTxAHQV46eUsx8KP2f6nSb4yqxHkvEYpZB8pozb8jFUEg=="
+      }
+    },
+    "native,Version=v0.0/win-arm64": {
+      "WixToolset.BootstrapperApplicationApi": {
+        "type": "Transitive",
+        "resolved": "6.0.2",
+        "contentHash": "k3Cpr12y4HFrgrBDFUhXCaJoMMz9iiE1qBAl83aqtGRllSKf04hvtX5P1t2dWh6V0Cm2Zh6vlfVnV5r4/IwLOw==",
+        "dependencies": {
+          "WixToolset.DUtil": "[6.0.2, 7.0.0)"
+        }
+      }
+    },
+    "native,Version=v0.0/win-x64": {
+      "WixToolset.BootstrapperApplicationApi": {
+        "type": "Transitive",
+        "resolved": "6.0.2",
+        "contentHash": "k3Cpr12y4HFrgrBDFUhXCaJoMMz9iiE1qBAl83aqtGRllSKf04hvtX5P1t2dWh6V0Cm2Zh6vlfVnV5r4/IwLOw==",
+        "dependencies": {
+          "WixToolset.DUtil": "[6.0.2, 7.0.0)"
+        }
+      }
+    },
+    "native,Version=v0.0/win-x86": {
+      "WixToolset.BootstrapperApplicationApi": {
+        "type": "Transitive",
+        "resolved": "6.0.2",
+        "contentHash": "k3Cpr12y4HFrgrBDFUhXCaJoMMz9iiE1qBAl83aqtGRllSKf04hvtX5P1t2dWh6V0Cm2Zh6vlfVnV5r4/IwLOw==",
+        "dependencies": {
+          "WixToolset.DUtil": "[6.0.2, 7.0.0)"
+        }
+      }
+    }
+  }
+}

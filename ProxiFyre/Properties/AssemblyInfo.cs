@@ -9,7 +9,7 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("NT KERNEL")]
 [assembly: AssemblyProduct("ProxiFyre")]
-[assembly: AssemblyCopyright("Copyright NT KERNEL© 2022-2025")]
+[assembly: AssemblyCopyright("Copyright NT KERNEL© 2022-2026")]
 [assembly: AssemblyTrademark("ProxiFyre")]
 [assembly: AssemblyCulture("")]
 
@@ -20,14 +20,3 @@ using System.Runtime.InteropServices;
 
 // The following GUID is for the ID of the typelib if this project is exposed to COM
 [assembly: Guid("a1a4e931-740f-4cd4-9d81-2a49d114edff")]
-
-// Version information for an assembly consists of the following four values:
-//
-//      Major Version
-//      Minor Version
-//      Build Number
-//      Revision
-//
-// You can specify all the values or you can default the Build and Revision Numbers
-// by using the '*' as shown below:
-// [assembly: AssemblyVersion("1.0.*")]

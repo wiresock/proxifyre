@@ -67,7 +67,7 @@ namespace ndisapi
                                     using namespace std::chrono_literals;
                                     if (current_time - a.second > 15min)
                                     {
-                                        NETLIB_INFO(
+                                        NETLIB_DEBUG(
                                             "DELETE UDP client endpoint (timeout): : {}",
                                             ntohs(a.first));
 
@@ -211,7 +211,7 @@ namespace ndisapi
                     endpoints_[udp_header->th_sport] =
                         std::chrono::steady_clock::now();
 
-                    NETLIB_INFO(
+                    NETLIB_DEBUG(
                         "NEW client UDP endpoint: : {}",
                         ntohs(udp_header->th_sport));
 
@@ -241,7 +241,7 @@ namespace ndisapi
                     endpoints_[udp_header->th_sport] =
                         std::chrono::steady_clock::now();
 
-                    NETLIB_INFO(
+                    NETLIB_DEBUG(
                         "NEW client UDP endpoint: : {}",
                         ntohs(udp_header->th_sport));
 

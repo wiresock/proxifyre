@@ -1129,7 +1129,7 @@ namespace proxy
                                 return std::make_tuple(AddrT{}, 0, nullptr);
                             }
 
-                            NETLIB_LOG(log_level::info,
+                            NETLIB_LOG(log_level::debug,
                                 "TCP Redirect entry was found for the {} : {} is {}",
                                 std::string{ address }, port, it->second.endpoint.to_string());
 
@@ -1170,7 +1170,7 @@ namespace proxy
                                 return std::make_tuple(AddrT{}, 0, nullptr);
                             }
 
-                            NETLIB_LOG(log_level::info,
+                            NETLIB_LOG(log_level::debug,
                                 "UDP Redirect entry was found for the {} : {}",
                                 std::string{ address }, port);
 
@@ -2141,7 +2141,7 @@ namespace proxy
 
                     if (is_new_endpoint)
                     {
-                        NETLIB_LOG(log_level::info,
+                        NETLIB_LOG(log_level::debug,
                             "Redirecting UDP {} : {} -> {} : {}",
                             source_address, source_port, destination_address, destination_port);
                     }
@@ -2244,7 +2244,7 @@ namespace proxy
                                 ntohs(tcp_header->th_dport))
                         };
 
-                    NETLIB_LOG(log_level::info,
+                    NETLIB_LOG(log_level::debug,
                         "Redirecting TCP: {} : {} -> {} : {}",
                         net::ip_address_v4(ip_header->ip_src), ntohs(tcp_header->th_sport),
                         net::ip_address_v4(ip_header->ip_dst), ntohs(tcp_header->th_dport));
@@ -2421,7 +2421,7 @@ namespace proxy
 
                     if (is_new_endpoint)
                     {
-                        NETLIB_LOG(log_level::info,
+                        NETLIB_LOG(log_level::debug,
                             "Redirecting UDP6 {} : {} -> {} : {}",
                             source_address, source_port, destination_address, destination_port);
                     }
@@ -2522,7 +2522,7 @@ namespace proxy
                                 ntohs(tcp_header->th_dport))
                         };
 
-                    NETLIB_LOG(log_level::info,
+                    NETLIB_LOG(log_level::debug,
                         "Redirecting TCP6: {} : {} -> {} : {}",
                         std::string{ net::ip_address_v6{ip_header->ip6_src} }, ntohs(tcp_header->th_sport),
                         std::string{ net::ip_address_v6{ip_header->ip6_dst} }, ntohs(tcp_header->th_dport));

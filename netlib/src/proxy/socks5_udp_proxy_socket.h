@@ -1079,7 +1079,7 @@ namespace proxy
                     remote_peer_address_, remote_peer_port_);
             }
 
-            NETLIB_INFO("start_data_relay: UDP data relay successfully initialized for {}:{}",
+            NETLIB_DEBUG("start_data_relay: UDP data relay successfully initialized for {}:{}",
                 remote_peer_address_, remote_peer_port_);
 
             return true;

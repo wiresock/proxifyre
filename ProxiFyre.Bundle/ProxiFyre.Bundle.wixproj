@@ -1,0 +1,49 @@
+<Project Sdk="WixToolset.Sdk/6.0.2">
+  <PropertyGroup>
+    <OutputType>Bundle</OutputType>
+    <Platforms>x86;x64;ARM64</Platforms>
+    <DebugType>none</DebugType>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreConfigFile>$(MSBuildThisFileDirectory)..\NuGet.Installer.Config</RestoreConfigFile>
+    <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
+    <OutputName Condition="'$(OutputName)' == ''">ProxiFyre-Setup-$(ProductVersion)-win-$(InstallerPlatform)</OutputName>
+    <DefineConstants>$(DefineConstants);ProductVersion=$(ProductVersion);ProductArchitecture=$(ProductArchitecture);ProxiFyreMsiPath=$(ProxiFyreMsiPath);BootstrapperFunctionsPath=$(BootstrapperFunctionsPath);BootstrapperExtensionPath=$(BootstrapperExtensionPath);WindowsPacketFilterMsiPath=$(WindowsPacketFilterMsiPath);WindowsPacketFilterDownloadUrl=$(WindowsPacketFilterDownloadUrl);VisualCppRedistributablePath=$(VisualCppRedistributablePath);VisualCppRedistributableDownloadUrl=$(VisualCppRedistributableDownloadUrl);VisualCppRedistRegistryArchitecture=$(VisualCppRedistRegistryArchitecture)</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(InstallerPlatform)' == '' and '$(Platform)' == 'x86'">
+    <InstallerPlatform>x86</InstallerPlatform>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(InstallerPlatform)' == '' and '$(Platform)' == 'x64'">
+    <InstallerPlatform>x64</InstallerPlatform>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(InstallerPlatform)' == '' and '$(Platform)' == 'ARM64'">
+    <InstallerPlatform>arm64</InstallerPlatform>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Bal.wixext" Version="6.0.2" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="6.0.2" />
+  </ItemGroup>
+
+  <Target Name="ValidateBundleInputs" BeforeTargets="Build">
+    <Error Condition="'$(PackagingInputsValidated)' != 'true'"
+           Text="Use scripts/Build-Installer.ps1 so payload and prerequisite integrity checks run before WiX." />
+    <Error Condition="'$(ProductVersion)' == '' or '$(ProductArchitecture)' == ''"
+           Text="ProductVersion and ProductArchitecture are required." />
+    <Error Condition="'$(ProxiFyreMsiPath)' == '' or !Exists('$(ProxiFyreMsiPath)')"
+           Text="ProxiFyreMsiPath must identify the validated architecture-specific MSI." />
+    <Error Condition="'$(BootstrapperFunctionsPath)' == '' or !Exists('$(BootstrapperFunctionsPath)')"
+           Text="BootstrapperFunctionsPath must identify the architecture-specific setup BAFunctions DLL." />
+    <Error Condition="'$(BootstrapperExtensionPath)' == '' or !Exists('$(BootstrapperExtensionPath)')"
+           Text="BootstrapperExtensionPath must identify the architecture-specific setup engine extension DLL." />
+    <Error Condition="'$(WindowsPacketFilterMsiPath)' == '' or !Exists('$(WindowsPacketFilterMsiPath)')"
+           Text="WindowsPacketFilterMsiPath must identify the verified official prerequisite MSI used to bind remote payload metadata." />
+    <Error Condition="'$(WindowsPacketFilterDownloadUrl)' == ''"
+           Text="WindowsPacketFilterDownloadUrl must be the immutable official release URL." />
+    <Error Condition="'$(VisualCppRedistributablePath)' == '' or !Exists('$(VisualCppRedistributablePath)')"
+           Text="VisualCppRedistributablePath must identify the validated architecture-specific Microsoft runtime installer." />
+    <Error Condition="'$(VisualCppRedistributableDownloadUrl)' == '' or '$(VisualCppRedistRegistryArchitecture)' == ''"
+           Text="The pinned Visual C++ runtime URL and registry architecture are required." />
+  </Target>
+</Project>
