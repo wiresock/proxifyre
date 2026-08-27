@@ -3,7 +3,9 @@
 #include <wininet.h>
 #include <msiquery.h>
 #include <objbase.h>
+#include <strsafe.h>
 
+#include <cwchar>
 #include <new>
 
 #include "dutil.h"
@@ -22,6 +24,11 @@ namespace
     constexpr wchar_t kSecureProtocolsValue[] = L"SecureProtocols";
     constexpr DWORD kTls12Protocol = 0x00000800;
     constexpr DWORD kWindows7DefaultProtocols = 0x000000A0;
+    constexpr wchar_t kVisualCppRuntimeId[] = L"VisualCppRuntime";
+    constexpr wchar_t kVisualCppDownloadHttpsPrefix[] =
+        L"https://download.visualstudio.microsoft.com/download/pr/";
+    constexpr wchar_t kVisualCppDownloadHttpPrefix[] =
+        L"http://download.visualstudio.microsoft.com/download/pr/";
 
     class ProxiFyreSetupFunctions;
 
@@ -73,6 +80,18 @@ namespace
         return true;
     }
 
+    bool IsSameOrdinalIgnoreCase(const wchar_t* left, const wchar_t* right)
+    {
+        return left != nullptr && right != nullptr && _wcsicmp(left, right) == 0;
+    }
+
+    bool StartsWithOrdinalIgnoreCase(
+        const wchar_t* value, const wchar_t* prefix)
+    {
+        return value != nullptr && prefix != nullptr &&
+            _wcsnicmp(value, prefix, wcslen(prefix)) == 0;
+    }
+
     class ProxiFyreSetupFunctions final : public CBalBaseBAFunctions
     {
     public:
@@ -95,9 +114,14 @@ namespace
             __inout BOOTSTRAPPER_CACHE_OPERATION* action,
             __inout BOOL* cancel) override
         {
+            HRESULT result = ArmVisualCppHttpFallbackForWindows7(
+                packageOrContainerId, payloadId, downloadUrl, recommendation);
+            if (FAILED(result))
+                return result;
+
             if (IsHttpsUrl(downloadUrl))
             {
-                const HRESULT result = EnableTls12ForWindows7();
+                result = EnableTls12ForWindows7();
                 if (FAILED(result))
                 {
                     BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR,
@@ -111,10 +135,60 @@ namespace
                 cancel);
         }
 
+        STDMETHODIMP OnCacheAcquireComplete(
+            __in_z LPCWSTR packageOrContainerId,
+            __in_z_opt LPCWSTR payloadId,
+            HRESULT status,
+            BOOTSTRAPPER_CACHEACQUIRECOMPLETE_ACTION recommendation,
+            __inout BOOTSTRAPPER_CACHEACQUIRECOMPLETE_ACTION* action) override
+        {
+            const HRESULT result = RetryVisualCppOverHttpForWindows7(
+                packageOrContainerId, payloadId, status, action);
+            if (FAILED(result))
+                return result;
+
+            return __super::OnCacheAcquireComplete(packageOrContainerId,
+                payloadId, status, recommendation, action);
+        }
+
         STDMETHODIMP OnCacheComplete(HRESULT status) override
         {
+            ResetVisualCppHttpFallback();
             RestoreSecureProtocols();
             return __super::OnCacheComplete(status);
+        }
+
+        STDMETHODIMP OnCacheVerifyComplete(
+            __in_z LPCWSTR packageOrContainerId,
+            __in_z LPCWSTR payloadId,
+            HRESULT status,
+            BOOTSTRAPPER_CACHEVERIFYCOMPLETE_ACTION recommendation,
+            __inout BOOTSTRAPPER_CACHEVERIFYCOMPLETE_ACTION* action) override
+        {
+            if (action == nullptr)
+                return E_INVALIDARG;
+
+            if (visualCppHttpFallbackAttempted_ &&
+                IsSameOrdinalIgnoreCase(
+                    packageOrContainerId, kVisualCppRuntimeId) &&
+                IsSameOrdinalIgnoreCase(payloadId, kVisualCppRuntimeId))
+            {
+                if (FAILED(status) &&
+                    *action ==
+                        BOOTSTRAPPER_CACHEVERIFYCOMPLETE_ACTION_RETRYACQUISITION)
+                {
+                    *action = BOOTSTRAPPER_CACHEVERIFYCOMPLETE_ACTION_NONE;
+                }
+
+                if (SUCCEEDED(status) ||
+                    *action == BOOTSTRAPPER_CACHEVERIFYCOMPLETE_ACTION_NONE)
+                {
+                    ResetVisualCppHttpFallback();
+                }
+            }
+
+            return __super::OnCacheVerifyComplete(packageOrContainerId,
+                payloadId, status, recommendation, action);
         }
 
         STDMETHODIMP OnApplyComplete(
@@ -136,6 +210,123 @@ namespace
         }
 
     private:
+        HRESULT ArmVisualCppHttpFallbackForWindows7(
+            const wchar_t* packageOrContainerId,
+            const wchar_t* payloadId,
+            const wchar_t* downloadUrl,
+            BOOTSTRAPPER_CACHE_OPERATION recommendation)
+        {
+            if (!IsWindows7() ||
+                recommendation != BOOTSTRAPPER_CACHE_OPERATION_DOWNLOAD ||
+                !IsSameOrdinalIgnoreCase(
+                    packageOrContainerId, kVisualCppRuntimeId) ||
+                !IsSameOrdinalIgnoreCase(payloadId, kVisualCppRuntimeId))
+            {
+                return S_OK;
+            }
+
+            // SetDownloadSource persists for the retry. Never re-arm this
+            // package during the same acquisition after consuming the fallback.
+            if (visualCppHttpFallbackAttempted_)
+                return S_OK;
+
+            ResetVisualCppHttpFallback();
+            if (!StartsWithOrdinalIgnoreCase(
+                    downloadUrl, kVisualCppDownloadHttpsPrefix))
+            {
+                BalLog(BOOTSTRAPPER_LOG_LEVEL_STANDARD,
+                    "Windows 7 Visual C++ compatibility transport was not applied because the download is not the pinned Microsoft content-addressed endpoint.");
+                return S_OK;
+            }
+
+            HRESULT result = StringCchCopyW(visualCppHttpFallbackUrl_,
+                ARRAYSIZE(visualCppHttpFallbackUrl_),
+                kVisualCppDownloadHttpPrefix);
+            if (SUCCEEDED(result))
+            {
+                result = StringCchCatW(visualCppHttpFallbackUrl_,
+                    ARRAYSIZE(visualCppHttpFallbackUrl_), downloadUrl +
+                    ARRAYSIZE(kVisualCppDownloadHttpsPrefix) - 1);
+            }
+            if (FAILED(result))
+            {
+                ResetVisualCppHttpFallback();
+                return result;
+            }
+
+            visualCppHttpFallbackArmed_ = true;
+            return S_OK;
+        }
+
+        HRESULT RetryVisualCppOverHttpForWindows7(
+            const wchar_t* packageOrContainerId,
+            const wchar_t* payloadId,
+            HRESULT status,
+            BOOTSTRAPPER_CACHEACQUIRECOMPLETE_ACTION* action)
+        {
+            if (action == nullptr)
+                return E_INVALIDARG;
+
+            if (SUCCEEDED(status) && !visualCppHttpFallbackAttempted_ &&
+                IsSameOrdinalIgnoreCase(
+                    packageOrContainerId, kVisualCppRuntimeId) &&
+                IsSameOrdinalIgnoreCase(payloadId, kVisualCppRuntimeId))
+            {
+                ResetVisualCppHttpFallback();
+                return S_OK;
+            }
+
+            if (!visualCppHttpFallbackArmed_ ||
+                !IsSameOrdinalIgnoreCase(
+                    packageOrContainerId, kVisualCppRuntimeId) ||
+                !IsSameOrdinalIgnoreCase(payloadId, kVisualCppRuntimeId))
+            {
+                return S_OK;
+            }
+
+            // The compatibility source gets exactly one acquisition attempt,
+            // even if WixStdBA would otherwise recommend another normal retry.
+            if (visualCppHttpFallbackAttempted_)
+            {
+                *action = BOOTSTRAPPER_CACHEACQUIRECOMPLETE_ACTION_NONE;
+                return S_OK;
+            }
+
+            // Preserve WixStdBA's ordinary HTTPS retry budget. Add the fallback
+            // only after those retries are exhausted for the observed failure.
+            if (status != HRESULT_FROM_WIN32(ERROR_INTERNET_CANNOT_CONNECT) ||
+                *action == BOOTSTRAPPER_CACHEACQUIRECOMPLETE_ACTION_RETRY)
+            {
+                return S_OK;
+            }
+
+            visualCppHttpFallbackAttempted_ = true;
+            const HRESULT result = m_pEngine->SetDownloadSource(
+                packageOrContainerId, payloadId, visualCppHttpFallbackUrl_,
+                nullptr, nullptr, nullptr);
+            if (FAILED(result))
+            {
+                BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR,
+                    "Failed to select the Windows 7 Visual C++ compatibility transport: 0x%08lX",
+                    static_cast<unsigned long>(result));
+                // Preserve WixStdBA's existing recommendation when the source
+                // cannot be changed; the original HTTPS path may still recover.
+                return S_OK;
+            }
+
+            *action = BOOTSTRAPPER_CACHEACQUIRECOMPLETE_ACTION_RETRY;
+            BalLog(BOOTSTRAPPER_LOG_LEVEL_STANDARD,
+                "Windows 7 exhausted the normal Visual C++ HTTPS retries after WinINet 12029; making one final attempt over Microsoft's HTTP endpoint. Burn will verify the bundle's exact SHA-512 before execution.");
+            return S_OK;
+        }
+
+        void ResetVisualCppHttpFallback()
+        {
+            visualCppHttpFallbackArmed_ = false;
+            visualCppHttpFallbackAttempted_ = false;
+            visualCppHttpFallbackUrl_[0] = L'\0';
+        }
+
         HRESULT EnableTls12ForWindows7()
         {
             if (!IsWindows7())
@@ -262,6 +453,9 @@ namespace
         bool originalValueExisted_ = false;
         DWORD originalProtocols_ = 0;
         DWORD writtenProtocols_ = 0;
+        bool visualCppHttpFallbackArmed_ = false;
+        bool visualCppHttpFallbackAttempted_ = false;
+        wchar_t visualCppHttpFallbackUrl_[INTERNET_MAX_URL_LENGTH]{};
     };
 }
 

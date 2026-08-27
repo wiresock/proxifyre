@@ -49,9 +49,12 @@
           SourceFile="..\assets\ProxiFyre.ico"
           Compressed="yes" />
       <!--
-        Burn 6 inherits the current user's WinINet protocol selection. This
-        native hook enables TLS 1.2 only while Windows 7 is acquiring remote
-        HTTPS prerequisites, then restores the exact prior registry value.
+        Burn 6 inherits the current user's WinINet protocol selection, and its
+        downloader cannot negotiate with Microsoft's current VC CDN on some
+        Windows 7 systems. This native hook first enables TLS 1.2 and preserves
+        WixStdBA's normal HTTPS retries; only exhausted WinINet 12029 retries add
+        one final attempt of the same content-addressed Microsoft VC URL over
+        HTTP. Burn verifies the exact SHA-512 and restores the protocol value.
       -->
       <Payload
           Id="ProxiFyreSetupBootstrapperFunctions"

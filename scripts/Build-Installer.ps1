@@ -155,6 +155,10 @@ if ($bootstrapperExtensionArchitecture -cne $normalizedArchitecture) {
     -SourcePath (Join-Path $repositoryRoot `
         'ProxiFyreSetupEngineExtension\BootstrapperExtension.cpp') |
     Write-Host
+& (Join-Path $PSScriptRoot 'Test-SetupBootstrapperFunctionsSource.ps1') `
+    -SourcePath (Join-Path $repositoryRoot `
+        'ProxiFyreSetupBootstrapper\BootstrapperFunctions.cpp') |
+    Write-Host
 
 $wpfPackages = @{
     x86 = @{
@@ -210,6 +214,20 @@ $visualCppPackages = @{
 }
 $visualCpp = $visualCppPackages[$normalizedArchitecture]
 $visualCpp['Version'] = '14.44.35211.0'
+$visualCppDownloadUri = [Uri]$visualCpp.DownloadUrl
+$visualCppContentPath = "/$($visualCpp.Sha256.ToUpperInvariant())/$($visualCpp.FileName)"
+if ($visualCppDownloadUri.Scheme -cne 'https' -or
+    $visualCppDownloadUri.IdnHost -cne 'download.visualstudio.microsoft.com' -or
+    -not $visualCppDownloadUri.IsDefaultPort -or
+    -not [string]::IsNullOrEmpty($visualCppDownloadUri.UserInfo) -or
+    -not [string]::IsNullOrEmpty($visualCppDownloadUri.Query) -or
+    -not [string]::IsNullOrEmpty($visualCppDownloadUri.Fragment) -or
+    -not $visualCppDownloadUri.AbsolutePath.StartsWith(
+        '/download/pr/', [StringComparison]::Ordinal) -or
+    -not $visualCppDownloadUri.AbsolutePath.EndsWith(
+        $visualCppContentPath, [StringComparison]::Ordinal)) {
+    throw 'The Visual C++ source must be an HTTPS Microsoft content-addressed URL whose path contains the pinned SHA-256 and filename.'
+}
 
 function Get-DeterministicGuid {
     param([Parameter(Mandatory = $true)][string] $Identity)
@@ -436,6 +454,7 @@ try {
         -VisualCppRedistributableFileName $visualCpp.FileName `
         -VisualCppRedistributableDownloadUrl $visualCpp.DownloadUrl `
         -VisualCppRedistributableSize $visualCpp.Size `
+        -VisualCppRedistributableSha256 $visualCpp.Sha256 `
         -VisualCppRedistributableSha512 $visualCpp.Sha512 `
         -VisualCppRegistryArchitecture $visualCpp.RegistryArchitecture |
         Write-Host

@@ -16,6 +16,7 @@ param(
     [Parameter(Mandatory = $true)][string] $VisualCppRedistributableFileName,
     [Parameter(Mandatory = $true)][string] $VisualCppRedistributableDownloadUrl,
     [Parameter(Mandatory = $true)][Int64] $VisualCppRedistributableSize,
+    [Parameter(Mandatory = $true)][string] $VisualCppRedistributableSha256,
     [Parameter(Mandatory = $true)][string] $VisualCppRedistributableSha512,
     [Parameter(Mandatory = $true)]
     [ValidateSet('x86', 'x64', 'arm64')]
@@ -24,6 +25,25 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+$visualCppDownloadUri = $null
+$visualCppContentPath =
+    "/$($VisualCppRedistributableSha256.ToUpperInvariant())/$VisualCppRedistributableFileName"
+if ($VisualCppRedistributableSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+    -not [Uri]::TryCreate($VisualCppRedistributableDownloadUrl,
+        [UriKind]::Absolute, [ref]$visualCppDownloadUri) -or
+    $visualCppDownloadUri.Scheme -cne 'https' -or
+    $visualCppDownloadUri.IdnHost -cne 'download.visualstudio.microsoft.com' -or
+    -not $visualCppDownloadUri.IsDefaultPort -or
+    -not [string]::IsNullOrEmpty($visualCppDownloadUri.UserInfo) -or
+    -not [string]::IsNullOrEmpty($visualCppDownloadUri.Query) -or
+    -not [string]::IsNullOrEmpty($visualCppDownloadUri.Fragment) -or
+    -not $visualCppDownloadUri.AbsolutePath.StartsWith(
+        '/download/pr/', [StringComparison]::Ordinal) -or
+    -not $visualCppDownloadUri.AbsolutePath.EndsWith(
+        $visualCppContentPath, [StringComparison]::Ordinal)) {
+    throw 'The Visual C++ manifest source must remain an HTTPS Microsoft content-addressed URL whose path contains the pinned SHA-256 and filename.'
+}
 
 function Get-PeArchitecture {
     param([Parameter(Mandatory = $true)][string] $Path)
