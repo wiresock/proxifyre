@@ -15,7 +15,7 @@ namespace ProxiFyre.Tests
         [Test]
         [Apartment(ApartmentState.STA)]
         [NonParallelizable]
-        public void RecoversWithWin32GuiFontWhenNamedGdiPlusFamiliesFail()
+        public void RecoversWithSelectedSystemTrueTypeFontWhenGdiPlusFamiliesFail()
         {
             var applicationBase = Path.GetDirectoryName(
                 typeof(WinFormsFontBootstrapTests).Assembly.Location);
@@ -56,6 +56,7 @@ namespace ProxiFyre.Tests
                 return false;
 
             var namedFontAttempts = 0;
+            var selectedDeviceContextFontAttempts = 0;
             WinFormsFontBootstrap.EnsureDefaultFont(
                 () => throw new ArgumentException("Simulated default-font failure."),
                 family =>
@@ -63,11 +64,16 @@ namespace ProxiFyre.Tests
                     namedFontAttempts++;
                     throw new ArgumentException(
                         "Simulated named GDI+ font failure for " + family + ".");
+                },
+                deviceContext =>
+                {
+                    selectedDeviceContextFontAttempts++;
+                    return Font.FromHdc(deviceContext);
                 });
 
             var seededFont = defaultFontField.GetValue(null) as Font;
             if (seededFont == null || seededFont.SizeInPoints <= 0.0F ||
-                namedFontAttempts != 3)
+                namedFontAttempts != 3 || selectedDeviceContextFontAttempts != 1)
                 return false;
 
             var decorativeFallback = WinFormsFontBootstrap.CreateUiFont(

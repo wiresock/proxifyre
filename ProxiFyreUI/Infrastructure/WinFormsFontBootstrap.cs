@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Drawing;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -14,7 +15,10 @@ namespace ProxiFyreUI.Infrastructure
     /// </summary>
     internal static class WinFormsFontBootstrap
     {
-        private const int DefaultGuiFontStockObject = 17;
+        private const uint GetIconTitleLogFont = 0x001F;
+        private const byte TrueTypeOnlyOutputPrecision = 7;
+        private const int LogFontFaceSize = 32;
+        private static readonly IntPtr InvalidGdiObject = new IntPtr(-1);
         private static readonly object SyncRoot = new object();
         private static readonly string[] PreferredFontFamilies =
         {
@@ -61,10 +65,20 @@ namespace ProxiFyreUI.Infrastructure
             Func<Font> defaultFontProvider,
             Func<string, Font> namedFontProvider)
         {
+            EnsureDefaultFont(defaultFontProvider, namedFontProvider, Font.FromHdc);
+        }
+
+        internal static void EnsureDefaultFont(
+            Func<Font> defaultFontProvider,
+            Func<string, Font> namedFontProvider,
+            Func<IntPtr, Font> selectedDeviceContextFontProvider)
+        {
             if (defaultFontProvider == null)
                 throw new ArgumentNullException(nameof(defaultFontProvider));
             if (namedFontProvider == null)
                 throw new ArgumentNullException(nameof(namedFontProvider));
+            if (selectedDeviceContextFontProvider == null)
+                throw new ArgumentNullException(nameof(selectedDeviceContextFontProvider));
 
             try
             {
@@ -80,10 +94,12 @@ namespace ProxiFyreUI.Infrastructure
                 // Recover only from the documented GDI+ font-resolution failure family.
             }
 
-            SeedDefaultFont(namedFontProvider);
+            SeedDefaultFont(namedFontProvider, selectedDeviceContextFontProvider);
         }
 
-        private static void SeedDefaultFont(Func<string, Font> namedFontProvider)
+        private static void SeedDefaultFont(
+            Func<string, Font> namedFontProvider,
+            Func<IntPtr, Font> selectedDeviceContextFontProvider)
         {
             var defaultFontField = typeof(Control).GetField("defaultFont",
                 BindingFlags.NonPublic | BindingFlags.Static);
@@ -106,7 +122,8 @@ namespace ProxiFyreUI.Infrastructure
                         "The WinForms default-font handle was initialized before recovery.");
                 }
 
-                var font = CreateDefaultFont(namedFontProvider);
+                var font = CreateDefaultFont(
+                    namedFontProvider, selectedDeviceContextFontProvider);
                 try
                 {
                     defaultFontField.SetValue(null, font);
@@ -120,7 +137,9 @@ namespace ProxiFyreUI.Infrastructure
             }
         }
 
-        private static Font CreateDefaultFont(Func<string, Font> namedFontProvider)
+        private static Font CreateDefaultFont(
+            Func<string, Font> namedFontProvider,
+            Func<IntPtr, Font> selectedDeviceContextFontProvider)
         {
             Exception lastFailure = null;
             foreach (var family in PreferredFontFamilies)
@@ -141,14 +160,7 @@ namespace ProxiFyreUI.Infrastructure
 
             try
             {
-                // SystemFonts.DefaultFont converts this stock font through another
-                // FontFamily-dependent Point-unit constructor. That conversion can fail on
-                // the affected Windows 7 image even when the raw Win32 font is usable.
-                // Preserve the raw World-unit font as a last-resort process default.
-                var handle = GetStockObject(DefaultGuiFontStockObject);
-                if (handle == IntPtr.Zero)
-                    throw new ExternalException("Windows did not provide a default GUI font.");
-                return Font.FromHfont(handle);
+                return CreateSystemTrueTypeFont(selectedDeviceContextFontProvider);
             }
             catch (ArgumentException exception)
             {
@@ -177,7 +189,108 @@ namespace ProxiFyreUI.Infrastructure
             }
         }
 
-        [DllImport("gdi32.dll")]
-        private static extern IntPtr GetStockObject(int objectIndex);
+        private static Font CreateSystemTrueTypeFont(
+            Func<IntPtr, Font> selectedDeviceContextFontProvider)
+        {
+            var logicalFont = new LogFont();
+            var logicalFontSize = Marshal.SizeOf(typeof(LogFont));
+            if (!SystemParametersInfo(
+                GetIconTitleLogFont, (uint)logicalFontSize, ref logicalFont, 0))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Windows did not provide its current UI font settings.");
+            }
+
+            // Font.FromHdc accepts only TrueType fonts. Preserve the system-selected face and
+            // metrics, but require GDI's font mapper to substitute another TrueType face if
+            // that particular legacy font is raster-only.
+            logicalFont.OutputPrecision = TrueTypeOnlyOutputPrecision;
+            var nativeFont = CreateFontIndirect(ref logicalFont);
+            if (nativeFont == IntPtr.Zero)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Windows could not realize a TrueType UI font.");
+            }
+
+            var deviceContext = IntPtr.Zero;
+            var previousObject = IntPtr.Zero;
+            try
+            {
+                deviceContext = CreateCompatibleDC(IntPtr.Zero);
+                if (deviceContext == IntPtr.Zero)
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Windows could not create a font device context.");
+                }
+
+                previousObject = SelectObject(deviceContext, nativeFont);
+                if (previousObject == IntPtr.Zero || previousObject == InvalidGdiObject)
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Windows could not select the recovered UI font.");
+                }
+
+                // Unlike Font.FromHfont, this calls GdipCreateFontFromDC directly and avoids
+                // the failing GDI+ FontFamily/LOGFONT reconstruction paths.
+                return selectedDeviceContextFontProvider(deviceContext);
+            }
+            finally
+            {
+                if (deviceContext != IntPtr.Zero)
+                {
+                    if (previousObject != IntPtr.Zero && previousObject != InvalidGdiObject)
+                        SelectObject(deviceContext, previousObject);
+                    DeleteDC(deviceContext);
+                }
+
+                DeleteObject(nativeFont);
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct LogFont
+        {
+            internal int Height;
+            internal int Width;
+            internal int Escapement;
+            internal int Orientation;
+            internal int Weight;
+            internal byte Italic;
+            internal byte Underline;
+            internal byte StrikeOut;
+            internal byte CharacterSet;
+            internal byte OutputPrecision;
+            internal byte ClipPrecision;
+            internal byte Quality;
+            internal byte PitchAndFamily;
+
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = LogFontFaceSize)]
+            internal string FaceName;
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SystemParametersInfo(
+            uint action,
+            uint parameter,
+            ref LogFont value,
+            uint updateFlags);
+
+        [DllImport("gdi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateFontIndirect(ref LogFont logicalFont);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern IntPtr CreateCompatibleDC(IntPtr deviceContext);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern IntPtr SelectObject(IntPtr deviceContext, IntPtr gdiObject);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DeleteObject(IntPtr gdiObject);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DeleteDC(IntPtr deviceContext);
     }
 }
