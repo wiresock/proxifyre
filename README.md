@@ -6,7 +6,7 @@
 
 **A transparent TCP and UDP SOCKS5 proxifier for Windows, with a Windows GUI and service support.**
 
-> **Companion project: [Alighieri](https://github.com/wiresock/alighieri)** — a SOCKS5-over-TLS companion for ProxiFyre that provides a compatible encrypted upstream for TCP and UDP proxy traffic.
+> **Companion project: [Alighieri](https://github.com/wiresock/alighieri)** — a SOCKS5-over-TLS companion for ProxiFyre that provides compatible TLS-enabled SOCKS5 listeners.
 
 **ProxiFyre** enables applications without native proxy support to transparently route both TCP and UDP traffic through a SOCKS5 proxy, enabling advanced use cases such as **QUIC over SOCKS**—a capability not supported by modern web browsers.
 
