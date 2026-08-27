@@ -141,7 +141,7 @@ namespace ProxiFyreUI.Forms
             this.Controls.Add(this.refreshButton);
             this.Controls.Add(this.searchTextBox);
             this.Controls.Add(this.searchLabel);
-            this.Font = new System.Drawing.Font("Segoe UI", 9F);
+            this.Font = global::ProxiFyreUI.Infrastructure.WinFormsFontBootstrap.CreateUiFont("Segoe UI", 9F);
             this.MinimizeBox = false;
             this.MinimumSize = new System.Drawing.Size(620, 420);
             this.Name = "ProcessPickerForm";

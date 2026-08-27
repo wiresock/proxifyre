@@ -260,7 +260,7 @@ namespace ProxiFyreUI.Forms
             this.headerPanel.Size = new System.Drawing.Size(1114, 102);
             this.headerPanel.TabIndex = 0;
             this.titleLabel.AutoSize = true;
-            this.titleLabel.Font = new System.Drawing.Font("Segoe UI Semibold", 16F, System.Drawing.FontStyle.Bold);
+            this.titleLabel.Font = global::ProxiFyreUI.Infrastructure.WinFormsFontBootstrap.CreateUiFont("Segoe UI Semibold", 16F, System.Drawing.FontStyle.Bold);
             this.titleLabel.Location = new System.Drawing.Point(12, 10);
             this.titleLabel.Name = "titleLabel";
             this.titleLabel.Size = new System.Drawing.Size(109, 30);
@@ -273,7 +273,7 @@ namespace ProxiFyreUI.Forms
             this.serviceStateLabel.TabIndex = 1;
             this.serviceStateLabel.Text = "Service:";
             this.serviceStateValueLabel.AutoSize = true;
-            this.serviceStateValueLabel.Font = new System.Drawing.Font("Segoe UI Semibold", 9F, System.Drawing.FontStyle.Bold);
+            this.serviceStateValueLabel.Font = global::ProxiFyreUI.Infrastructure.WinFormsFontBootstrap.CreateUiFont("Segoe UI Semibold", 9F, System.Drawing.FontStyle.Bold);
             this.serviceStateValueLabel.Location = new System.Drawing.Point(226, 17);
             this.serviceStateValueLabel.Name = "serviceStateValueLabel";
             this.serviceStateValueLabel.Size = new System.Drawing.Size(57, 15);
@@ -286,7 +286,7 @@ namespace ProxiFyreUI.Forms
             this.configurationStateLabel.TabIndex = 3;
             this.configurationStateLabel.Text = "Configuration:";
             this.configurationStateValueLabel.AutoSize = true;
-            this.configurationStateValueLabel.Font = new System.Drawing.Font("Segoe UI Semibold", 9F, System.Drawing.FontStyle.Bold);
+            this.configurationStateValueLabel.Font = global::ProxiFyreUI.Infrastructure.WinFormsFontBootstrap.CreateUiFont("Segoe UI Semibold", 9F, System.Drawing.FontStyle.Bold);
             this.configurationStateValueLabel.Location = new System.Drawing.Point(440, 17);
             this.configurationStateValueLabel.Name = "configurationStateValueLabel";
             this.configurationStateValueLabel.Size = new System.Drawing.Size(65, 15);
@@ -299,7 +299,7 @@ namespace ProxiFyreUI.Forms
             this.changesStateLabel.TabIndex = 5;
             this.changesStateLabel.Text = "Changes:";
             this.changesStateValueLabel.AutoSize = true;
-            this.changesStateValueLabel.Font = new System.Drawing.Font("Segoe UI Semibold", 9F, System.Drawing.FontStyle.Bold);
+            this.changesStateValueLabel.Font = global::ProxiFyreUI.Infrastructure.WinFormsFontBootstrap.CreateUiFont("Segoe UI Semibold", 9F, System.Drawing.FontStyle.Bold);
             this.changesStateValueLabel.Location = new System.Drawing.Point(682, 17);
             this.changesStateValueLabel.Name = "changesStateValueLabel";
             this.changesStateValueLabel.Size = new System.Drawing.Size(57, 15);
@@ -498,7 +498,7 @@ namespace ProxiFyreUI.Forms
             this.logRichTextBox.BackColor = System.Drawing.SystemColors.Window;
             this.logRichTextBox.DetectUrls = false;
             this.logRichTextBox.Dock = System.Windows.Forms.DockStyle.Fill;
-            this.logRichTextBox.Font = new System.Drawing.Font("Consolas", 9F);
+            this.logRichTextBox.Font = global::ProxiFyreUI.Infrastructure.WinFormsFontBootstrap.CreateUiFont("Consolas", 9F);
             this.logRichTextBox.HideSelection = false;
             this.logRichTextBox.Location = new System.Drawing.Point(8, 46);
             this.logRichTextBox.Name = "logRichTextBox";
@@ -565,7 +565,7 @@ namespace ProxiFyreUI.Forms
             this.statusStripLabel.Spring = true; this.statusStripLabel.Text = "Ready"; this.statusStripLabel.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
             // tray
             this.trayContextMenu.Items.AddRange(new System.Windows.Forms.ToolStripItem[] { this.trayOpenMenuItem, this.traySeparator1, this.trayServiceStatusMenuItem, this.trayStartMenuItem, this.trayStopMenuItem, this.trayRestartMenuItem, this.traySeparator2, this.trayOpenLogsMenuItem, this.trayExitMenuItem });
-            this.trayOpenMenuItem.Font = new System.Drawing.Font("Segoe UI", 9F, System.Drawing.FontStyle.Bold); this.trayOpenMenuItem.Text = "Open ProxiFyre"; this.trayOpenMenuItem.Click += new System.EventHandler(this.TrayOpenMenuItem_Click);
+            this.trayOpenMenuItem.Font = global::ProxiFyreUI.Infrastructure.WinFormsFontBootstrap.CreateUiFont("Segoe UI", 9F, System.Drawing.FontStyle.Bold); this.trayOpenMenuItem.Text = "Open ProxiFyre"; this.trayOpenMenuItem.Click += new System.EventHandler(this.TrayOpenMenuItem_Click);
             this.trayServiceStatusMenuItem.Enabled = false; this.trayServiceStatusMenuItem.Text = "Service: Unknown";
             this.trayStartMenuItem.Text = "Start"; this.trayStartMenuItem.Click += new System.EventHandler(this.TrayStartMenuItem_Click);
             this.trayStopMenuItem.Text = "Stop"; this.trayStopMenuItem.Click += new System.EventHandler(this.TrayStopMenuItem_Click);
@@ -582,7 +582,7 @@ namespace ProxiFyreUI.Forms
             this.Controls.Add(this.headerPanel);
             this.Controls.Add(this.actionPanel);
             this.Controls.Add(this.statusStrip);
-            this.Font = new System.Drawing.Font("Segoe UI", 9F);
+            this.Font = global::ProxiFyreUI.Infrastructure.WinFormsFontBootstrap.CreateUiFont("Segoe UI", 9F);
             this.MinimumSize = new System.Drawing.Size(900, 620);
             this.Name = "MainForm";
             this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;

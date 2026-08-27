@@ -60,7 +60,7 @@ namespace ProxiFyreUI.Forms
             this.Controls.Add(this.okButton);
             this.Controls.Add(this.valueTextBox);
             this.Controls.Add(this.promptLabel);
-            this.Font = new System.Drawing.Font("Segoe UI", 9F);
+            this.Font = global::ProxiFyreUI.Infrastructure.WinFormsFontBootstrap.CreateUiFont("Segoe UI", 9F);
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;

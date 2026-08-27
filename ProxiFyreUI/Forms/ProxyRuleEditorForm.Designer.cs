@@ -413,7 +413,7 @@ namespace ProxiFyreUI.Forms
             this.Controls.Add(this.trafficGroupBox);
             this.Controls.Add(this.proxyGroupBox);
             this.Controls.Add(this.applicationsGroupBox);
-            this.Font = new System.Drawing.Font("Segoe UI", 9F);
+            this.Font = global::ProxiFyreUI.Infrastructure.WinFormsFontBootstrap.CreateUiFont("Segoe UI", 9F);
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable;
             this.MaximizeBox = false;
             this.MinimizeBox = false;

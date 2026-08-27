@@ -15,7 +15,7 @@ namespace ProxiFyre.Tests
         [Test]
         [Apartment(ApartmentState.STA)]
         [NonParallelizable]
-        public void RecoversWithAUsableNamedFontBeforeDataGridViewConstruction()
+        public void RecoversWithWin32GuiFontWhenNamedGdiPlusFamiliesFail()
         {
             var applicationBase = Path.GetDirectoryName(
                 typeof(WinFormsFontBootstrapTests).Assembly.Location);
@@ -55,18 +55,40 @@ namespace ProxiFyre.Tests
                 defaultFontHandleField.GetValue(null) != null)
                 return false;
 
-            WinFormsFontBootstrap.EnsureDefaultFont(() =>
-                throw new ArgumentException("Simulated legacy GDI+ font failure."));
+            var namedFontAttempts = 0;
+            WinFormsFontBootstrap.EnsureDefaultFont(
+                () => throw new ArgumentException("Simulated default-font failure."),
+                family =>
+                {
+                    namedFontAttempts++;
+                    throw new ArgumentException(
+                        "Simulated named GDI+ font failure for " + family + ".");
+                });
 
             var seededFont = defaultFontField.GetValue(null) as Font;
-            if (seededFont == null || Math.Abs(seededFont.SizeInPoints - 9.0F) > 0.01F)
+            if (seededFont == null || seededFont.SizeInPoints <= 0.0F ||
+                namedFontAttempts != 3)
                 return false;
 
+            var decorativeFallback = WinFormsFontBootstrap.CreateUiFont(
+                "__ProxiFyre Missing UI Font__", 16.0F, FontStyle.Bold);
+            if (!ReferenceEquals(decorativeFallback, seededFont))
+                return false;
+
+            using (var form = new Form())
             using (var grid = new DataGridView())
+            using (var textBox = new TextBox())
             {
-                return ReferenceEquals(grid.Font, seededFont) &&
+                form.Controls.Add(grid);
+                form.Controls.Add(textBox);
+                var formHandle = form.Handle;
+                var gridHandle = grid.Handle;
+                var textBoxHandle = textBox.Handle;
+                return formHandle != IntPtr.Zero && gridHandle != IntPtr.Zero &&
+                    textBoxHandle != IntPtr.Zero &&
+                    ReferenceEquals(grid.Font, seededFont) &&
                     !string.IsNullOrWhiteSpace(seededFont.Name) &&
-                    defaultFontHandleField.GetValue(null) == null;
+                    defaultFontHandleField.GetValue(null) != null;
             }
         }
 
