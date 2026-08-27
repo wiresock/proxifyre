@@ -3,6 +3,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string] $BundlePath,
+    [Parameter(Mandatory = $true)][string] $BootstrapperExtensionPath,
     [Parameter(Mandatory = $true)]
     [ValidateSet('x86', 'x64', 'arm64')]
     [string] $Architecture,
@@ -64,6 +65,8 @@ function Find-Dumpbin {
 }
 
 $resolvedBundle = (Get-Item -LiteralPath $BundlePath -Force).FullName
+$resolvedBootstrapperExtension =
+    (Get-Item -LiteralPath $BootstrapperExtensionPath -Force).FullName
 $globalPackagesFolder = if ([string]::IsNullOrWhiteSpace($env:NUGET_PACKAGES)) {
     Join-Path ([Environment]::GetFolderPath('UserProfile')) '.nuget\packages'
 }
@@ -103,10 +106,12 @@ try {
     $themePath = Join-Path $baDirectory 'thm.xml'
     $windowIconPath = Join-Path $baDirectory 'ProxiFyre.ico'
     $bootstrapperFunctionsPath = Join-Path $baDirectory 'ProxiFyreSetup.BAFunctions.dll'
+    $engineExtensionPath = Join-Path $baDirectory 'ProxiFyreSetup.EngineExtension.dll'
     if (-not [IO.File]::Exists($themePath) -or
         -not [IO.File]::Exists($windowIconPath) -or
-        -not [IO.File]::Exists($bootstrapperFunctionsPath)) {
-        throw 'The extracted bootstrapper application is missing its custom theme, window icon, or setup functions.'
+        -not [IO.File]::Exists($bootstrapperFunctionsPath) -or
+        -not [IO.File]::Exists($engineExtensionPath)) {
+        throw 'The extracted bootstrapper is missing its custom theme, window icon, setup functions, or engine extension.'
     }
     [xml]$theme = [IO.File]::ReadAllText($themePath)
     $themeNamespace = [Xml.XmlNamespaceManager]::new($theme.NameTable)
@@ -142,6 +147,12 @@ try {
     $root = $manifest.SelectSingleNode('/b:BurnManifest', $namespace)
     $bootstrapperFunctionsPayload = $manifest.SelectSingleNode(
         '/b:BurnManifest/b:UX/b:Payload[@Id="ProxiFyreSetupBootstrapperFunctions"]',
+        $namespace)
+    $engineExtensionEntry = $manifest.SelectSingleNode(
+        '/b:BurnManifest/b:BootstrapperExtension[@Id="ProxiFyreSetupEngineExtension"]',
+        $namespace)
+    $engineExtensionPayload = $manifest.SelectSingleNode(
+        '/b:BurnManifest/b:UX/b:Payload[@Id="ProxiFyreSetupEngineExtension"]',
         $namespace)
     $visualCppPayload = $manifest.SelectSingleNode(
         '/b:BurnManifest/b:Payload[@Id="VisualCppRuntime"]', $namespace)
@@ -209,7 +220,8 @@ try {
             $visualCppVcruntime1Search, $wpfPayload, $wpfPackage, $proxifyrePayload,
             $proxifyrePackage, $proxifyreArpSuppression, $proxifyreBundleMarker,
             $driverSearch, $serviceSearch, $bundleProperties,
-            $bootstrapperFunctionsPayload)) {
+            $bootstrapperFunctionsPayload, $engineExtensionEntry,
+            $engineExtensionPayload)) {
         if ($null -eq $requiredNode) {
             throw 'The bundle is missing required prerequisite, application, or detection authoring.'
         }
@@ -237,6 +249,21 @@ try {
     if ((Get-PeArchitecture -Path $bootstrapperFunctionsPath) -cne $Architecture) {
         throw 'The WixStdBA functions payload architecture does not match the bundle engine.'
     }
+    if ($engineExtensionPayload.GetAttribute('FilePath') -cne
+            'ProxiFyreSetup.EngineExtension.dll' -or
+        -not [string]::IsNullOrEmpty(
+            $engineExtensionPayload.GetAttribute('DownloadUrl')) -or
+        $engineExtensionEntry.GetAttribute('EntryPayloadSourcePath') -cne
+            $engineExtensionPayload.GetAttribute('SourcePath')) {
+        throw 'The bundle must embed exactly one engine-process WinINet compatibility extension.'
+    }
+    if ((Get-FileHash -LiteralPath $engineExtensionPath -Algorithm SHA256).Hash -cne
+        (Get-FileHash -LiteralPath $resolvedBootstrapperExtension -Algorithm SHA256).Hash) {
+        throw 'The embedded setup engine extension differs from the validated build input.'
+    }
+    if ((Get-PeArchitecture -Path $engineExtensionPath) -cne $Architecture) {
+        throw 'The setup engine extension architecture does not match the bundle engine.'
+    }
     $dumpbin = Find-Dumpbin
     if ([string]::IsNullOrWhiteSpace($dumpbin)) {
         throw 'dumpbin.exe was not found; Visual Studio C++ tools are required to validate the setup functions.'
@@ -251,6 +278,29 @@ try {
     if ($LASTEXITCODE -ne 0 -or
         $dependencies -match '(?im)^\s*(?:VCRUNTIME|MSVCP|UCRTBASE|api-ms-win-crt)') {
         throw 'The setup functions must not depend on the Visual C++ runtime they help acquire.'
+    }
+    $extensionExports =
+        (& $dumpbin /nologo /exports $engineExtensionPath 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or
+        $extensionExports -notmatch '(?m)\bBootstrapperExtensionCreate\b' -or
+        $extensionExports -notmatch '(?m)\bBootstrapperExtensionDestroy\b') {
+        throw 'The setup engine extension is missing its required WiX exports.'
+    }
+    $extensionDependencies =
+        (& $dumpbin /nologo /dependents $engineExtensionPath 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not inspect setup engine extension dependencies.'
+    }
+    $actualExtensionDependencies = @([regex]::Matches(
+        $extensionDependencies, '(?im)^\s+([a-z0-9._-]+\.dll)\s*$') |
+        ForEach-Object { $_.Groups[1].Value.ToUpperInvariant() } |
+        Sort-Object -Unique)
+    $expectedExtensionDependencies = @('ADVAPI32.DLL', 'KERNEL32.DLL', 'WININET.DLL')
+    if ($actualExtensionDependencies.Count -ne $expectedExtensionDependencies.Count -or
+        @($actualExtensionDependencies | Where-Object {
+            $_ -notin $expectedExtensionDependencies
+        }).Count -ne 0) {
+        throw "The setup engine extension must use the static CRT and only expected system DLLs; found: $($actualExtensionDependencies -join ', ')."
     }
     $expectedNativeArchitectureCondition = switch ($Architecture) {
         'x86' { '(NOT VersionNT64 AND NOT NativeMachine) OR NativeMachine = 332' }

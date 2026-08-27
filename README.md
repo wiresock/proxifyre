@@ -243,6 +243,7 @@ nuget restore ProxiFyre.Configuration\packages.config -PackagesDirectory package
 nuget restore ProxiFyre\packages.config -PackagesDirectory packages -NonInteractive
 nuget restore ProxiFyre.Tests\packages.config -PackagesDirectory packages -NonInteractive
 msbuild ProxiFyreSetupBootstrapper\ProxiFyreSetupBootstrapper.vcxproj -t:Restore -v:minimal -p:RestoreLockedMode=true -p:RestoreConfigFile="$PWD\NuGet.Installer.Config"
+msbuild ProxiFyreSetupEngineExtension\ProxiFyreSetupEngineExtension.vcxproj -t:Restore -v:minimal -p:RestoreLockedMode=true -p:RestoreConfigFile="$PWD\NuGet.Installer.Config"
 msbuild socksify.sln -t:Rebuild -v:minimal -p:Configuration=Release -p:Platform=x64 -p:Version=2.4.0
 vstest.console.exe bin\tests\x64\Release\ProxiFyre.Tests.dll /TestAdapterPath:packages\NUnit3TestAdapter.4.6.0\build\net462 /Platform:x64
 pwsh -File scripts\Build-Installer.ps1 -Platform x64 -Version 2.4.0

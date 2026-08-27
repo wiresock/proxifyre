@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "dependencies": {
+    "native,Version=v0.0": {
+      "WixToolset.BootstrapperExtensionApi": {
+        "type": "Direct",
+        "requested": "[6.0.2, )",
+        "resolved": "6.0.2",
+        "contentHash": "o6T9AiCb3D2TkDh9Tb2QQzv7t8WpnMGvITL9N1jDzrKscGsztW2I88Lkr6YqjE2rBNAkZJzSfyW5nxH43EadHg==",
+        "dependencies": {
+          "WixToolset.DUtil": "[6.0.2, 7.0.0)"
+        }
+      },
+      "WixToolset.DUtil": {
+        "type": "Transitive",
+        "resolved": "6.0.2",
+        "contentHash": "HSmlDLMnpDnxEIKEcddZHpUWCiXt1jXOmZCAVtLcVjTxAHQV46eUsx8KP2f6nSb4yqxHkvEYpZB8pozb8jFUEg=="
+      }
+    },
+    "native,Version=v0.0/win-arm64": {},
+    "native,Version=v0.0/win-x64": {},
+    "native,Version=v0.0/win-x86": {}
+  }
+}

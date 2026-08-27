@@ -12,6 +12,7 @@ param(
     [string] $PayloadDirectory,
     [string] $OutputDirectory,
     [string] $BootstrapperFunctionsPath,
+    [string] $BootstrapperExtensionPath,
     [string] $WindowsPacketFilterMsiPath,
     [string] $VisualCppRedistributablePath,
     [switch] $NoRestore,
@@ -66,6 +67,19 @@ if (-not [IO.File]::Exists($bootstrapperFunctions)) {
 $bootstrapperFunctionsItem = Get-Item -LiteralPath $bootstrapperFunctions -Force
 if (($bootstrapperFunctionsItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "Setup BAFunctions DLL '$bootstrapperFunctions' must not be a reparse point."
+}
+if ([string]::IsNullOrWhiteSpace($BootstrapperExtensionPath)) {
+    $payloadConfiguration = Split-Path -Leaf $payloadPath
+    $BootstrapperExtensionPath = Join-Path $repositoryRoot (
+        "bin\setup\$dotnetPlatform\$payloadConfiguration\ProxiFyreSetup.EngineExtension.dll")
+}
+$bootstrapperExtension = [IO.Path]::GetFullPath($BootstrapperExtensionPath)
+if (-not [IO.File]::Exists($bootstrapperExtension)) {
+    throw "Setup engine extension '$bootstrapperExtension' does not exist. Build ProxiFyreSetupEngineExtension for $dotnetPlatform first or pass -BootstrapperExtensionPath."
+}
+$bootstrapperExtensionItem = Get-Item -LiteralPath $bootstrapperExtension -Force
+if (($bootstrapperExtensionItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Setup engine extension '$bootstrapperExtension' must not be a reparse point."
 }
 
 $runtimeFiles = @(
@@ -132,6 +146,15 @@ $bootstrapperFunctionsArchitecture = Get-PeArchitecture -Path $bootstrapperFunct
 if ($bootstrapperFunctionsArchitecture -cne $normalizedArchitecture) {
     throw "Setup BAFunctions DLL targets $bootstrapperFunctionsArchitecture, not $normalizedArchitecture."
 }
+$bootstrapperExtensionArchitecture = Get-PeArchitecture -Path $bootstrapperExtension
+if ($bootstrapperExtensionArchitecture -cne $normalizedArchitecture) {
+    throw "Setup engine extension targets $bootstrapperExtensionArchitecture, not $normalizedArchitecture."
+}
+
+& (Join-Path $PSScriptRoot 'Test-SetupEngineExtensionSource.ps1') `
+    -SourcePath (Join-Path $repositoryRoot `
+        'ProxiFyreSetupEngineExtension\BootstrapperExtension.cpp') |
+    Write-Host
 
 $wpfPackages = @{
     x86 = @{
@@ -271,7 +294,7 @@ try {
     & (Join-Path $PSScriptRoot 'Test-UnsignedArtifacts.ps1') -Path $firstPartyModules |
         Write-Host
     & (Join-Path $PSScriptRoot 'Test-UnsignedArtifacts.ps1') `
-        -Path $bootstrapperFunctions | Write-Host
+        -Path @($bootstrapperFunctions, $bootstrapperExtension) | Write-Host
 
     if ([string]::IsNullOrWhiteSpace($WindowsPacketFilterMsiPath)) {
         Write-Host "Downloading official Windows Packet Filter prerequisite metadata source from $($wpf.DownloadUrl)"
@@ -381,6 +404,7 @@ try {
         "--property:ProductVersion=$Version",
         "--property:ProxiFyreMsiPath=$msiPath",
         "--property:BootstrapperFunctionsPath=$bootstrapperFunctions",
+        "--property:BootstrapperExtensionPath=$bootstrapperExtension",
         "--property:WindowsPacketFilterMsiPath=$resolvedWpfPath",
         "--property:WindowsPacketFilterDownloadUrl=$($wpf.DownloadUrl)",
         "--property:VisualCppRedistributablePath=$resolvedVisualCppPath",
@@ -401,6 +425,7 @@ try {
 
     & (Join-Path $PSScriptRoot 'Test-BundlePackage.ps1') `
         -BundlePath $builtBundlePath `
+        -BootstrapperExtensionPath $bootstrapperExtension `
         -Architecture $normalizedArchitecture `
         -Version $Version `
         -WindowsPacketFilterFileName $wpf.FileName `

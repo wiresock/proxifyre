@@ -23,6 +23,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ProxiFyreUILauncher", "Prox
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ProxiFyreSetupBootstrapper", "ProxiFyreSetupBootstrapper\ProxiFyreSetupBootstrapper.vcxproj", "{0CFF576C-9AD3-4B46-B080-8BF22AD180DF}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ProxiFyreSetupEngineExtension", "ProxiFyreSetupEngineExtension\ProxiFyreSetupEngineExtension.vcxproj", "{93A1759C-E1D8-47F8-8F82-4294E1C44142}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProxiFyre.Tests", "ProxiFyre.Tests\ProxiFyre.Tests.csproj", "{B7163490-53E4-4BE8-AFDA-E685906D6CEB}"
 EndProject
 Project("{B7DD6F7E-DEF8-4E67-B5B7-07EF123DB6F0}") = "ProxiFyre.Installer", "ProxiFyre.Installer\ProxiFyre.Installer.wixproj", "{74D7EB8E-77C8-4870-A8FD-57FFE69D7837}"
@@ -128,6 +130,18 @@ Global
 		{0CFF576C-9AD3-4B46-B080-8BF22AD180DF}.Release|x64.Build.0 = Release|x64
 		{0CFF576C-9AD3-4B46-B080-8BF22AD180DF}.Release|x86.ActiveCfg = Release|Win32
 		{0CFF576C-9AD3-4B46-B080-8BF22AD180DF}.Release|x86.Build.0 = Release|Win32
+		{93A1759C-E1D8-47F8-8F82-4294E1C44142}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{93A1759C-E1D8-47F8-8F82-4294E1C44142}.Debug|ARM64.Build.0 = Debug|ARM64
+		{93A1759C-E1D8-47F8-8F82-4294E1C44142}.Debug|x64.ActiveCfg = Debug|x64
+		{93A1759C-E1D8-47F8-8F82-4294E1C44142}.Debug|x64.Build.0 = Debug|x64
+		{93A1759C-E1D8-47F8-8F82-4294E1C44142}.Debug|x86.ActiveCfg = Debug|Win32
+		{93A1759C-E1D8-47F8-8F82-4294E1C44142}.Debug|x86.Build.0 = Debug|Win32
+		{93A1759C-E1D8-47F8-8F82-4294E1C44142}.Release|ARM64.ActiveCfg = Release|ARM64
+		{93A1759C-E1D8-47F8-8F82-4294E1C44142}.Release|ARM64.Build.0 = Release|ARM64
+		{93A1759C-E1D8-47F8-8F82-4294E1C44142}.Release|x64.ActiveCfg = Release|x64
+		{93A1759C-E1D8-47F8-8F82-4294E1C44142}.Release|x64.Build.0 = Release|x64
+		{93A1759C-E1D8-47F8-8F82-4294E1C44142}.Release|x86.ActiveCfg = Release|Win32
+		{93A1759C-E1D8-47F8-8F82-4294E1C44142}.Release|x86.Build.0 = Release|Win32
 		{B7163490-53E4-4BE8-AFDA-E685906D6CEB}.Debug|ARM64.ActiveCfg = Debug|ARM64
 		{B7163490-53E4-4BE8-AFDA-E685906D6CEB}.Debug|ARM64.Build.0 = Debug|ARM64
 		{B7163490-53E4-4BE8-AFDA-E685906D6CEB}.Debug|x64.ActiveCfg = Debug|x64

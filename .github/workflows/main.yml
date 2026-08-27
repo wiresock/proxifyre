@@ -71,6 +71,12 @@ jobs:
             -property:RestoreLockedMode=true `
             -property:RestoreConfigFile="${{ github.workspace }}\NuGet.Installer.Config"
           if ($LASTEXITCODE -ne 0) { throw "Setup bootstrapper restore failed with exit code $LASTEXITCODE." }
+          msbuild ProxiFyreSetupEngineExtension\ProxiFyreSetupEngineExtension.vcxproj `
+            -target:Restore `
+            -verbosity:minimal `
+            -property:RestoreLockedMode=true `
+            -property:RestoreConfigFile="${{ github.workspace }}\NuGet.Installer.Config"
+          if ($LASTEXITCODE -ne 0) { throw "Setup engine extension restore failed with exit code $LASTEXITCODE." }
           dotnet restore ProxiFyre.Installer\ProxiFyre.Installer.wixproj --configfile NuGet.Installer.Config --locked-mode
           if ($LASTEXITCODE -ne 0) { throw "WiX MSI restore failed with exit code $LASTEXITCODE." }
           dotnet restore ProxiFyre.Bundle\ProxiFyre.Bundle.wixproj --configfile NuGet.Installer.Config --locked-mode

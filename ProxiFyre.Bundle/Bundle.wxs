@@ -20,6 +20,17 @@
       UpdateUrl="https://github.com/wiresock/proxifyre/releases"
       Compressed="yes">
 
+    <!--
+      Burn performs prerequisite downloads in the engine process, while WiX 6
+      hosts WixStdBA and its BAFunctions out of process. This engine extension
+      repairs only the invalid all-zero WinINet connection-flags case with a
+      process-scoped DIRECT override; it never changes Internet Options.
+    -->
+    <BootstrapperExtension
+        Id="ProxiFyreSetupEngineExtension"
+        Name="ProxiFyreSetup.EngineExtension.dll"
+        SourceFile="$(BootstrapperExtensionPath)" />
+
     <BootstrapperApplication>
       <bal:WixStandardBootstrapperApplication
           Theme="hyperlinkLicense"

@@ -8,7 +8,7 @@
     <RestoreConfigFile>$(MSBuildThisFileDirectory)..\NuGet.Installer.Config</RestoreConfigFile>
     <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
     <OutputName Condition="'$(OutputName)' == ''">ProxiFyre-Setup-$(ProductVersion)-win-$(InstallerPlatform)</OutputName>
-    <DefineConstants>$(DefineConstants);ProductVersion=$(ProductVersion);ProductArchitecture=$(ProductArchitecture);ProxiFyreMsiPath=$(ProxiFyreMsiPath);BootstrapperFunctionsPath=$(BootstrapperFunctionsPath);WindowsPacketFilterMsiPath=$(WindowsPacketFilterMsiPath);WindowsPacketFilterDownloadUrl=$(WindowsPacketFilterDownloadUrl);VisualCppRedistributablePath=$(VisualCppRedistributablePath);VisualCppRedistributableDownloadUrl=$(VisualCppRedistributableDownloadUrl);VisualCppRedistRegistryArchitecture=$(VisualCppRedistRegistryArchitecture)</DefineConstants>
+    <DefineConstants>$(DefineConstants);ProductVersion=$(ProductVersion);ProductArchitecture=$(ProductArchitecture);ProxiFyreMsiPath=$(ProxiFyreMsiPath);BootstrapperFunctionsPath=$(BootstrapperFunctionsPath);BootstrapperExtensionPath=$(BootstrapperExtensionPath);WindowsPacketFilterMsiPath=$(WindowsPacketFilterMsiPath);WindowsPacketFilterDownloadUrl=$(WindowsPacketFilterDownloadUrl);VisualCppRedistributablePath=$(VisualCppRedistributablePath);VisualCppRedistributableDownloadUrl=$(VisualCppRedistributableDownloadUrl);VisualCppRedistRegistryArchitecture=$(VisualCppRedistRegistryArchitecture)</DefineConstants>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(InstallerPlatform)' == '' and '$(Platform)' == 'x86'">
@@ -35,6 +35,8 @@
            Text="ProxiFyreMsiPath must identify the validated architecture-specific MSI." />
     <Error Condition="'$(BootstrapperFunctionsPath)' == '' or !Exists('$(BootstrapperFunctionsPath)')"
            Text="BootstrapperFunctionsPath must identify the architecture-specific setup BAFunctions DLL." />
+    <Error Condition="'$(BootstrapperExtensionPath)' == '' or !Exists('$(BootstrapperExtensionPath)')"
+           Text="BootstrapperExtensionPath must identify the architecture-specific setup engine extension DLL." />
     <Error Condition="'$(WindowsPacketFilterMsiPath)' == '' or !Exists('$(WindowsPacketFilterMsiPath)')"
            Text="WindowsPacketFilterMsiPath must identify the verified official prerequisite MSI used to bind remote payload metadata." />
     <Error Condition="'$(WindowsPacketFilterDownloadUrl)' == ''"
