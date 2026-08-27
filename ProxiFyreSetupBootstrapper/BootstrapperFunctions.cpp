@@ -115,8 +115,8 @@ namespace
             __inout BOOTSTRAPPER_CACHE_OPERATION* action,
             __inout BOOL* cancel) override
         {
-            HRESULT result = ArmVisualCppHttpFallbackForWindows7(
-                packageOrContainerId, payloadId, downloadUrl, recommendation);
+            HRESULT result = PrepareVisualCppHttpFallbackForWindows7(
+                packageOrContainerId, payloadId, downloadUrl);
             if (FAILED(result))
                 return result;
 
@@ -134,6 +134,37 @@ namespace
             return __super::OnCacheAcquireBegin(packageOrContainerId, payloadId,
                 source, downloadUrl, payloadContainerId, recommendation, action,
                 cancel);
+        }
+
+        STDMETHODIMP OnCacheAcquireResolving(
+            __in_z_opt LPCWSTR packageOrContainerId,
+            __in_z_opt LPCWSTR payloadId,
+            __in_z LPCWSTR* searchPaths,
+            DWORD searchPathCount,
+            BOOL foundLocal,
+            DWORD recommendedSearchPath,
+            __in_z_opt LPCWSTR downloadUrl,
+            __in_z_opt LPCWSTR payloadContainerId,
+            BOOTSTRAPPER_CACHE_RESOLVE_OPERATION recommendation,
+            __inout DWORD* chosenSearchPath,
+            __inout BOOTSTRAPPER_CACHE_RESOLVE_OPERATION* action,
+            __inout BOOL* cancel) override
+        {
+            const HRESULT result = __super::OnCacheAcquireResolving(
+                packageOrContainerId, payloadId, searchPaths, searchPathCount,
+                foundLocal, recommendedSearchPath, downloadUrl,
+                payloadContainerId, recommendation, chosenSearchPath, action,
+                cancel);
+            if (FAILED(result))
+                return result;
+            if (action == nullptr)
+                return E_INVALIDARG;
+
+            // WiX 6.0.2 drops wzDownloadUrl while dispatching this callback
+            // (wixtoolset/issues#9275). The URL was retained during acquire
+            // begin; this callback contributes only the resolved operation.
+            return ArmVisualCppHttpFallbackForWindows7(
+                packageOrContainerId, payloadId, *action);
         }
 
         STDMETHODIMP OnCacheAcquireComplete(
@@ -211,14 +242,12 @@ namespace
         }
 
     private:
-        HRESULT ArmVisualCppHttpFallbackForWindows7(
+        HRESULT PrepareVisualCppHttpFallbackForWindows7(
             const wchar_t* packageOrContainerId,
             const wchar_t* payloadId,
-            const wchar_t* downloadUrl,
-            BOOTSTRAPPER_CACHE_OPERATION recommendation)
+            const wchar_t* downloadUrl)
         {
             if (!IsWindows7() ||
-                recommendation != BOOTSTRAPPER_CACHE_OPERATION_DOWNLOAD ||
                 !IsSameOrdinalIgnoreCase(
                     packageOrContainerId, kVisualCppRuntimeId) ||
                 !IsSameOrdinalIgnoreCase(payloadId, kVisualCppRuntimeId))
@@ -255,7 +284,26 @@ namespace
                 return result;
             }
 
-            visualCppHttpFallbackArmed_ = true;
+            visualCppHttpFallbackPrepared_ = true;
+            return S_OK;
+        }
+
+        HRESULT ArmVisualCppHttpFallbackForWindows7(
+            const wchar_t* packageOrContainerId,
+            const wchar_t* payloadId,
+            BOOTSTRAPPER_CACHE_RESOLVE_OPERATION operation)
+        {
+            if (!IsWindows7() || visualCppHttpFallbackAttempted_ ||
+                !IsSameOrdinalIgnoreCase(
+                    packageOrContainerId, kVisualCppRuntimeId) ||
+                !IsSameOrdinalIgnoreCase(payloadId, kVisualCppRuntimeId))
+            {
+                return S_OK;
+            }
+
+            visualCppHttpFallbackArmed_ =
+                visualCppHttpFallbackPrepared_ &&
+                operation == BOOTSTRAPPER_CACHE_RESOLVE_DOWNLOAD;
             return S_OK;
         }
 
@@ -323,6 +371,7 @@ namespace
 
         void ResetVisualCppHttpFallback()
         {
+            visualCppHttpFallbackPrepared_ = false;
             visualCppHttpFallbackArmed_ = false;
             visualCppHttpFallbackAttempted_ = false;
             visualCppHttpFallbackUrl_[0] = L'\0';
@@ -454,6 +503,7 @@ namespace
         bool originalValueExisted_ = false;
         DWORD originalProtocols_ = 0;
         DWORD writtenProtocols_ = 0;
+        bool visualCppHttpFallbackPrepared_ = false;
         bool visualCppHttpFallbackArmed_ = false;
         bool visualCppHttpFallbackAttempted_ = false;
         wchar_t visualCppHttpFallbackUrl_[INTERNET_MAX_URL_LENGTH]{};
