@@ -1,4 +1,12 @@
-# ProxiFyre: SOCKS5 Proxifier for Windows with UDP Support
+# ProxiFyre
+
+[![release](https://img.shields.io/github/v/release/wiresock/proxifyre?display_name=tag&sort=semver&label=release)](https://github.com/wiresock/proxifyre/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/wiresock/proxifyre/main.yml?event=pull_request&label=CI&logo=github)](https://github.com/wiresock/proxifyre/actions/workflows/main.yml)
+[![license](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+
+**A transparent TCP and UDP SOCKS5 proxifier for Windows, with a Windows GUI and service support.**
+
+> **Companion project: [Alighieri](https://github.com/wiresock/alighieri)** — a SOCKS5-over-TLS companion for ProxiFyre that provides a compatible encrypted upstream for TCP and UDP proxy traffic.
 
 **ProxiFyre** enables applications without native proxy support to transparently route both TCP and UDP traffic through a SOCKS5 proxy, enabling advanced use cases such as **QUIC over SOCKS**—a capability not supported by modern web browsers.
 
