@@ -448,6 +448,26 @@ void socksify_unmanaged::print_log(const log_level_mx level, const std::string& 
     // info messages were never shown at the "info" level.
     if (level <= log_level_)
     {
-        log_printer(message.c_str());
+        const auto level_name = [level]() -> std::string_view
+        {
+            switch (level)
+            {
+            case log_level_mx::error:
+                return "error";
+            case log_level_mx::warning:
+                return "warning";
+            case log_level_mx::deb:
+                return "debug";
+            case log_level_mx::all:
+                return "all";
+            default:
+                return "info";
+            }
+        }();
+
+        std::string tagged_message;
+        tagged_message.reserve(level_name.size() + message.size() + 3);
+        tagged_message.append("[").append(level_name).append("] ").append(message);
+        log_printer(tagged_message.c_str());
     }
 }

@@ -58,6 +58,7 @@ namespace ProxiFyre
 
             // Handle the global log level from the configuration
             _logLevel = MapLogLevel(ConfigurationValueParser.GetLogLevel(serviceSettings.LogLevel));
+            ConfigureManagedLogLevel(_logLevel);
 
             // Native construction opens the NDISRD device before Start() is called. Translate
             // initialization failures here so direct console/service starts always leave an
@@ -249,6 +250,53 @@ namespace ProxiFyre
                 : Socks5TransportEnum.TCP;
         }
 
+        private static void ConfigureManagedLogLevel(LogLevel logLevel)
+        {
+            var configuration = LogManager.Configuration;
+            if (configuration == null)
+                return;
+
+            var minimumLevel = MapManagedLogLevel(logLevel);
+            foreach (var rule in configuration.LoggingRules)
+                rule.SetLoggingLevels(minimumLevel, NLog.LogLevel.Fatal);
+            LogManager.ReconfigExistingLoggers();
+        }
+
+        private static NLog.LogLevel MapManagedLogLevel(LogLevel logLevel)
+        {
+            switch (logLevel)
+            {
+                case LogLevel.Error:
+                    return NLog.LogLevel.Error;
+                case LogLevel.Warning:
+                    return NLog.LogLevel.Warn;
+                case LogLevel.Debug:
+                case LogLevel.All:
+                    return NLog.LogLevel.Debug;
+                default:
+                    return NLog.LogLevel.Info;
+            }
+        }
+
+        private static NLog.LogLevel GetNativeLogLevel(string message)
+        {
+            LogMessageLevel nativeLevel;
+            if (!LogMessageLevelParser.TryGetLeadingNativeLevel(message, out nativeLevel))
+                return NLog.LogLevel.Info;
+
+            switch (nativeLevel)
+            {
+                case LogMessageLevel.Error:
+                    return NLog.LogLevel.Error;
+                case LogMessageLevel.Warning:
+                    return NLog.LogLevel.Warn;
+                case LogMessageLevel.Debug:
+                    return NLog.LogLevel.Debug;
+                default:
+                    return NLog.LogLevel.Info;
+            }
+        }
+
         /// <summary>
         /// Stops the ProxiFyre service and disposes of resources.
         /// </summary>
@@ -268,13 +316,12 @@ namespace ProxiFyre
         /// <param name="e">The log event arguments.</param>
         private static void LogPrinter(object sender, LogEventArgs e)
         {
-            // Loop through each log entry and log it using NLog
+            // Preserve the native severity in the structured NLog record. Keeping the native
+            // token in the message also lets the GUI read logs created by older releases.
             foreach (var entry in e.Log.Where(entry => entry != null))
             {
-                // Format log entry with ISO 8601 timestamp, event, description, and data.
-                //var logMessage =
-                //    $"{DateTimeOffset.FromUnixTimeMilliseconds(entry.TimeStamp):u} | Event: {entry.Event} | Description: {entry.Description ?? string.Empty} | Data: {entry.Data}";
-                LoggerInstance.Info((entry.Description ?? string.Empty).Replace("\n", "").Replace("\r", ""));
+                var message = (entry.Description ?? string.Empty).Replace("\n", "").Replace("\r", "");
+                LoggerInstance.Log(GetNativeLogLevel(message), message);
             }
         }
 

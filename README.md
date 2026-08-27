@@ -47,6 +47,8 @@ The application uses a configuration file named `app-config.json`. This JSON fil
 LogLevel can have one of the following values which define the detail of the log:  
 `Error`, `Warning`, `Info`, `Debug`, `All`
 
+`Info` records service lifecycle and configuration summaries. Use `Debug` when per-connection routing, proxy negotiation, and relay details are needed for troubleshooting.
+
 ---
 
 ### appNames

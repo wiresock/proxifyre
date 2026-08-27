@@ -1,11 +1,12 @@
 using System;
+using ProxiFyre.Configuration;
 
 namespace ProxiFyreUI.Infrastructure
 {
     /// <summary>
-    /// Matches the level selector against the structured level emitted by NLog. Native
-    /// netlib entries are forwarded through NLog as INFO, so their leading bracketed level
-    /// token takes precedence over the outer NLog field.
+    /// Matches the level selector against the structured level emitted by NLog. The leading
+    /// native severity token takes precedence so legacy logs that wrapped every native entry
+    /// as INFO remain filterable alongside severity-preserving records.
     /// </summary>
     public static class LogLevelMatcher
     {
@@ -53,18 +54,11 @@ namespace ProxiFyreUI.Infrastructure
         private static bool TryGetLeadingNativeLevel(string value, out string level)
         {
             level = null;
-            if (string.IsNullOrWhiteSpace(value))
+            LogMessageLevel nativeLevel;
+            if (!LogMessageLevelParser.TryGetLeadingNativeLevel(value, out nativeLevel))
                 return false;
-
-            var trimmed = value.TrimStart();
-            if (trimmed.Length < 3 || trimmed[0] != '[')
-                return false;
-            var close = trimmed.IndexOf(']');
-            if (close <= 1)
-                return false;
-
-            level = NormalizeLevel(trimmed.Substring(1, close - 1));
-            return level != null;
+            level = nativeLevel.ToString();
+            return true;
         }
 
         private static string NormalizeLevel(string level)
