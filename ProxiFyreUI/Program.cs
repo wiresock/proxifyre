@@ -1,9 +1,11 @@
-using Microsoft.VisualBasic.ApplicationServices;
 using ProxiFyreUI.Infrastructure;
 using System;
+using System.Globalization;
+using System.IO;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -15,11 +17,65 @@ namespace ProxiFyreUI
     /// </summary>
     public static class ManagedEntryPoint
     {
+        internal const int ManagedStartupFailureExitCode = 0x50584601;
+
         [STAThread]
         public static int Run(string ignored)
         {
-            Program.Run(Environment.GetCommandLineArgs().Skip(1).ToArray());
-            return 0;
+            try
+            {
+                Program.Run(Environment.GetCommandLineArgs().Skip(1).ToArray());
+                return 0;
+            }
+            catch (Exception exception)
+            {
+                // This is the last managed boundary before control returns to the native host.
+                // Do not expose or record exception messages because startup exceptions may
+                // contain configuration values. The native host owns the one user-facing error
+                // dialog and distinguishes this reserved exit code from CLR activation failures.
+                TryWriteStartupFailure(exception);
+                return ManagedStartupFailureExitCode;
+            }
+        }
+
+        private static void TryWriteStartupFailure(Exception exception)
+        {
+            try
+            {
+                var assemblyDirectory = Path.GetDirectoryName(
+                    Assembly.GetExecutingAssembly().Location);
+                if (string.IsNullOrWhiteSpace(assemblyDirectory))
+                    return;
+
+                var logPath = Path.Combine(assemblyDirectory, "ProxiFyreUI.startup.log");
+                using (var writer = new StreamWriter(logPath, false,
+                    new UTF8Encoding(false)))
+                {
+                    writer.WriteLine("ProxiFyre UI managed startup failure");
+                    writer.WriteLine("UTC: " + DateTime.UtcNow.ToString("O",
+                        CultureInfo.InvariantCulture));
+                    writer.WriteLine("CLR: " + Environment.Version);
+                    writer.WriteLine("Process architecture: " +
+                        (IntPtr.Size == 8 ? "x64" : "x86"));
+
+                    var current = exception;
+                    for (var depth = 0; current != null && depth < 8; depth++)
+                    {
+                        writer.WriteLine(string.Format(CultureInfo.InvariantCulture,
+                            "Exception[{0}]: {1}; HRESULT=0x{2:X8}", depth,
+                            current.GetType().FullName, current.HResult));
+                        current = current.InnerException;
+                    }
+
+                    writer.WriteLine("Stack trace (messages omitted):");
+                    writer.WriteLine(exception.StackTrace ?? "Not available");
+                }
+            }
+            catch
+            {
+                // The native host still reports the reserved result if diagnostics cannot be
+                // written (for example, when storage is unavailable).
+            }
         }
     }
 
@@ -40,32 +96,64 @@ namespace ProxiFyreUI
             catch
             {
                 MessageBox.Show(
-                    "The ProxiFyre UI payload is incomplete or failed its release-signature integrity check. Reinstall it from an official signed archive.",
+                    "The ProxiFyre UI payload is incomplete or failed its local integrity check. Reinstall it from an official ProxiFyre package.",
                     "ProxiFyre UI integrity check", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
             using (startupPayloadLease)
+            using (var singleInstance = SingleInstanceCoordinator.CreateForCurrentUser())
             {
-                try
+                if (!singleInstance.IsPrimary)
                 {
-                    RunVerifiedApplication(args);
+                    singleInstance.RequestActivation();
+                    return;
                 }
-                catch (CantStartSingleInstanceException)
-                {
-                    MessageBox.Show(
-                        "The existing ProxiFyre window is still starting or closing. Try again in a moment.",
-                        "ProxiFyre", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
+
+                RunVerifiedApplication(singleInstance);
             }
         }
 
         // Keep form/application type resolution behind the startup payload check. The CLR loads
         // referenced app-local assemblies lazily, so this method must not be inlined into Main.
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static void RunVerifiedApplication(string[] args)
+        private static void RunVerifiedApplication(SingleInstanceCoordinator singleInstance)
         {
-            new ProxiFyreApplication().Run(args);
+            WinFormsFontBootstrap.EnsureDefaultFont();
+            Application.EnableVisualStyles();
+            using (var mainForm = new Forms.MainForm())
+            {
+                // A request can arrive before the form is shown. The coordinator retains that
+                // request until this callback is installed on the UI thread.
+                mainForm.Shown += (sender, eventArgs) =>
+                    singleInstance.SetActivationCallback(
+                        () => RestoreFromSecondaryLaunch(mainForm));
+                Application.Run(mainForm);
+            }
+        }
+
+        private static void RestoreFromSecondaryLaunch(Forms.MainForm mainForm)
+        {
+            if (mainForm == null || mainForm.IsDisposed || mainForm.Disposing)
+                return;
+            if (mainForm.InvokeRequired)
+            {
+                try
+                {
+                    mainForm.BeginInvoke((Action)(() => RestoreFromSecondaryLaunch(mainForm)));
+                }
+                catch (ObjectDisposedException)
+                {
+                    // The primary window is already closing; a later launch can become primary.
+                }
+                catch (InvalidOperationException)
+                {
+                    // The primary window is already closing; a later launch can become primary.
+                }
+                return;
+            }
+
+            mainForm.RestoreFromSecondaryLaunch();
         }
 
         private static void OnThreadException(object sender, ThreadExceptionEventArgs e)
@@ -89,26 +177,4 @@ namespace ProxiFyreUI
         }
     }
 
-    internal sealed class ProxiFyreApplication : WindowsFormsApplicationBase
-    {
-        public ProxiFyreApplication()
-        {
-            IsSingleInstance = true;
-            EnableVisualStyles = true;
-            ShutdownStyle = ShutdownMode.AfterMainFormCloses;
-        }
-
-        protected override void OnCreateMainForm()
-        {
-            MainForm = new Forms.MainForm();
-        }
-
-        protected override void OnStartupNextInstance(StartupNextInstanceEventArgs eventArgs)
-        {
-            eventArgs.BringToForeground = true;
-            var mainForm = MainForm as Forms.MainForm;
-            mainForm?.RestoreFromSecondaryLaunch();
-            base.OnStartupNextInstance(eventArgs);
-        }
-    }
 }

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "dependencies": {
+    "native,Version=v0.0": {
+      "WixToolset.Bal.wixext": {
+        "type": "Direct",
+        "requested": "[6.0.2, )",
+        "resolved": "6.0.2",
+        "contentHash": "WeO0Qo28apmrEKQ+fEmWBEwnsez+4/B/NP5WnCnK2ZzKNcBr9xiRx01XHPBr08VqibDZGgXraDqFJ7Flws2QDw=="
+      },
+      "WixToolset.Util.wixext": {
+        "type": "Direct",
+        "requested": "[6.0.2, )",
+        "resolved": "6.0.2",
+        "contentHash": "plP64ub/0KjNbtLeaeiibVCPkKfr439WTKZmTwVSoQ4fznLHBZLsE0+wcyk6dA5cQuQsD5hlmnVGTKgPioiusQ=="
+      }
+    }
+  }
+}

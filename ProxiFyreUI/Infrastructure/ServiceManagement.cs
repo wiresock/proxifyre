@@ -684,6 +684,11 @@ namespace ProxiFyreUI.Infrastructure
 
             using (payloadLease)
             {
+                var locationFailure = GetUnprotectedServiceLocationFailure(status, enginePath,
+                    isUninstall: true);
+                if (locationFailure != null)
+                    return locationFailure;
+
                 if (ServiceOperationBudget.Remaining(timeout, started.Elapsed) <= TimeSpan.Zero)
                     return LifecycleCommandTimedOut("uninstall", cancellationToken);
 
@@ -1039,7 +1044,7 @@ namespace ProxiFyreUI.Infrastructure
         }
 
         private static ServiceOperationResult GetUnprotectedServiceLocationFailure(
-            ServiceStatusInfo status, string enginePath)
+            ServiceStatusInfo status, string enginePath, bool isUninstall = false)
         {
 #if DEBUG
             // Repository builds intentionally run from a developer-writable output directory.
@@ -1049,17 +1054,21 @@ namespace ProxiFyreUI.Infrastructure
             if (ServiceInstallLocationPolicy.IsProtected(enginePath, out reason))
                 return null;
 
-            var remediation = status != null && status.IsInstalled
+            var remediation = isUninstall
+                ? "For an MSI installation, remove ProxiFyre from Windows Installed apps. " +
+                  "For a manual service, place an official complete release in an " +
+                  "administrator-protected fixed-volume directory, then retry the uninstall."
+                : status != null && status.IsInstalled
                 ? "Stop and uninstall the existing service, exit this GUI, then copy or extract " +
-                  "the complete release using a trusted installer into a protected per-machine " +
+                  "the complete release using the official installer into a protected per-machine " +
                   "directory (normally under Program Files). Launch the GUI from that copy and " +
                   "install the service again."
-                : "Install the complete release with a trusted installer into a protected " +
+                : "Install the complete release with the official installer into a protected " +
                   "per-machine directory (normally under Program Files), launch the GUI from " +
                   "that copy, and install the service. The GUI will not rewrite permissions on " +
                   "a user-controlled directory in place.";
             return ServiceOperationResult.Failed(status,
-                "The ProxiFyre service cannot run as LocalSystem from a location writable by " +
+                "A privileged ProxiFyre service operation cannot execute code from a location writable by " +
                 "standard users. " + remediation, reason);
 #endif
         }

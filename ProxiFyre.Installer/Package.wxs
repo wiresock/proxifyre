@@ -1,0 +1,323 @@
+<?xml version="1.0" encoding="utf-8"?>
+<?if $(var.ProductArchitecture) = x86 ?>
+  <?define VisualCppRuntimeFolder = "[SystemFolder]" ?>
+<?else?>
+  <?define VisualCppRuntimeFolder = "[System64Folder]" ?>
+<?endif?>
+<!--
+  Windows Installer compares a file's language when its version exactly equals
+  Signature.MinVersion. A NULL Languages field does not match the signed files
+  below, so use the immediately preceding four-part version to express each
+  effective language-independent floor.
+-->
+<?define WindowsPacketFilterSearchMinVersion = "3.6.0.65535" ?>
+<?define UniversalCrtSearchMinVersion = "10.0.10239.65535" ?>
+<?define VisualCppRuntimeSearchMinVersion = "14.44.35210.65535" ?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:firewall="http://wixtoolset.org/schemas/v4/wxs/firewall"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     RequiredVersion="6.0.0">
+  <Package
+      Name="ProxiFyre"
+      Manufacturer="NT KERNEL"
+      Version="$(ProductVersion)"
+      ProductCode="$(ProductCode)"
+      UpgradeCode="{309431B2-9478-43FE-8CB6-EB289306C64C}"
+      Scope="perMachine"
+      InstallerVersion="500"
+      Compressed="yes"
+      UpgradeStrategy="majorUpgrade">
+
+    <SummaryInformation
+        Description="ProxiFyre per-machine installer"
+        Comments="Installs the architecture-specific ProxiFyre engine and management UI." />
+
+    <MajorUpgrade
+        AllowDowngrades="no"
+        DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+        IgnoreRemoveFailure="no"
+        MigrateFeatures="yes"
+        Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Property Id="ARPPRODUCTICON" Value="ProxiFyre.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/wiresock/proxifyre" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/wiresock/proxifyre/issues" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/wiresock/proxifyre/releases" />
+    <Property Id="PROXIFYREARCHITECTURE" Value="$(ProductArchitecture)" />
+    <Icon Id="ProxiFyre.ico" SourceFile="..\assets\ProxiFyre.ico" />
+
+    <Launch
+        Condition="Installed OR VersionNT &gt; 601 OR (VersionNT = 601 AND ServicePackLevel &gt;= 1)"
+        Message="ProxiFyre requires Windows 7 SP1 or later. On Windows 7, install current servicing-stack and SHA-2 support updates, reboot, and retry." />
+
+    <Property Id="NETFRAMEWORKRELEASE" Secure="yes">
+      <RegistrySearch
+          Id="NetFrameworkReleaseSearch"
+          Root="HKLM"
+          Key="SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full"
+          Name="Release"
+          Type="raw"
+          Bitness="always32" />
+    </Property>
+
+    <!--
+      Direct MSI use is supported when a compatible Windows Packet Filter is
+      already present. Requiring both the service registration and the actual
+      driver file rejects stale or partially removed product registrations,
+      while still admitting licensed/custom builds that retain the public
+      NDISRD service and compatible driver version.
+    -->
+    <Property Id="WPF_SERVICE_IMAGE" Secure="yes">
+      <RegistrySearch
+          Id="WindowsPacketFilterServiceSearch"
+          Root="HKLM"
+          Key="SYSTEM\CurrentControlSet\Services\NDISRD"
+          Name="ImagePath"
+          Type="raw" />
+    </Property>
+    <Property Id="WPF_DRIVER64_COMPATIBLE" Secure="yes">
+      <DirectorySearch
+          Id="WindowsPacketFilterSystem64DirectorySearch"
+          Path="[System64Folder]drivers"
+          Depth="0">
+        <FileSearch
+            Id="WindowsPacketFilterSystem64FileSearch"
+            Name="ndisrd.sys"
+            MinVersion="$(WindowsPacketFilterSearchMinVersion)"
+            MaxVersion="3.999.65535.65535" />
+      </DirectorySearch>
+    </Property>
+    <Property Id="WPF_DRIVER32_COMPATIBLE" Secure="yes">
+      <DirectorySearch
+          Id="WindowsPacketFilterSystem32DirectorySearch"
+          Path="[SystemFolder]drivers"
+          Depth="0">
+        <FileSearch
+            Id="WindowsPacketFilterSystem32FileSearch"
+            Name="ndisrd.sys"
+            MinVersion="$(WindowsPacketFilterSearchMinVersion)"
+            MaxVersion="3.999.65535.65535" />
+      </DirectorySearch>
+    </Property>
+    <Launch
+        Condition="Installed OR (WPF_SERVICE_IMAGE AND ((VersionNT64 AND WPF_DRIVER64_COMPATIBLE) OR (NOT VersionNT64 AND WPF_DRIVER32_COMPATIBLE)))"
+        Message="ProxiFyre requires Windows Packet Filter 3.6.1 or later (but earlier than 4.0). Run the ProxiFyre Setup executable to download the official prerequisite, or install it from https://github.com/wiresock/ndisapi/releases and retry." />
+
+    <!--
+      The setup bundle installs the pinned Microsoft runtime. Keep the MSI
+      independently deployable by rejecting a missing/older app dependency with
+      an actionable message instead of allowing a service that cannot load.
+    -->
+    <Property Id="UCRT_BASE_COMPATIBLE" Secure="yes">
+      <DirectorySearch Id="UniversalCrtDirectorySearch" Path="$(VisualCppRuntimeFolder)" Depth="0">
+        <FileSearch Id="UniversalCrtFileSearch" Name="ucrtbase.dll" MinVersion="$(UniversalCrtSearchMinVersion)" />
+      </DirectorySearch>
+    </Property>
+    <Property Id="VC_MSVCP140_COMPATIBLE" Secure="yes">
+      <DirectorySearch Id="VisualCppMsvcp140DirectorySearch" Path="$(VisualCppRuntimeFolder)" Depth="0">
+        <FileSearch Id="VisualCppMsvcp140FileSearch" Name="msvcp140.dll" MinVersion="$(VisualCppRuntimeSearchMinVersion)" />
+      </DirectorySearch>
+    </Property>
+    <Property Id="VC_ATOMIC_WAIT_COMPATIBLE" Secure="yes">
+      <DirectorySearch Id="VisualCppAtomicWaitDirectorySearch" Path="$(VisualCppRuntimeFolder)" Depth="0">
+        <FileSearch Id="VisualCppAtomicWaitFileSearch" Name="msvcp140_atomic_wait.dll" MinVersion="$(VisualCppRuntimeSearchMinVersion)" />
+      </DirectorySearch>
+    </Property>
+    <Property Id="VC_VCRUNTIME140_COMPATIBLE" Secure="yes">
+      <DirectorySearch Id="VisualCppVcruntime140DirectorySearch" Path="$(VisualCppRuntimeFolder)" Depth="0">
+        <FileSearch Id="VisualCppVcruntime140FileSearch" Name="vcruntime140.dll" MinVersion="$(VisualCppRuntimeSearchMinVersion)" />
+      </DirectorySearch>
+    </Property>
+    <?if $(var.ProductArchitecture) = x64 ?>
+      <Property Id="VC_VCRUNTIME140_1_COMPATIBLE" Secure="yes">
+        <DirectorySearch Id="VisualCppVcruntime1401DirectorySearch" Path="$(VisualCppRuntimeFolder)" Depth="0">
+          <FileSearch Id="VisualCppVcruntime1401FileSearch" Name="vcruntime140_1.dll" MinVersion="$(VisualCppRuntimeSearchMinVersion)" />
+        </DirectorySearch>
+      </Property>
+      <Launch
+          Condition="Installed OR (BURNMSIINSTALL = 1 AND PROXIFYRE_SETUP_CHAIN = 1) OR (UCRT_BASE_COMPATIBLE AND VC_MSVCP140_COMPATIBLE AND VC_ATOMIC_WAIT_COMPATIBLE AND VC_VCRUNTIME140_COMPATIBLE AND VC_VCRUNTIME140_1_COMPATIBLE)"
+          Message="The standalone ProxiFyre MSI requires Microsoft Visual C++ 2015-2022 runtime files version 14.44.35211 or later. Install or repair the architecture-matched redistributable, restart Windows if requested, and retry; alternatively run ProxiFyre Setup." />
+    <?else?>
+      <Launch
+          Condition="Installed OR (BURNMSIINSTALL = 1 AND PROXIFYRE_SETUP_CHAIN = 1) OR (UCRT_BASE_COMPATIBLE AND VC_MSVCP140_COMPATIBLE AND VC_ATOMIC_WAIT_COMPATIBLE AND VC_VCRUNTIME140_COMPATIBLE)"
+          Message="The standalone ProxiFyre MSI requires Microsoft Visual C++ 2015-2022 runtime files version 14.44.35211 or later. Install or repair the architecture-matched redistributable, restart Windows if requested, and retry; alternatively run ProxiFyre Setup." />
+    <?endif?>
+
+    <?if $(var.ProductArchitecture) = arm64 ?>
+      <Launch
+          Condition="Installed OR NETFRAMEWORKRELEASE &gt;= &quot;#533320&quot;"
+          Message="ProxiFyre for ARM64 requires Microsoft .NET Framework 4.8.1 or later." />
+    <?else?>
+      <Launch
+          Condition="Installed OR NETFRAMEWORKRELEASE &gt;= &quot;#461808&quot;"
+          Message="ProxiFyre requires Microsoft .NET Framework 4.7.2 or later." />
+    <?endif?>
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory
+          Id="ProxiFyreInstallFolder"
+          Name="ProxiFyre"
+          ComponentGuidGenerationSeed="$(ComponentGuidGenerationSeed)">
+        <Component
+            Id="ApplicationDirectorySecurity"
+            Guid="$(DirectorySecurityComponentGuid)"
+            Feature="CoreFeature">
+          <CreateFolder>
+            <PermissionEx
+                Id="ApplicationDirectoryPermission"
+                Sddl="O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)" />
+          </CreateFolder>
+        </Component>
+
+        <Component Id="EngineComponent" Guid="*" Feature="CoreFeature">
+          <File
+              Id="ProxiFyreEngineFile"
+              Source="!(bindpath.Payload)\ProxiFyre.exe"
+              KeyPath="yes" />
+          <ServiceInstall
+              Id="ProxiFyreServiceInstall"
+              Name="ProxiFyreService"
+              DisplayName="ProxiFyre Service"
+              Description="Routes selected Windows applications through configured SOCKS5 proxies."
+              Type="ownProcess"
+              Start="demand"
+              ErrorControl="normal"
+              Vital="yes"
+              Account="LocalSystem"
+              Interactive="no">
+            <ServiceDependency Id="NDISRD" />
+          </ServiceInstall>
+          <ServiceControl
+              Id="ProxiFyreServiceControl"
+              Name="ProxiFyreService"
+              Stop="both"
+              Remove="uninstall"
+              Wait="yes" />
+          <firewall:FirewallException
+              Id="ProxiFyreInboundTcpFirewallRule"
+              Name="ProxiFyre (TCP-In)"
+              Description="Allows TCP flows redirected by Windows Packet Filter to the local ProxiFyre engine."
+              File="ProxiFyreEngineFile"
+              Protocol="tcp"
+              Profile="all"
+              Scope="any"
+              Outbound="no"
+              EdgeTraversal="deny"
+              IgnoreFailure="no" />
+          <firewall:FirewallException
+              Id="ProxiFyreInboundUdpFirewallRule"
+              Name="ProxiFyre (UDP-In)"
+              Description="Allows UDP flows redirected by Windows Packet Filter to the local ProxiFyre engine."
+              File="ProxiFyreEngineFile"
+              Protocol="udp"
+              Profile="all"
+              Scope="any"
+              Outbound="no"
+              EdgeTraversal="deny"
+              IgnoreFailure="no" />
+        </Component>
+
+        <Component Id="EngineConfigurationComponent" Guid="*" Feature="CoreFeature">
+          <File Id="ProxiFyreEngineConfigurationFile" Source="!(bindpath.Payload)\ProxiFyre.exe.config" KeyPath="yes" />
+        </Component>
+        <Component Id="UiLauncherComponent" Guid="$(UiLauncherComponentGuid)" Feature="CoreFeature">
+          <File Id="ProxiFyreUiFile" Source="!(bindpath.Payload)\ProxiFyreUI.exe" KeyPath="yes" />
+          <File Id="ProxiFyreUiConfigurationFile" Source="!(bindpath.Payload)\ProxiFyreUI.exe.config" CompanionFile="ProxiFyreUiFile" />
+        </Component>
+        <Component Id="ManagedUiComponent" Guid="*" Feature="CoreFeature">
+          <File Id="ProxiFyreManagedUiFile" Source="!(bindpath.Payload)\ProxiFyreUI.Managed.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="ConfigurationLibraryComponent" Guid="*" Feature="CoreFeature">
+          <File Id="ProxiFyreConfigurationLibraryFile" Source="!(bindpath.Payload)\ProxiFyre.Configuration.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="SocksifyComponent" Guid="*" Feature="CoreFeature">
+          <File Id="SocksifyFile" Source="!(bindpath.Payload)\socksify.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="NewtonsoftJsonComponent" Guid="*" Feature="CoreFeature">
+          <File Id="NewtonsoftJsonFile" Source="!(bindpath.Payload)\Newtonsoft.Json.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="NLogComponent" Guid="*" Feature="CoreFeature">
+          <File Id="NLogFile" Source="!(bindpath.Payload)\NLog.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="TopshelfComponent" Guid="*" Feature="CoreFeature">
+          <File Id="TopshelfFile" Source="!(bindpath.Payload)\Topshelf.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="NLogConfigurationComponent" Guid="*" Feature="CoreFeature">
+          <File Id="NLogConfigurationFile" Source="!(bindpath.Payload)\NLog.config" KeyPath="yes" />
+        </Component>
+        <Component Id="SampleConfigurationComponent" Guid="*" Feature="CoreFeature">
+          <File Id="SampleConfigurationFile" Source="!(bindpath.Payload)\app-config.sample.json" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component
+          Id="StartMenuShortcutComponent"
+          Guid="$(StartMenuComponentGuid)"
+          Feature="CoreFeature">
+        <Shortcut
+            Id="ProxiFyreStartMenuShortcut"
+            Name="ProxiFyre"
+            Description="Configure and manage ProxiFyre"
+            Target="[ProxiFyreInstallFolder]ProxiFyreUI.exe"
+            WorkingDirectory="ProxiFyreInstallFolder"
+            Advertise="no"
+            Icon="ProxiFyre.ico"
+            IconIndex="0" />
+        <RegistryValue
+            Root="HKLM"
+            Key="Software\NT KERNEL\ProxiFyre"
+            Name="StartMenuShortcut"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component
+          Id="DesktopShortcutComponent"
+          Guid="$(DesktopComponentGuid)"
+          Feature="DesktopShortcutFeature">
+        <Shortcut
+            Id="ProxiFyreDesktopShortcut"
+            Name="ProxiFyre"
+            Description="Configure and manage ProxiFyre"
+            Target="[ProxiFyreInstallFolder]ProxiFyreUI.exe"
+            WorkingDirectory="ProxiFyreInstallFolder"
+            Advertise="no"
+            Icon="ProxiFyre.ico"
+            IconIndex="0" />
+        <RegistryValue
+            Root="HKLM"
+            Key="Software\NT KERNEL\ProxiFyre"
+            Name="DesktopShortcut"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature
+        Id="CoreFeature"
+        Title="ProxiFyre"
+        Description="ProxiFyre engine, service, management UI, and Start menu shortcut"
+        Display="expand"
+        Level="1"
+        AllowAbsent="no"
+        AllowAdvertise="no">
+      <Feature
+          Id="DesktopShortcutFeature"
+          Title="Desktop shortcut"
+          Description="Create a ProxiFyre shortcut on the shared desktop"
+          Level="1"
+          AllowAdvertise="no" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_FeatureTree" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtfPath)" />
+  </Package>
+</Wix>

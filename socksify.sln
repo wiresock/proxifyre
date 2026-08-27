@@ -23,6 +23,10 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ProxiFyreUILauncher", "Prox
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProxiFyre.Tests", "ProxiFyre.Tests\ProxiFyre.Tests.csproj", "{B7163490-53E4-4BE8-AFDA-E685906D6CEB}"
 EndProject
+Project("{B7DD6F7E-DEF8-4E67-B5B7-07EF123DB6F0}") = "ProxiFyre.Installer", "ProxiFyre.Installer\ProxiFyre.Installer.wixproj", "{74D7EB8E-77C8-4870-A8FD-57FFE69D7837}"
+EndProject
+Project("{B7DD6F7E-DEF8-4E67-B5B7-07EF123DB6F0}") = "ProxiFyre.Bundle", "ProxiFyre.Bundle\ProxiFyre.Bundle.wixproj", "{C86650AF-5142-4EF0-82CD-2016F0D54F26}"
+EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{8EC462FD-D22E-90A8-E5CE-7E832BA40C5D}"
 	ProjectSection(SolutionItems) = preProject
 		README.md = README.md
@@ -122,6 +126,18 @@ Global
 		{B7163490-53E4-4BE8-AFDA-E685906D6CEB}.Release|x64.Build.0 = Release|x64
 		{B7163490-53E4-4BE8-AFDA-E685906D6CEB}.Release|x86.ActiveCfg = Release|x86
 		{B7163490-53E4-4BE8-AFDA-E685906D6CEB}.Release|x86.Build.0 = Release|x86
+		{74D7EB8E-77C8-4870-A8FD-57FFE69D7837}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{74D7EB8E-77C8-4870-A8FD-57FFE69D7837}.Debug|x64.ActiveCfg = Debug|x64
+		{74D7EB8E-77C8-4870-A8FD-57FFE69D7837}.Debug|x86.ActiveCfg = Debug|x86
+		{74D7EB8E-77C8-4870-A8FD-57FFE69D7837}.Release|ARM64.ActiveCfg = Release|ARM64
+		{74D7EB8E-77C8-4870-A8FD-57FFE69D7837}.Release|x64.ActiveCfg = Release|x64
+		{74D7EB8E-77C8-4870-A8FD-57FFE69D7837}.Release|x86.ActiveCfg = Release|x86
+		{C86650AF-5142-4EF0-82CD-2016F0D54F26}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{C86650AF-5142-4EF0-82CD-2016F0D54F26}.Debug|x64.ActiveCfg = Debug|x64
+		{C86650AF-5142-4EF0-82CD-2016F0D54F26}.Debug|x86.ActiveCfg = Debug|x86
+		{C86650AF-5142-4EF0-82CD-2016F0D54F26}.Release|ARM64.ActiveCfg = Release|ARM64
+		{C86650AF-5142-4EF0-82CD-2016F0D54F26}.Release|x64.ActiveCfg = Release|x64
+		{C86650AF-5142-4EF0-82CD-2016F0D54F26}.Release|x86.ActiveCfg = Release|x86
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

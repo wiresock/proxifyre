@@ -49,7 +49,6 @@
     <Reference Include="System.Configuration" />
     <Reference Include="System.Core" />
     <Reference Include="System.Drawing" />
-    <Reference Include="Microsoft.VisualBasic" />
     <Reference Include="System.ServiceProcess" />
     <Reference Include="System.Web.Extensions" />
     <Reference Include="System.Windows.Forms" />
@@ -68,8 +67,10 @@
     <Compile Include="Infrastructure\PayloadIntegrity.cs" />
     <Compile Include="Infrastructure\ProcessCatalog.cs" />
     <Compile Include="Infrastructure\ServiceManagement.cs" />
+    <Compile Include="Infrastructure\SingleInstanceCoordinator.cs" />
     <Compile Include="Infrastructure\UiSettings.cs" />
     <Compile Include="Infrastructure\UserVisibleErrorFormatter.cs" />
+    <Compile Include="Infrastructure\WinFormsFontBootstrap.cs" />
     <Compile Include="Infrastructure\WindowsPacketFilterProbe.cs" />
     <Compile Include="Forms\InputDialog.cs"><SubType>Form</SubType></Compile>
     <Compile Include="Forms\InputDialog.Designer.cs"><DependentUpon>InputDialog.cs</DependentUpon></Compile>

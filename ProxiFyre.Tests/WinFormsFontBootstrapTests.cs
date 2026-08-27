@@ -1,0 +1,78 @@
+using NUnit.Framework;
+using ProxiFyreUI.Infrastructure;
+using System;
+using System.Drawing;
+using System.IO;
+using System.Reflection;
+using System.Threading;
+using System.Windows.Forms;
+
+namespace ProxiFyre.Tests
+{
+    [TestFixture]
+    public sealed class WinFormsFontBootstrapTests
+    {
+        [Test]
+        [Apartment(ApartmentState.STA)]
+        [NonParallelizable]
+        public void RecoversWithAUsableNamedFontBeforeDataGridViewConstruction()
+        {
+            var applicationBase = Path.GetDirectoryName(
+                typeof(WinFormsFontBootstrapTests).Assembly.Location);
+            var setup = new AppDomainSetup
+            {
+                ApplicationBase = applicationBase,
+                ShadowCopyFiles = "false"
+            };
+            var domain = AppDomain.CreateDomain(
+                "ProxiFyre.WinFormsFontBootstrap." + Guid.NewGuid().ToString("N"), null, setup);
+
+            try
+            {
+                var probe = (WinFormsFontBootstrapProbe)domain.CreateInstanceFromAndUnwrap(
+                    typeof(WinFormsFontBootstrapProbe).Assembly.Location,
+                    typeof(WinFormsFontBootstrapProbe).FullName);
+
+                Assert.That(probe.Exercise(), Is.True);
+            }
+            finally
+            {
+                AppDomain.Unload(domain);
+            }
+        }
+    }
+
+    public sealed class WinFormsFontBootstrapProbe : MarshalByRefObject
+    {
+        public bool Exercise()
+        {
+            var defaultFontField = typeof(Control).GetField("defaultFont",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            var defaultFontHandleField = typeof(Control).GetField("defaultFontHandleWrapper",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            if (defaultFontField == null || defaultFontHandleField == null ||
+                defaultFontField.GetValue(null) != null ||
+                defaultFontHandleField.GetValue(null) != null)
+                return false;
+
+            WinFormsFontBootstrap.EnsureDefaultFont(() =>
+                throw new ArgumentException("Simulated legacy GDI+ font failure."));
+
+            var seededFont = defaultFontField.GetValue(null) as Font;
+            if (seededFont == null || Math.Abs(seededFont.SizeInPoints - 9.0F) > 0.01F)
+                return false;
+
+            using (var grid = new DataGridView())
+            {
+                return ReferenceEquals(grid.Font, seededFont) &&
+                    !string.IsNullOrWhiteSpace(seededFont.Name) &&
+                    defaultFontHandleField.GetValue(null) == null;
+            }
+        }
+
+        public override object InitializeLifetimeService()
+        {
+            return null;
+        }
+    }
+}

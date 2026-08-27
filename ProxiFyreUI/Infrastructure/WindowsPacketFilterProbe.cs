@@ -12,31 +12,45 @@ namespace ProxiFyreUI.Infrastructure
         public const string DevicePath = @"\\.\NDISRD";
         public const string DownloadUrl = "https://github.com/wiresock/ndisapi/releases";
 
-        private WindowsPacketFilterStatus(bool isAvailable, int? nativeErrorCode, string details)
+        private WindowsPacketFilterStatus(bool isAvailable, int? nativeErrorCode, string details,
+            bool deviceOpened)
         {
             IsAvailable = isAvailable;
             NativeErrorCode = nativeErrorCode;
             Details = details;
+            DeviceOpened = deviceOpened;
         }
 
         public bool IsAvailable { get; }
         public int? NativeErrorCode { get; }
         public string Details { get; }
+        internal bool DeviceOpened { get; }
 
         public string StartupMessage => IsAvailable
             ? null
-            : "Windows Packet Filter (WinpkFilter) is not available. ProxiFyre requires the NDISRD driver. " +
-              "Install it from " + DownloadUrl +
+            : "Windows Packet Filter (WinpkFilter) is unavailable or incompatible. " +
+              "ProxiFyre requires a compatible NDISRD driver. Install or update it from " + DownloadUrl +
               ", restart Windows if requested, and try again.";
 
         public static WindowsPacketFilterStatus Available()
         {
-            return new WindowsPacketFilterStatus(true, null, null);
+            return new WindowsPacketFilterStatus(true, null, null, false);
         }
 
         public static WindowsPacketFilterStatus Unavailable(int? nativeErrorCode, string details)
         {
-            return new WindowsPacketFilterStatus(false, nativeErrorCode, details);
+            return new WindowsPacketFilterStatus(false, nativeErrorCode, details, false);
+        }
+
+        internal static WindowsPacketFilterStatus ActiveDeviceUnavailable(int? nativeErrorCode,
+            string details)
+        {
+            return new WindowsPacketFilterStatus(false, nativeErrorCode, details, true);
+        }
+
+        internal static WindowsPacketFilterStatus CompatibleDevice()
+        {
+            return new WindowsPacketFilterStatus(true, null, null, true);
         }
     }
 
@@ -55,16 +69,25 @@ namespace ProxiFyreUI.Infrastructure
     }
 
     /// <summary>
-    /// Performs the same capability check as the native NDISAPI constructor without loading
-    /// socksify.dll into the GUI process. Opening the device with no requested access is
-    /// non-invasive and works while another client is using the driver.
+    /// Probes the active NDISRD device and verifies its API version without loading socksify.dll
+    /// into the GUI process. Opening the device with no requested access is non-invasive and works
+    /// while another client is using the driver.
     /// </summary>
     public sealed class WindowsPacketFilterProbe : IWindowsPacketFilterProbe
     {
         private const uint FileShareRead = 0x00000001;
         private const uint FileShareWrite = 0x00000002;
         private const uint OpenExisting = 3;
-        private const uint FileFlagOverlapped = 0x40000000;
+        private const uint FileDeviceNdisrd = 0x00008300;
+        private const uint NdisrdIoctlIndex = 0x830;
+        private const uint MethodBuffered = 0;
+        private const uint FileAnyAccess = 0;
+        internal const uint IoctlNdisrdGetVersion =
+            (FileDeviceNdisrd << 16) | (FileAnyAccess << 14) |
+            (NdisrdIoctlIndex << 2) | MethodBuffered;
+        internal const uint MinimumCompatibleApiVersion = 0x06013000;
+        internal const ushort RequiredApiMajor = 0x0003;
+        internal const ushort MinimumApiMinor = 0x0601;
 
         private readonly Func<WindowsPacketFilterStatus> _deviceProbe;
         private readonly Func<WindowsPacketFilterServiceState> _serviceStateProbe;
@@ -101,13 +124,14 @@ namespace ProxiFyreUI.Infrastructure
             if (deviceStatus.IsAvailable)
                 return deviceStatus;
 
-            // A stopped (or already starting) NDISRD service is a valid SCM dependency state.
-            // Let ServiceController.Start ask SCM to start/wait for it instead of rejecting the
-            // ProxiFyre operation merely because the device is not open yet. If registration
-            // could not be queried, SCM remains the authoritative source of the eventual error.
-            if (serviceState == WindowsPacketFilterServiceState.Stopped ||
-                serviceState == WindowsPacketFilterServiceState.StartPending ||
-                serviceState == WindowsPacketFilterServiceState.Unknown)
+            // A stopped (or already starting) NDISRD service is a valid SCM dependency state when
+            // its device is not open yet. Let ServiceController.Start ask SCM to start/wait for it.
+            // Once the device opens, however, a failed or incompatible version response is an
+            // active-driver failure and must not be hidden by a stale SCM state.
+            if (!deviceStatus.DeviceOpened &&
+                (serviceState == WindowsPacketFilterServiceState.Stopped ||
+                 serviceState == WindowsPacketFilterServiceState.StartPending ||
+                 serviceState == WindowsPacketFilterServiceState.Unknown))
                 return WindowsPacketFilterStatus.Available();
 
             return deviceStatus;
@@ -119,15 +143,38 @@ namespace ProxiFyreUI.Infrastructure
             {
                 using (var handle = CreateFile(WindowsPacketFilterStatus.DevicePath, 0,
                            FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting,
-                           FileFlagOverlapped, IntPtr.Zero))
+                           0, IntPtr.Zero))
                 {
-                    if (!handle.IsInvalid)
-                        return WindowsPacketFilterStatus.Available();
+                    if (handle.IsInvalid)
+                    {
+                        var error = Marshal.GetLastWin32Error();
+                        return WindowsPacketFilterStatus.Unavailable(error,
+                            "The NDISRD device could not be opened (Win32 error " + error + ": " +
+                            new Win32Exception(error).Message + ").");
+                    }
 
-                    var error = Marshal.GetLastWin32Error();
-                    return WindowsPacketFilterStatus.Unavailable(error,
-                        "The NDISRD device could not be opened (Win32 error " + error + ": " +
-                        new Win32Exception(error).Message + ").");
+                    var inputVersion = uint.MaxValue;
+                    uint driverVersion;
+                    uint bytesReturned;
+                    if (!DeviceIoControl(handle, IoctlNdisrdGetVersion, ref inputVersion,
+                            sizeof(uint), out driverVersion, sizeof(uint), out bytesReturned,
+                            IntPtr.Zero))
+                    {
+                        var error = Marshal.GetLastWin32Error();
+                        return WindowsPacketFilterStatus.ActiveDeviceUnavailable(error,
+                            "The active NDISRD device opened, but IOCTL_NDISRD_GET_VERSION failed " +
+                            "(Win32 error " + error + ": " + new Win32Exception(error).Message +
+                            ").");
+                    }
+
+                    if (bytesReturned != sizeof(uint))
+                    {
+                        return WindowsPacketFilterStatus.ActiveDeviceUnavailable(null,
+                            "The active NDISRD device returned an invalid version response (" +
+                            bytesReturned + " bytes; expected " + sizeof(uint) + ").");
+                    }
+
+                    return EvaluateDriverVersion(driverVersion);
                 }
             }
             catch (Exception ex) when (ex is DllNotFoundException || ex is EntryPointNotFoundException ||
@@ -136,6 +183,57 @@ namespace ProxiFyreUI.Infrastructure
                 return WindowsPacketFilterStatus.Unavailable(null,
                     "The NDISRD availability check failed: " + ex.Message);
             }
+        }
+
+        internal static WindowsPacketFilterStatus EvaluateDriverVersion(uint driverVersion)
+        {
+            var apiMajor = GetApiMajor(driverVersion);
+            var apiMinor = GetApiMinor(driverVersion);
+            if (apiMajor == RequiredApiMajor && apiMinor >= MinimumApiMinor)
+                return WindowsPacketFilterStatus.CompatibleDevice();
+
+            var reported = FormatApiVersion(driverVersion, apiMajor, apiMinor);
+            if (apiMajor != RequiredApiMajor)
+            {
+                return WindowsPacketFilterStatus.ActiveDeviceUnavailable(null,
+                    "The active NDISRD device reports an incompatible " + reported + ". " +
+                    "ProxiFyre supports API major " + RequiredApiMajor +
+                    " only; install a compatible WinpkFilter release (minimum API encoding " +
+                    FormatApiEncoding(MinimumCompatibleApiVersion) + ").");
+            }
+
+            return WindowsPacketFilterStatus.ActiveDeviceUnavailable(null,
+                "The active NDISRD device reports " + reported + ". ProxiFyre requires API minor " +
+                FormatApiMinor(MinimumApiMinor) + " or later with API major " +
+                RequiredApiMajor + " (minimum API encoding " +
+                FormatApiEncoding(MinimumCompatibleApiVersion) + ").");
+        }
+
+        private static ushort GetApiMajor(uint driverVersion)
+        {
+            return (ushort)((driverVersion >> 12) & 0x000f);
+        }
+
+        private static ushort GetApiMinor(uint driverVersion)
+        {
+            return (ushort)(driverVersion >> 16);
+        }
+
+        private static string FormatApiVersion(uint driverVersion, ushort apiMajor,
+            ushort apiMinor)
+        {
+            return "API encoding " + FormatApiEncoding(driverVersion) + " (API major " +
+                   apiMajor + ", API minor " + FormatApiMinor(apiMinor) + ")";
+        }
+
+        private static string FormatApiEncoding(uint driverVersion)
+        {
+            return "0x" + driverVersion.ToString("X8");
+        }
+
+        private static string FormatApiMinor(ushort apiMinor)
+        {
+            return "0x" + apiMinor.ToString("X4");
         }
 
         private static WindowsPacketFilterServiceState ProbeServiceState()
@@ -182,5 +280,12 @@ namespace ProxiFyreUI.Infrastructure
         private static extern SafeFileHandle CreateFile(string fileName, uint desiredAccess,
             uint shareMode, IntPtr securityAttributes, uint creationDisposition,
             uint flagsAndAttributes, IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DeviceIoControl(SafeFileHandle deviceHandle,
+            uint ioControlCode, ref uint inputBuffer, uint inputBufferSize,
+            out uint outputBuffer, uint outputBufferSize, out uint bytesReturned,
+            IntPtr overlapped);
     }
 }

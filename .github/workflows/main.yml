@@ -51,6 +51,14 @@ jobs:
       - name: Restore NuGet Packages
         run: nuget restore socksify.sln
 
+      - name: Restore pinned WiX packages
+        shell: pwsh
+        run: |
+          dotnet restore ProxiFyre.Installer\ProxiFyre.Installer.wixproj --configfile NuGet.Installer.Config --locked-mode
+          if ($LASTEXITCODE -ne 0) { throw "WiX MSI restore failed with exit code $LASTEXITCODE." }
+          dotnet restore ProxiFyre.Bundle\ProxiFyre.Bundle.wixproj --configfile NuGet.Installer.Config --locked-mode
+          if ($LASTEXITCODE -ne 0) { throw "WiX bundle restore failed with exit code $LASTEXITCODE." }
+
       - name: Parse Version
         shell: bash
         env:
@@ -58,12 +66,10 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           if [[ "$REF_TYPE" == "tag" ]]; then
-            # Keep this grammar aligned with sign/sign-update-release.ps1. Signed releases
-            # use vMAJOR.MINOR.PATCH with an optional SemVer-style prerelease suffix.
-            if [[ "$REF_NAME" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            if [[ "$REF_NAME" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
               VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
             else
-              echo "Tag '$REF_NAME' must use vMAJOR.MINOR.PATCH with an optional prerelease suffix." >&2
+              echo "Installer release tags must use vMAJOR.MINOR.PATCH. Prerelease suffixes cannot be represented safely by the three-part MSI ProductVersion." >&2
               exit 1
             fi
             PACKAGE_LABEL="$REF_NAME"
@@ -116,6 +122,30 @@ jobs:
             }
           }
 
+      - name: Verify first-party artifacts are unsigned
+        shell: pwsh
+        run: |
+          $payload = "bin\exe\${{ matrix.platform }}\${{ matrix.build_configuration }}"
+          $modules = @(
+            'ProxiFyre.exe',
+            'ProxiFyreUI.exe',
+            'ProxiFyreUI.Managed.dll',
+            'ProxiFyre.Configuration.dll',
+            'socksify.dll'
+          ) | ForEach-Object { Join-Path $payload $_ }
+          ./scripts/Test-UnsignedArtifacts.ps1 -Path $modules
+
+      - name: Build MSI and prerequisite setup bundle
+        shell: pwsh
+        run: |
+          ./scripts/Build-Installer.ps1 `
+            -Platform '${{ matrix.platform }}' `
+            -Version '${{ env.VERSION }}' `
+            -PayloadDirectory 'bin\exe\${{ matrix.platform }}\${{ matrix.build_configuration }}' `
+            -OutputDirectory 'bin\installer\${{ matrix.platform }}\${{ matrix.build_configuration }}' `
+            -NoRestore `
+            -Force
+
       - name: Package Release
         uses: thedoctor0/zip-release@0.7.1
         with:
@@ -124,19 +154,35 @@ jobs:
           directory: 'bin\\exe\\${{ matrix.platform }}\\${{ matrix.build_configuration }}'
           exclusions: '*.pdb'
 
+      - name: Write archive checksum
+        shell: pwsh
+        run: |
+          $archive = "bin\exe\${{ matrix.platform }}\${{ matrix.build_configuration }}\ProxiFyre-${{ env.PACKAGE_LABEL }}-${{ matrix.platform }}.zip"
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText(
+            "$archive.sha256",
+            "$hash  $([IO.Path]::GetFileName($archive))`n",
+            [Text.UTF8Encoding]::new($false))
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}-artifact
-          path: 'bin\\exe\\${{ matrix.platform }}\\${{ matrix.build_configuration }}\\ProxiFyre-${{ env.PACKAGE_LABEL }}-${{ matrix.platform }}.zip'
+          path: |
+            bin\exe\${{ matrix.platform }}\${{ matrix.build_configuration }}\ProxiFyre-${{ env.PACKAGE_LABEL }}-${{ matrix.platform }}.zip
+            bin\exe\${{ matrix.platform }}\${{ matrix.build_configuration }}\ProxiFyre-${{ env.PACKAGE_LABEL }}-${{ matrix.platform }}.zip.sha256
+            bin\installer\${{ matrix.platform }}\${{ matrix.build_configuration }}\ProxiFyre-*.msi
+            bin\installer\${{ matrix.platform }}\${{ matrix.build_configuration }}\ProxiFyre-*-setup.exe
+            bin\installer\${{ matrix.platform }}\${{ matrix.build_configuration }}\ProxiFyre-*.sha256
 
   upload-release:
-    # Only publish when EVERY matrix build (x86/x64/ARM64) succeeded. Without this gate the job
-    # ran on `always()`, so a single failed platform build would publish a partial release that is
-    # missing an architecture's zip -- and `skipIfReleaseExists` then blocks a retry from fixing it.
+    # Publish only after every architecture produced its ZIP, MSI, online setup,
+    # and checksum files, so a failed matrix leg cannot create a partial release.
     needs: build-and-package
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout from GitHub
         uses: actions/checkout@v7
@@ -148,19 +194,12 @@ jobs:
         with:
           path: 'artifacts'
 
-      - name: Parse Version
-        shell: bash
-        run: |
-          # Strip "v" prefix from tag name 
-          VERSION=$(echo ${{ github.ref_name }} | sed -e 's/^v//') 
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-
       - name: Upload Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: 'artifacts/**/*.zip'
+          artifacts: 'artifacts/**/*.zip,artifacts/**/ProxiFyre-*.msi,artifacts/**/ProxiFyre-*-setup.exe,artifacts/**/*.sha256'
           name: 'ProxiFyre-${{ github.ref_name }}'
           tag: ${{ github.ref_name }}
-          token: ${{ secrets.MY_GITHUB_PAT }}
-          draft: true
-          skipIfReleaseExists: true
+          token: ${{ github.token }}
+          artifactErrorsFailBuild: true
+          immutableCreate: true

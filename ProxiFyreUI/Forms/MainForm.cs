@@ -642,7 +642,7 @@ namespace ProxiFyreUI.Forms
             }
             if (_engineLocation == null || !_engineLocation.IsResolved)
             {
-                MessageBox.Show(this, "Resolve a trusted ProxiFyre.exe before installing the service.",
+                MessageBox.Show(this, "Resolve a valid ProxiFyre.exe before installing the service.",
                     "Engine not resolved", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return false;
             }
@@ -681,9 +681,15 @@ namespace ProxiFyreUI.Forms
                     return;
                 }
                 EngineLocation registeredEngine;
+                EngineLocation protectedRegisteredEngine;
                 try
                 {
                     registeredEngine = _engineLocator.Resolve(_settings);
+                    protectedRegisteredEngine = registeredEngine.Source ==
+                                                ProxiFyreUI.Infrastructure.EngineLocationSource.ServiceRegistration &&
+                                                registeredEngine.IsResolved
+                        ? _engineLocator.ValidateProtectedUninstallSelection(registeredEngine.Path)
+                        : registeredEngine;
                 }
                 catch (Exception ex)
                 {
@@ -693,7 +699,8 @@ namespace ProxiFyreUI.Forms
                 }
                 var useRegisteredEngine = registeredEngine.Source ==
                                           ProxiFyreUI.Infrastructure.EngineLocationSource.ServiceRegistration &&
-                                          registeredEngine.IsResolved;
+                                          registeredEngine.IsResolved &&
+                                          protectedRegisteredEngine.IsResolved;
                 var uninstallEngine = registeredEngine;
                 Func<bool> registrationSnapshotGuard;
                 string expectedRegisteredEnginePath = null;
@@ -711,23 +718,24 @@ namespace ProxiFyreUI.Forms
                 }
                 else
                 {
-                    uninstallEngine = _engineLocator.ResolveTrustedUninstallFallback(_settings,
+                    uninstallEngine = _engineLocator.ResolveProtectedUninstallFallback(_settings,
                         _engineLocation?.Path);
                     if (!uninstallEngine.IsResolved)
-                        uninstallEngine = BrowseForTrustedUninstallEngine();
+                        uninstallEngine = BrowseForProtectedUninstallEngine();
                     if (uninstallEngine == null || !uninstallEngine.IsResolved)
                         return;
 
-                    var registrationProblem = !string.IsNullOrWhiteSpace(registeredEngine.Error)
-                        ? registeredEngine.Error
+                    var registrationProblem = !string.IsNullOrWhiteSpace(protectedRegisteredEngine.Error)
+                        ? protectedRegisteredEngine.Error
                         : "The installed service does not contain a usable registered executable path.";
                     var fallbackMessage = registrationProblem + "\r\n\r\n" +
-                        "To remove the broken service registration, ProxiFyreUI can use this separately trusted executable:\r\n\r\n" +
+                        "To remove the service registration, ProxiFyreUI can use this " +
+                        "validated executable from a protected per-machine location:\r\n\r\n" +
                         uninstallEngine.Path + "\r\n\r\n" +
                         "It will be launched only with the single fixed argument: uninstall\r\n" +
                         "No command-line arguments from the service registration will be used. " +
                         "The configuration, backup, and log files will not be deleted.\r\n\r\nContinue?";
-                    if (MessageBox.Show(this, fallbackMessage, "Use trusted fallback to uninstall service",
+                    if (MessageBox.Show(this, fallbackMessage, "Use protected fallback to uninstall service",
                         MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
                         MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                         return;
@@ -740,7 +748,7 @@ namespace ProxiFyreUI.Forms
                             "Service state changed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return;
                     }
-                    if (!IsBrokenServiceRegistrationSnapshotCurrent(registrationSnapshot))
+                    if (!IsFallbackServiceRegistrationSnapshotCurrent(registrationSnapshot))
                     {
                         ShowServiceEngineChanged("The service registration or registered executable changed while " +
                                                  "uninstall was being confirmed. No command was run; review the " +
@@ -748,7 +756,7 @@ namespace ProxiFyreUI.Forms
                         return;
                     }
                     registrationSnapshotGuard = () =>
-                        IsBrokenServiceRegistrationSnapshotCurrent(registrationSnapshot);
+                        IsFallbackServiceRegistrationSnapshotCurrent(registrationSnapshot);
                 }
 
                 await RunServiceOperationAsync(() => _serviceController.UninstallAsync(
@@ -1547,11 +1555,11 @@ namespace ProxiFyreUI.Forms
             return null;
         }
 
-        private EngineLocation BrowseForTrustedUninstallEngine()
+        private EngineLocation BrowseForProtectedUninstallEngine()
         {
             using (var dialog = new OpenFileDialog
             {
-                Title = "Select trusted ProxiFyre engine for service uninstall",
+                Title = "Select ProxiFyre engine from a protected location for service uninstall",
                 Filter = "ProxiFyre engine (" + ProxiFyrePaths.EngineExecutableName + ")|" +
                          ProxiFyrePaths.EngineExecutableName,
                 CheckFileExists = true,
@@ -1561,12 +1569,12 @@ namespace ProxiFyreUI.Forms
                 if (dialog.ShowDialog(this) != DialogResult.OK)
                     return null;
 
-                var location = _engineLocator.ValidateUserSelection(dialog.FileName);
+                var location = _engineLocator.ValidateProtectedUninstallSelection(dialog.FileName);
                 if (location.IsResolved)
                     return location;
 
                 MessageBox.Show(this, location.Error,
-                    "Untrusted uninstall executable", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    "Unusable uninstall executable", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return null;
             }
         }
@@ -1580,22 +1588,24 @@ namespace ProxiFyreUI.Forms
             }
             catch
             {
-                // A fallback executable is allowed only while the broken registration can be
+                // A fallback executable is allowed only while the unusable registration can be
                 // shown to be the same one the user confirmed.
                 return false;
             }
         }
 
-        private bool IsBrokenServiceRegistrationSnapshotCurrent(string expectedImagePath)
+        private bool IsFallbackServiceRegistrationSnapshotCurrent(string expectedImagePath)
         {
             if (!IsServiceRegistrationSnapshotCurrent(expectedImagePath))
                 return false;
             try
             {
                 var current = _engineLocator.Resolve(_settings);
-                return current.Source !=
-                           ProxiFyreUI.Infrastructure.EngineLocationSource.ServiceRegistration ||
-                       !current.IsResolved;
+                if (current.Source !=
+                        ProxiFyreUI.Infrastructure.EngineLocationSource.ServiceRegistration ||
+                    !current.IsResolved)
+                    return true;
+                return !_engineLocator.ValidateProtectedUninstallSelection(current.Path).IsResolved;
             }
             catch
             {

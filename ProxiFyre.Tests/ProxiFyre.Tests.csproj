@@ -70,6 +70,8 @@
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="ApplicationServicesTests.cs" />
@@ -85,9 +87,12 @@
     <Compile Include="PathUtilitiesTests.cs" />
     <Compile Include="ServiceManagementTests.cs" />
     <Compile Include="ServiceInstallLocationPolicyTests.cs" />
+    <Compile Include="SingleInstanceCoordinatorTests.cs" />
     <Compile Include="TestModels.cs" />
     <Compile Include="UserVisibleErrorFormatterTests.cs" />
     <Compile Include="UiSettingsStoreTests.cs" />
+    <Compile Include="WindowsPacketFilterProbeTests.cs" />
+    <Compile Include="WinFormsFontBootstrapTests.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>

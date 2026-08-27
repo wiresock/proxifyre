@@ -1,6 +1,6 @@
 # ProxiFyre GUI
 
-`ProxiFyreUI.exe` is the native Windows Forms management application for ProxiFyre. It edits the engine configuration, controls `ProxiFyreService`, and follows the engine log files. It is deliberately not a packet-processing host: `ProxiFyre.exe` and the existing `socksify.dll` C++/CLI component remain the networking engine.
+`ProxiFyreUI.exe` is the native host for ProxiFyre's managed Windows Forms application. Together they edit the engine configuration, control `ProxiFyreService`, and follow the engine log files. The UI is deliberately not a packet-processing host: `ProxiFyre.exe` and the existing `socksify.dll` C++/CLI component remain the networking engine.
 
 ## Architecture and trust boundaries
 
@@ -11,7 +11,7 @@ ProxiFyre.exe --------------> ProxiFyre.Configuration.dll
       |
       +---------------------> socksify.dll
 
-ProxiFyreUI.exe (native verifier/CLR host)
+ProxiFyreUI.exe (native integrity/CLR host)
       |
       +---------------------> ProxiFyreUI.Managed.dll
                                       |
@@ -19,11 +19,13 @@ ProxiFyreUI.exe (native verifier/CLR host)
                                       +--> Newtonsoft.Json.dll
 ```
 
-`ProxiFyre.Configuration` contains the JSON models, forward-compatible serialization, normalization, structured validation, fingerprints, and atomic file operations. It has no native dependency. The native `ProxiFyreUI.exe` host validates and leases the signed managed UI, its dependencies, and its exact CLR configuration before starting .NET Framework; this prevents a mutable CLR configuration from running code before the managed integrity check. `ProxiFyreUI.Managed.dll` never references or loads `socksify.dll`; it controls the installed service through the Windows Service Control Manager and invokes only the resolved `ProxiFyre.exe` with a fixed `install` or `uninstall` argument.
+`ProxiFyre.Configuration` contains the JSON models, forward-compatible serialization, normalization, structured validation, fingerprints, and atomic file operations. It has no native dependency. The native `ProxiFyreUI.exe` host validates and leases the complete unsigned managed UI chain and verifies its exact CLR-configuration hash before starting .NET Framework; this prevents a mutable CLR configuration from running code before the managed integrity check. `ProxiFyreUI.Managed.dll` never references or loads `socksify.dll`; it controls the installed service through the Windows Service Control Manager and invokes only the resolved `ProxiFyre.exe` with a fixed `install` or `uninstall` argument.
 
-The GUI requests administrator privileges at startup. This is required to manage a Windows service and to update a configuration beside an engine installed in a protected directory. Before loading the CLR, the statically linked native host removes CLR-control environment overrides, rejects unexpected app-local executable modules, verifies the UI and its managed dependencies against Windows Authenticode trust and the pinned ProxiFyre release key, verifies the exact CLR-configuration hash, and holds those files and every normal directory component open without write/delete sharing. Production service operations apply the same signed-payload checks to the engine and hold its verified files and path through process or SCM startup. Release service installation/start also requires a direct fixed-volume path, a protected directory/ancestor ACL chain, trusted owners, no reparse points, no loader-redirection marker, and no unexpected executable module. The GUI deliberately refuses to rewrite a user-controlled directory in place because an attacker could retain a pre-existing write or permission-control handle after the ACL change. Debug builds retain an explicit unsigned/developer-directory policy. SOCKS5 credentials remain in the existing plaintext JSON schema because the engine must be able to read them. The GUI masks passwords and omits them from logs, tooltips, and diagnostics.
+After payload validation and before constructing the first control, the managed UI verifies that .NET Framework WinForms can resolve its normal default font. If the legacy GDI+ generic-font path fails, it recovers with an installed named Windows UI font before controls such as `DataGridView` can query the unusable fallback. Healthy systems retain the framework-selected default.
 
-The primary service controls include explicit install and uninstall actions. Uninstall requires confirmation, stops a running service first, and then removes only the Windows service registration; `app-config.json`, its backup, and engine logs are preserved. If another service-management handle delays removal, the GUI reports the Windows deletion-pending state instead of treating the successful uninstall request as a failure. The same uninstall action remains available under **Settings / Diagnostics**.
+The GUI requests administrator privileges at startup. This is required to manage a Windows service and to update a configuration beside an engine installed in a protected directory. ProxiFyre's first-party modules and installers are deliberately unsigned and can display **Unknown publisher**. Before loading the CLR, the statically linked native host removes CLR-control environment overrides, restricts native DLL loading to the Windows system directory, rejects unexpected app-local executable modules, verifies the exact CLR-configuration hash, and holds the required managed files plus every normal directory component open without write/delete sharing. In Release builds, the native host also requires its own file, every managed payload file, and the complete directory chain to be on a directly mounted fixed volume, owned by `SYSTEM`, `Administrators`, or `TrustedInstaller`, with ACLs that do not grant standard users mutation rights. Production service operations require the engine filename and version-resource identity, verify fixed engine/logging configuration hashes, and hold the complete app-local payload and path through process or SCM startup. Release service install, start, restart, and uninstall apply the same fixed-volume, owner, ACL, reparse-point, loader-redirection, and executable-module restrictions. The WiX MSI creates that protected per-machine directory; the GUI deliberately refuses to rewrite a user-controlled directory in place because an attacker could retain a pre-existing write or permission-control handle after the ACL change. Debug builds retain an explicit developer-directory policy. Third-party dependencies may retain signatures from their upstream publishers, but ProxiFyre does not require or replace them. SOCKS5 credentials remain in the existing plaintext JSON schema because the engine must be able to read them. The GUI masks passwords and omits them from logs, tooltips, and diagnostics.
+
+The primary service controls include explicit install and uninstall actions. The MSI normally installs `ProxiFyreService` with demand/manual start; the GUI can restore a missing registration from the protected installed payload. **Uninstall service…** requires confirmation, stops a running service first, and removes only the Windows service registration; it does not uninstall the MSI, shortcuts, firewall rules, or Windows Packet Filter. `app-config.json`, its backup, and engine logs are preserved. If another service-management handle delays removal, the GUI reports the Windows deletion-pending state instead of treating the successful uninstall request as a failure. The same service-only action remains available under **Settings / Diagnostics**. Use Windows Apps/Installed apps for a complete product uninstall.
 
 ## Engine and configuration discovery
 
@@ -60,7 +62,7 @@ SOCKS5-over-TLS protects the TCP control connection (including the UDP `ASSOCIAT
 
 **Save** validates the complete model and refuses to write when errors exist. It writes a temporary file in the configuration directory, flushes it, preserves the prior live file as `app-config.json.bak`, and replaces the live file atomically. If the service is running, the UI reports that a restart is still required.
 
-**Apply & Restart** performs the same validated atomic save, then stops and starts the installed service while waiting for the actual SCM states. It reports success only when the SCM reports `Running`. The **Engine log level** setting is part of `app-config.json`, so changing the service's logging verbosity requires **Apply & Restart** (or a later manual service restart). Before changing service state, the GUI opens `\\.\NDISRD` with the same non-invasive capability probe used by the native engine. If Windows Packet Filter is unavailable, the saved configuration remains pending and the GUI reports the dependency immediately without stopping the service or offering a configuration rollback. Other startup failures may still offer to restore the backup and perform at most one controlled restart using the restored configuration.
+**Apply & Restart** performs the same validated atomic save, then stops and starts the installed service while waiting for the actual SCM states. It reports success only when the SCM reports `Running`. The **Engine log level** setting is part of `app-config.json`, so changing the service's logging verbosity requires **Apply & Restart** (or a later manual service restart). Before changing service state, the GUI opens `\\.\NDISRD` with no requested read/write access and queries `IOCTL_NDISRD_GET_VERSION`. It accepts API major `3` with API minor `0x0601` or newer; an installed-but-stopped service can be started by SCM through the declared dependency. If Windows Packet Filter is missing or an active driver is incompatible, the saved configuration remains pending and the GUI reports the dependency immediately without stopping the service or offering a configuration rollback. Other startup failures may still offer to restore the backup and perform at most one controlled restart using the restored configuration.
 
 The workspace fingerprints the file when it is loaded. If another process changes it before a save, the GUI offers to reload, explicitly overwrite, or cancel. It never silently overwrites an externally modified configuration.
 
@@ -72,7 +74,7 @@ Closing the window hides it in the notification area. The tray menu reflects the
 
 ## Build and test
 
-Prerequisites are Visual Studio 2022 with the .NET Framework 4.7.2 and C++ desktop workloads, NuGet, vcpkg, and the repository's `ms-gsl` and `boost-pool` triplets.
+Prerequisites are Visual Studio 2022 with the .NET Framework and C++ desktop workloads, NuGet, vcpkg, the repository's `ms-gsl` and `boost-pool` triplets, PowerShell 7, and a .NET SDK for the pinned WiX Toolset 6.0.2 packages.
 
 From a Visual Studio developer shell:
 
@@ -80,35 +82,56 @@ From a Visual Studio developer shell:
 nuget restore socksify.sln
 msbuild socksify.sln -t:Rebuild -v:minimal -p:Configuration=Release -p:Platform=x64 -p:Version=2.4.0
 vstest.console.exe bin\tests\x64\Release\ProxiFyre.Tests.dll /TestAdapterPath:packages\NUnit3TestAdapter.4.6.0\build\net462 /Platform:x64
+pwsh -File scripts\Build-Installer.ps1 -Platform x64 -Version 2.4.0
 ```
 
-Replace `x64` with `x86` for tests on a matching host. The ARM64 payload can be cross-built when the Visual Studio toolchain is installed, but its tests must run on Windows ARM64 rather than an x64 CI host. Architecture-specific release files, including `ProxiFyre.exe`, the native `ProxiFyreUI.exe` host, `ProxiFyreUI.Managed.dll`, `socksify.dll`, `ProxiFyre.Configuration.dll`, managed dependencies, and the sample configuration, are placed in:
+Replace `x64` with `x86` for tests on a matching host. The ARM64 payload can be cross-built when the Visual Studio toolchain is installed, but its tests must run on Windows ARM64 rather than an x64 CI host. Architecture-specific runtime files, including `ProxiFyre.exe`, the native `ProxiFyreUI.exe` host, `ProxiFyreUI.Managed.dll`, `socksify.dll`, `ProxiFyre.Configuration.dll`, managed dependencies, and the sample configuration, are placed in:
 
 ```text
 bin\exe\<architecture>\Release\
 ```
 
+That Release directory is packaging output, not a developer launch directory. Because the
+first-party payload is unsigned, the elevated Release GUI refuses to load managed code from a
+user-writable extraction such as Downloads, `%TEMP%`, or the repository build tree. Use the setup
+package (recommended). For a Release ZIP test, an administrator must stage the complete archive
+on a fixed local volume in a protected per-machine directory: every directory component and
+payload file must be owned by `SYSTEM`, `Administrators`, or `TrustedInstaller`, and their ACLs
+must not let standard users replace files or change permissions. Create and protect a fresh
+destination before extracting into it; do not extract into a user-writable directory and tighten
+its ACL afterward, because existing mutation handles cannot be revoked. Use a Debug build for
+normal developer-tree testing.
+
 Tests write to `bin\tests\<architecture>\<configuration>\` and do not require the packet-filter driver, an installed service, administrator access, or a live SOCKS5 endpoint.
+
+The installer build writes the unsigned MSI, unsigned Burn setup executable, and SHA-256 sidecars to `bin\installer\<architecture>\Release\`. See [installer.md](installer.md) for the exact payload, pinned official Visual C++ and Windows Packet Filter acquisition flows, standalone-MSI requirements, firewall rules, upgrade/uninstall semantics, build options, and lifecycle validation matrix.
 
 ## Troubleshooting
 
-- **Service not installed:** verify the resolved engine path, then select **Install Service**. Installation uses that exact executable and refreshes SCM state afterward.
+- **Service not installed:** for an MSI installation, run product repair to reconcile the service and all other components. The GUI's **Install Service** action can restore only the service registration from the resolved protected engine payload.
 - **Access denied:** restart the GUI and approve the administrator prompt. Check directory ACLs if the engine is installed outside the normal application directory.
-- **Service location is not protected:** if the old service is installed outside a protected parent, stop and uninstall it first, then exit the GUI. Use a trusted installer to place the complete signed release in a dedicated folder under `C:\Program Files` with a `SYSTEM`, `Administrators`, or `TrustedInstaller` owner and no standard-user or `CREATOR OWNER` write/control grant. Launch the GUI from that copy and install the service again. The installed registration takes precedence over Browse, so merely browsing to a new copy does not migrate an existing service.
+- **Service location is not protected:** if a pre-MSI service is installed outside a protected parent, stop and remove its registration, back up `app-config.json`, and exit the GUI. Install the matching architecture through the ProxiFyre WiX setup so Windows Installer creates the protected Program Files directory, then restore the configuration through an elevated process or the GUI. The installed registration takes precedence over Browse, so merely browsing to a new copy does not migrate an existing service.
+- **Unknown publisher:** this is expected for ProxiFyre's deliberately unsigned first-party installer and binaries. Verify the release SHA-256 through a trusted source before elevation. Do not confuse a checksum obtained from the same untrusted download with publisher authentication.
+- **Windows 7 UI startup failure:** use the current setup build and verify Windows 7 SP1 has current servicing-stack, SHA-2, .NET Framework 4.7.2, and font updates. The UI avoids the legacy GDI+ generic-font startup path, but a broadly damaged system font installation can still require Windows repair.
 - **Configuration invalid:** open the validation details. The GUI will not save or start a new invalid rule set.
 - **Saved, restart required:** choose **Apply & Restart** or restart the service after completing related edits.
-- **Windows Packet Filter unavailable:** install WinpkFilter from `https://github.com/wiresock/ndisapi/releases`, restart Windows if requested, and retry. The GUI checks the `NDISRD` device before install/start/restart and does not treat a missing driver as a configuration failure.
+- **Windows Packet Filter unavailable or incompatible:** rerun the architecture-matched setup while online so Burn can acquire the pinned official 3.6.2.1 package, or install the matching package manually from the [official releases](https://github.com/wiresock/ndisapi/releases) and retry. Restart Windows if requested. The GUI checks the active `NDISRD` API before install/start/restart and does not treat a driver failure as a configuration failure.
+- **Firewall rules missing or duplicated:** repair the MSI and verify the exact `ProxiFyre (TCP-In)` and `ProxiFyre (UDP-In)` program rules. Do not disable Windows Firewall or add global port rules.
 - **Engine startup failed:** the service may have rejected configuration or encountered another native initialization error. A service that returns to `Stopped` during startup is reported immediately; review recent lines on the Logs tab.
 - **No log file yet:** start the service or use **Reload** after the engine creates its `logs` directory. The follower continues checking for creation and rotation; **Open log file** becomes useful as soon as a `.log` or `.txt` file exists.
 - **External change detected:** reload to accept the on-disk file, overwrite only if the other edit is known to be obsolete, or cancel and compare both versions first.
 - **Recursive timeouts with another VPN:** add the other VPN's carrier/tunnel process to Exclusions.
 
-## Manual release validation
+## GUI manual release validation
+
+This checklist covers the GUI. The [installer lifecycle matrix](installer.md#installer-lifecycle-validation-matrix) separately covers clean prerequisite acquisition, offline/failure paths, MSI repair, firewall idempotence, upgrade, configuration preservation, and uninstall.
 
 On a Windows test machine with the appropriate driver and administrator access:
 
 1. Build and test Release x64, then build x86 and ARM64 when the toolchain is installed.
-2. Launch `ProxiFyreUI.exe`, resolve a separately located engine, and load the sample configuration.
+2. Install the Release payload with setup, or stage the complete Release ZIP in the protected
+   fixed-volume location described above. Launch `ProxiFyreUI.exe`, resolve a separately located
+   protected engine, and load the sample configuration.
 3. Add, edit, duplicate, delete, and reorder rules. Confirm a catch-all saves as `"appNames": [""]`.
 4. Confirm TLS fields and deliberately added unknown JSON fields survive load/save.
 5. Modify the live JSON externally and verify that save presents conflict choices.
@@ -118,3 +141,4 @@ On a Windows test machine with the appropriate driver and administrator access:
 9. Copy diagnostics and verify that no password or full credential-bearing configuration appears.
 10. Hide the GUI to the notification area, launch `ProxiFyreUI.exe` again, and confirm the existing window is restored without creating a second tray icon.
 11. Exit the GUI and confirm the service continues running.
+12. On Windows 7 SP1 x64, launch the installed UI and confirm the main window is constructed without a managed startup failure before repeating the basic service-state checks.

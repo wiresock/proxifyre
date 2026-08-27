@@ -75,12 +75,12 @@ namespace ProxiFyre.Tests
         [Test]
         public void InvalidInstalledServiceIsReportedWithoutFallingBackToAnotherEngine()
         {
-            var untrustedService = CreatePlaceholder("service", ProxiFyrePaths.EngineExecutableName);
+            var invalidService = CreatePlaceholder("service", ProxiFyrePaths.EngineExecutableName);
             var uiExecutable = CreatePlaceholder("portable", "ProxiFyreUI.exe");
             CreatePlaceholder("portable", ProxiFyrePaths.EngineExecutableName);
             var locator = new EngineLocator(
-                () => "\"" + untrustedService + "\" run",
-                path => !string.Equals(path, untrustedService, StringComparison.OrdinalIgnoreCase) &&
+                () => "\"" + invalidService + "\" run",
+                path => !string.Equals(path, invalidService, StringComparison.OrdinalIgnoreCase) &&
                         File.Exists(path),
                 uiExecutable);
 
@@ -153,22 +153,22 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
-        public void RegisteredServiceMatchRequiresTheSameTrustedExecutable()
+        public void RegisteredServiceMatchRequiresTheSameValidatedExecutable()
         {
             var registeredEngine = CreatePlaceholder("service", ProxiFyrePaths.EngineExecutableName);
             var otherEngine = CreatePlaceholder("other", ProxiFyrePaths.EngineExecutableName);
             var uiExecutable = CreatePlaceholder("ui", "ProxiFyreUI.exe");
-            var trusted = new EngineLocator(() => "\"" + registeredEngine + "\" run",
+            var accepted = new EngineLocator(() => "\"" + registeredEngine + "\" run",
                 path => string.Equals(path, registeredEngine, StringComparison.OrdinalIgnoreCase),
                 uiExecutable);
-            var untrusted = new EngineLocator(() => "\"" + registeredEngine + "\" run",
+            var rejected = new EngineLocator(() => "\"" + registeredEngine + "\" run",
                 path => false, uiExecutable);
 
             Assert.Multiple(() =>
             {
-                Assert.That(trusted.IsRegisteredServiceExecutable(registeredEngine), Is.True);
-                Assert.That(trusted.IsRegisteredServiceExecutable(otherEngine), Is.False);
-                Assert.That(untrusted.IsRegisteredServiceExecutable(registeredEngine), Is.False);
+                Assert.That(accepted.IsRegisteredServiceExecutable(registeredEngine), Is.True);
+                Assert.That(accepted.IsRegisteredServiceExecutable(otherEngine), Is.False);
+                Assert.That(rejected.IsRegisteredServiceExecutable(registeredEngine), Is.False);
             });
         }
 
@@ -187,20 +187,20 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
-        public void UnsignedProductionBinaryDoesNotSatisfyAuthenticodeTrust()
+        public void UnsignedManagedDependenciesAreAcceptedWhenPresent()
         {
-            Assert.That(AuthenticodeExecutableValidator.IsSignedByExpectedPublisher(
-                typeof(EngineLocator).Assembly.Location), Is.False);
-        }
+            var engineDependency = CreatePlaceholder("engine", "NLog.dll");
+            var uiDependency = CreatePlaceholder("ui", "ProxiFyre.Configuration.dll");
 
-        [TestCase(6, 1, true)]
-        [TestCase(6, 2, false)]
-        [TestCase(10, 0, false)]
-        public void WindowsSevenUsesTheLegacyWinTrustStructure(int major, int minor,
-            bool expected)
-        {
-            Assert.That(AuthenticodeExecutableValidator.RequiresLegacyWinTrust(
-                new Version(major, minor)), Is.EqualTo(expected));
+            Assert.Multiple(() =>
+            {
+                Assert.That(EngineExecutableValidator.IsTrustedPayloadFile(engineDependency),
+                    Is.True, "unsigned engine dependencies are supported");
+                Assert.That(UiStartupPayload.IsTrustedUiPayloadFile(uiDependency), Is.True,
+                    "unsigned UI dependencies are supported");
+                Assert.That(EngineExecutableValidator.IsTrustedPayloadFile(
+                    Path.Combine(_directory, "missing", "NLog.dll")), Is.False);
+            });
         }
 
         [Test]
@@ -270,7 +270,7 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
-        public void UninstallFallbackPrefersCurrentTrustedEngine()
+        public void UninstallFallbackPrefersCurrentValidatedEngine()
         {
             var current = CreatePlaceholder("current", ProxiFyrePaths.EngineExecutableName);
             var uiExecutable = CreatePlaceholder("portable", "ProxiFyreUI.exe");
@@ -278,7 +278,7 @@ namespace ProxiFyre.Tests
             var saved = CreatePlaceholder("saved", ProxiFyrePaths.EngineExecutableName);
             var locator = CreateLocator(() => @"C:\missing\ProxiFyre.exe", uiExecutable);
 
-            var result = locator.ResolveTrustedUninstallFallback(
+            var result = locator.ResolveProtectedUninstallFallback(
                 new UiSettings { SelectedEnginePath = saved }, current);
 
             Assert.Multiple(() =>
@@ -297,7 +297,7 @@ namespace ProxiFyre.Tests
             var saved = CreatePlaceholder("saved", ProxiFyrePaths.EngineExecutableName);
             var locator = CreateLocator(() => @"C:\missing\ProxiFyre.exe", uiExecutable);
 
-            var result = locator.ResolveTrustedUninstallFallback(
+            var result = locator.ResolveProtectedUninstallFallback(
                 new UiSettings { SelectedEnginePath = saved }, @"C:\also-missing\ProxiFyre.exe");
 
             Assert.Multiple(() =>
@@ -315,7 +315,7 @@ namespace ProxiFyre.Tests
             var saved = CreatePlaceholder("saved", ProxiFyrePaths.EngineExecutableName);
             var locator = CreateLocator(() => @"C:\missing\ProxiFyre.exe", uiExecutable);
 
-            var result = locator.ResolveTrustedUninstallFallback(
+            var result = locator.ResolveProtectedUninstallFallback(
                 new UiSettings { SelectedEnginePath = saved }, null);
 
             Assert.That(result.Path, Is.EqualTo(saved));
@@ -330,7 +330,7 @@ namespace ProxiFyre.Tests
             var locator = CreateLocator(() => @"C:\missing\ProxiFyre.exe", uiExecutable);
 
             var normal = locator.Resolve(new UiSettings());
-            var uninstallFallback = locator.ResolveTrustedUninstallFallback(new UiSettings(), null);
+            var uninstallFallback = locator.ResolveProtectedUninstallFallback(new UiSettings(), null);
 
             Assert.Multiple(() =>
             {
@@ -347,13 +347,54 @@ namespace ProxiFyre.Tests
             var uiExecutable = CreatePlaceholder("ui-only", "ProxiFyreUI.exe");
             var locator = CreateLocator(() => @"C:\missing\ProxiFyre.exe", uiExecutable);
 
-            var result = locator.ResolveTrustedUninstallFallback(new UiSettings(), null);
+            var result = locator.ResolveProtectedUninstallFallback(new UiSettings(), null);
 
             Assert.Multiple(() =>
             {
                 Assert.That(result.IsResolved, Is.False);
                 Assert.That(result.Source, Is.EqualTo(UiEngineLocationSource.None));
-                Assert.That(result.Error, Does.Contain("trusted ProxiFyre.exe"));
+                Assert.That(result.Error, Does.Contain("valid ProxiFyre.exe"));
+            });
+        }
+
+        [Test]
+        public void UninstallFallbackRejectsEngineOutsideProtectedLocation()
+        {
+            var current = CreatePlaceholder("current", ProxiFyrePaths.EngineExecutableName);
+            var uiExecutable = CreatePlaceholder("ui-only", "ProxiFyreUI.exe");
+            var locator = new EngineLocator(
+                () => @"C:\missing\ProxiFyre.exe",
+                path => File.Exists(path) && ProxiFyrePaths.IsEngineExecutable(path),
+                uiExecutable,
+                path => "The directory grants standard users write access.");
+
+            var result = locator.ResolveProtectedUninstallFallback(new UiSettings(), current);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result.IsResolved, Is.False);
+                Assert.That(result.Error, Does.Contain("protected per-machine location"));
+            });
+        }
+
+        [Test]
+        public void ProtectedUninstallSelectionReportsLocationPolicyReason()
+        {
+            var engine = CreatePlaceholder("selected", ProxiFyrePaths.EngineExecutableName);
+            var uiExecutable = CreatePlaceholder("ui-only", "ProxiFyreUI.exe");
+            var locator = new EngineLocator(
+                () => null,
+                path => File.Exists(path) && ProxiFyrePaths.IsEngineExecutable(path),
+                uiExecutable,
+                path => "The file owner is not a trusted machine identity.");
+
+            var result = locator.ValidateProtectedUninstallSelection(engine);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result.IsResolved, Is.False);
+                Assert.That(result.Error, Does.Contain("privileged service uninstall"));
+                Assert.That(result.Error, Does.Contain("file owner"));
             });
         }
 

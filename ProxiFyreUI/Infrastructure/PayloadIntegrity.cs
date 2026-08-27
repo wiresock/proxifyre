@@ -10,7 +10,7 @@ using Microsoft.Win32.SafeHandles;
 namespace ProxiFyreUI.Infrastructure
 {
     /// <summary>
-    /// Holds every verified app-local code/configuration file open without write/delete sharing
+    /// Holds every validated app-local code/configuration file open without write/delete sharing
     /// so it cannot be replaced between validation and process/type loading.
     /// </summary>
     internal sealed class LifecycleExecutableLease : IDisposable
@@ -64,7 +64,7 @@ namespace ProxiFyreUI.Infrastructure
             }
 
             if (verifiedPaths.Count == 0)
-                throw new FileNotFoundException("No trusted payload files were supplied.");
+                throw new FileNotFoundException("No required payload files were supplied.");
 
             var streams = new List<FileStream>();
             var directoryHandles = new List<SafeFileHandle>();
@@ -207,7 +207,7 @@ namespace ProxiFyreUI.Infrastructure
         private static FileStream OpenRegularFile(string path)
         {
             // Open the directory entry itself first. Following a symlink here would lease its
-            // old target while a later path-based WinTrust/Process/CLR operation could follow a
+            // old target while a later path-based Process/CLR operation could follow a
             // replacement link to different bytes.
             var handle = CreateFile(path, GenericRead, FileShareRead, IntPtr.Zero, OpenExisting,
                 FileFlagOpenReparsePoint | FileFlagSequentialScan, IntPtr.Zero);
@@ -323,9 +323,10 @@ namespace ProxiFyreUI.Infrastructure
     }
 
     /// <summary>
-    /// Release builds verify and lease the UI's complete app-local managed dependency chain
-    /// before any form type is created. This prevents a signed, elevated UI from side-loading
-    /// a replacement directly or through ProxiFyre.Configuration.
+    /// Release builds validate and lease the UI's complete app-local managed dependency chain
+    /// before any form type is created. The distribution is deliberately unsigned, so release
+    /// integrity relies on the installed directory's access controls, the native host's module
+    /// allow-list, fixed configuration hashes, and no-write/no-delete payload leases.
     /// </summary>
     internal static class UiStartupPayload
     {
@@ -335,7 +336,7 @@ namespace ProxiFyreUI.Infrastructure
         public static IDisposable Acquire(string userInterfacePath)
         {
 #if DEBUG
-            // Debug output is intentionally unsigned and remains replaceable for local builds.
+            // Debug output remains replaceable so an ordinary local rebuild can run in place.
             return null;
 #else
             if (string.IsNullOrWhiteSpace(userInterfacePath))
@@ -369,13 +370,15 @@ namespace ProxiFyreUI.Infrastructure
 
         internal static bool IsTrustedUiPayloadFile(string path)
         {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                return false;
             var fileName = Path.GetFileName(path);
             if (string.Equals(fileName, "ProxiFyreUI.Managed.dll", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(fileName, "ProxiFyre.Configuration.dll",
                     StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(fileName, "Newtonsoft.Json.dll",
                     StringComparison.OrdinalIgnoreCase))
-                return AuthenticodeExecutableValidator.IsSignedByExpectedPublisher(path);
+                return true;
             if (string.Equals(fileName, "ProxiFyreUI.exe.config",
                     StringComparison.OrdinalIgnoreCase))
                 return PayloadHashValidator.HasExpectedSha256(path, UiConfigurationSha256);

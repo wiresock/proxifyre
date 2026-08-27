@@ -35,6 +35,7 @@
 !ProxiFyre.Configuration/packages.config
 !ProxiFyre.Tests/App.config
 !ProxiFyre.Tests/packages.config
+!NuGet.Installer.Config
 *.p7s
 *.nupkg
 *._

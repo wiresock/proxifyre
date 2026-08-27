@@ -178,20 +178,33 @@ Create this file in the same directory as `ProxiFyre.exe`:
    - Depends on Newtonsoft.Json only; it must never reference `socksify`
 
 5. **ProxiFyreUI** (`./ProxiFyreUI/`):
-   - Native Windows Forms management application targeting .NET Framework 4.7.2
+   - Managed Windows Forms management application targeting .NET Framework 4.7.2
    - Edits `app-config.json`, controls `ProxiFyreService`, tails logs, and provides a tray icon
    - Depends on ProxiFyre.Configuration; it must never reference or load `socksify.dll`
    - The service/console executable remains the only networking engine
 
-6. **ProxiFyre.Tests** (`./ProxiFyre.Tests/`):
+6. **ProxiFyreUILauncher** (`./ProxiFyreUILauncher/`):
+   - Statically linked native integrity host that starts `ProxiFyreUI.Managed.dll`
+   - Enforces the app-local module allowlist, fixed CLR configuration, secure DLL search, and payload leases without Authenticode
+
+7. **ProxiFyre.Tests** (`./ProxiFyre.Tests/`):
    - NUnit tests for shared configuration and non-UI application services
    - Output: `bin\tests\{Platform}\{Configuration}\`
+
+8. **ProxiFyre.Installer** (`./ProxiFyre.Installer/`):
+   - Pinned WiX 6.0.2 per-machine MSI for x86, x64, and ARM64
+   - Owns the protected runtime files, service registration, shortcuts, and exact program-scoped firewall rules
+
+9. **ProxiFyre.Bundle** (`./ProxiFyre.Bundle/`):
+   - Pinned WiX 6.0.2 Burn setup that embeds the ProxiFyre MSI
+   - Detects compatible Visual C++ and Windows Packet Filter prerequisites and otherwise acquires the verified official architecture-specific packages
 
 ### Important Files
 - `socksify.sln`: Main Visual Studio solution file
 - `README.md`: User documentation and setup instructions
+- `docs/installer.md`: Installer architecture, build, prerequisite, lifecycle, and validation documentation
+- `scripts/Build-Installer.ps1`: Supported MSI/setup build and validation entry point
 - `.github/workflows/main.yml`: CI/CD build pipeline
-- `sign/sign-update-release.ps1`: Code signing script for releases
 
 ### Include Directories
 - `./include/`: Common headers (`Common.h`, `ndisapi.h`)
@@ -204,15 +217,15 @@ Create this file in the same directory as `ProxiFyre.exe`:
 ```bash
 # Root directory listing
 ls -la
-# Output: ProxiFyre/, socksify/, ndisapi.lib/, include/, netlib/, sign/, README.md, socksify.sln
+# Output includes ProxiFyre/, ProxiFyreUI/, ProxiFyre.Installer/, ProxiFyre.Bundle/, socksify/, ndisapi.lib/, include/, netlib/, scripts/, docs/, README.md, and socksify.sln
 
 # Key configuration files
 find . -name "*.json" -o -name "*.config" -o -name "packages.config"
 # Output includes the managed project App.config/packages.config files and ProxiFyre/NLog.config
 
 # Project structure
-find . -name "*.csproj" -o -name "*.vcxproj" -o -name "*.sln"
-# Output additionally includes ProxiFyre.Configuration, ProxiFyreUI, and ProxiFyre.Tests projects
+find . -name "*.csproj" -o -name "*.vcxproj" -o -name "*.wixproj" -o -name "*.sln"
+# Output additionally includes the managed UI/tests and WiX MSI/Burn projects
 ```
 
 ### Source Code Analysis
@@ -249,10 +262,11 @@ find . -name "*.cpp" -o -name "*.h"
 - **Build Process**: ~5-8 minutes per platform (x86, x64, ARM64)
 - **vcpkg Dependencies**: ~10-15 minutes for installation
 - **Total Pipeline**: ~20-25 minutes for complete build across all platforms
-- **Artifacts**: Creates unsigned architecture-specific ZIP files; the separate release-signing script signs and replaces release payloads under the existing signing policy
+- **Artifacts**: Creates final unsigned architecture-specific ZIP, MSI, online prerequisite setup bundle, and SHA-256 files directly; releases do not require certificates, signing secrets, or a post-build signing pass
 
 ### Build Matrix
 - Platforms: x86, x64, ARM64
 - Configuration: Release only for CI builds
 - Runtime output: `bin\exe\{Platform}\Release\` contains `ProxiFyre.exe`, `ProxiFyreUI.exe`, `socksify.dll`, `ProxiFyre.Configuration.dll`, and their managed dependencies
 - Test output: `bin\tests\{Platform}\Release\ProxiFyre.Tests.dll`
+- Installer output: `bin\installer\{Platform}\Release\` contains the standalone MSI, online setup bundle, and checksum files

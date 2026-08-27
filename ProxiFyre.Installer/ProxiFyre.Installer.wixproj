@@ -1,0 +1,59 @@
+<Project Sdk="WixToolset.Sdk/6.0.2">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <Platforms>x86;x64;ARM64</Platforms>
+    <DebugType>none</DebugType>
+    <DefaultCompressionLevel>high</DefaultCompressionLevel>
+    <SuppressValidation>false</SuppressValidation>
+    <!--
+      The shell folders resolve to their all-users variants because this is a
+      forced per-machine package.
+    -->
+    <SuppressIces>ICE38;ICE43;ICE57</SuppressIces>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreConfigFile>$(MSBuildThisFileDirectory)..\NuGet.Installer.Config</RestoreConfigFile>
+    <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
+    <Cultures>en-US</Cultures>
+    <OutputName Condition="'$(OutputName)' == ''">ProxiFyre-$(ProductVersion)-win-$(InstallerPlatform)</OutputName>
+    <DefineConstants>$(DefineConstants);ProductVersion=$(ProductVersion);ProductCode=$(ProductCode);ProductArchitecture=$(ProductArchitecture);ComponentGuidGenerationSeed=$(ComponentGuidGenerationSeed);DirectorySecurityComponentGuid=$(DirectorySecurityComponentGuid);UiLauncherComponentGuid=$(UiLauncherComponentGuid);StartMenuComponentGuid=$(StartMenuComponentGuid);DesktopComponentGuid=$(DesktopComponentGuid);LicenseRtfPath=$(LicenseRtfPath)</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(InstallerPlatform)' == '' and '$(Platform)' == 'x86'">
+    <InstallerPlatform>x86</InstallerPlatform>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(InstallerPlatform)' == '' and '$(Platform)' == 'x64'">
+    <InstallerPlatform>x64</InstallerPlatform>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(InstallerPlatform)' == '' and '$(Platform)' == 'ARM64'">
+    <InstallerPlatform>arm64</InstallerPlatform>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(PayloadDirectory)' != ''">
+    <BindPath Include="$(PayloadDirectory)">
+      <BindName>Payload</BindName>
+    </BindPath>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Firewall.wixext" Version="6.0.2" />
+    <PackageReference Include="WixToolset.UI.wixext" Version="6.0.2" />
+  </ItemGroup>
+
+  <Target Name="ValidateInstallerInputs" BeforeTargets="Build">
+    <Error Condition="'$(PayloadDirectory)' == '' or !Exists('$(PayloadDirectory)')"
+           Text="PayloadDirectory must identify a validated, architecture-specific ProxiFyre payload." />
+    <Error Condition="'$(PackagingInputsValidated)' != 'true'"
+           Text="Use scripts/Build-Installer.ps1 so payload and prerequisite integrity checks run before WiX." />
+    <Error Condition="'$(ProductVersion)' == '' or '$(ProductCode)' == ''"
+           Text="ProductVersion and ProductCode must be supplied by scripts/Build-Installer.ps1." />
+    <Error Condition="'$(ProductArchitecture)' != 'x86' and '$(ProductArchitecture)' != 'x64' and '$(ProductArchitecture)' != 'arm64'"
+           Text="ProductArchitecture must be x86, x64, or arm64." />
+    <Error Condition="'$(ComponentGuidGenerationSeed)' == '' or '$(DirectorySecurityComponentGuid)' == '' or '$(UiLauncherComponentGuid)' == '' or '$(StartMenuComponentGuid)' == '' or '$(DesktopComponentGuid)' == ''"
+           Text="Architecture-specific component identities must be supplied by scripts/Build-Installer.ps1." />
+    <Error Condition="'$(LicenseRtfPath)' == '' or !Exists('$(LicenseRtfPath)')"
+           Text="LicenseRtfPath must identify the generated full AGPL-3.0 license." />
+    <Error Condition="!Exists('$(PayloadDirectory)\ProxiFyre.exe') or !Exists('$(PayloadDirectory)\ProxiFyreUI.exe') or !Exists('$(PayloadDirectory)\socksify.dll')"
+           Text="The validated payload is incomplete." />
+  </Target>
+</Project>

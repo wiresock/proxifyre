@@ -1,10 +1,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <aclapi.h>
 #include <bcrypt.h>
 #include <metahost.h>
-#include <softpub.h>
-#include <VersionHelpers.h>
-#include <wintrust.h>
+#include <sddl.h>
 
 #include <algorithm>
 #include <array>
@@ -17,21 +16,18 @@ namespace
 {
     constexpr DWORD kLoadWithAlteredSearchPath = 0x00000008;
     constexpr DWORD kLoadLibrarySearchSystem32 = 0x00000800;
-    constexpr DWORD kTrustUiNone = 2;
-    constexpr DWORD kRevokeNone = 0;
-    constexpr DWORD kChoiceFile = 1;
-    constexpr DWORD kStateActionVerify = 1;
-    constexpr DWORD kStateActionClose = 2;
-    constexpr DWORD kCacheOnlyUrlRetrieval = 0x00001000;
-    constexpr DWORD kVerifySpecificSignature = 0x00000001;
-    constexpr DWORD kGetSecondarySignatureCount = 0x00000002;
-    constexpr DWORD kMaximumSecondarySignatures = 16;
 
-    constexpr std::array<BYTE, 32> kExpectedPublicKeySha256 = {
-        0x07, 0xD1, 0x2F, 0x0A, 0xBE, 0xA8, 0x0E, 0x9A,
-        0x9A, 0x71, 0x89, 0x9B, 0x68, 0xE1, 0xB6, 0xCB,
-        0x94, 0x0E, 0x58, 0xB2, 0xCA, 0xF3, 0x78, 0x74,
-        0xCD, 0x0A, 0x62, 0xEB, 0x2E, 0x2E, 0x4C, 0x5A
+    enum class ManagedUiStage
+    {
+        None,
+        LoadMscoree,
+        ResolveClrCreateInstance,
+        CreateMetaHost,
+        GetRuntime,
+        IsLoadable,
+        GetRuntimeHost,
+        StartRuntime,
+        ExecuteEntryPoint
     };
 
     constexpr std::array<BYTE, 32> kExpectedUiConfigurationSha256 = {
@@ -41,56 +37,151 @@ namespace
         0x68, 0x37, 0xB3, 0xE7, 0x63, 0xE8, 0xF4, 0xA6
     };
 
-    struct TrustFileInfo
-    {
-        DWORD StructSize;
-        LPCWSTR FilePath;
-        HANDLE FileHandle;
-        GUID* KnownSubject;
-    };
+#ifndef _DEBUG
+    constexpr ACCESS_MASK kPayloadDangerousRights =
+        GENERIC_ALL | GENERIC_WRITE | DELETE | WRITE_DAC | WRITE_OWNER |
+        FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES |
+        FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD;
+    constexpr ACCESS_MASK kAncestorDangerousRights =
+        GENERIC_ALL | GENERIC_WRITE | DELETE | WRITE_DAC | WRITE_OWNER |
+        FILE_DELETE_CHILD;
+    constexpr wchar_t kTrustedInstallerSid[] =
+        L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
 
-    struct TrustSignatureSettings
+    bool IsTrustedMachineIdentity(PSID identity)
     {
-        DWORD StructSize;
-        DWORD Index;
-        DWORD Flags;
-        DWORD SecondarySignatureCount;
-        DWORD VerifiedSignatureIndex;
-        void* CryptoPolicy;
-    };
+        if (identity == nullptr || !IsValidSid(identity))
+            return false;
+        if (IsWellKnownSid(identity, WinLocalSystemSid) ||
+            IsWellKnownSid(identity, WinBuiltinAdministratorsSid))
+            return true;
 
-    struct TrustData
-    {
-        DWORD StructSize;
-        void* PolicyCallbackData;
-        void* SipClientData;
-        DWORD UiChoice;
-        DWORD RevocationChecks;
-        DWORD UnionChoice;
-        void* FileInfo;
-        DWORD StateAction;
-        HANDLE StateData;
-        LPCWSTR UrlReference;
-        DWORD ProviderFlags;
-        DWORD UiContext;
-        TrustSignatureSettings* SignatureSettings;
-    };
+        PSID trustedInstaller = nullptr;
+        const bool converted = ConvertStringSidToSidW(kTrustedInstallerSid, &trustedInstaller) != FALSE;
+        const bool matches = converted && EqualSid(identity, trustedInstaller) != FALSE;
+        if (trustedInstaller != nullptr)
+            LocalFree(trustedInstaller);
+        return matches;
+    }
 
-    struct LegacyTrustData
+    bool TryGetAllowedAce(const ACE_HEADER* header, ACCESS_MASK& mask, PSID& identity)
     {
-        DWORD StructSize;
-        void* PolicyCallbackData;
-        void* SipClientData;
-        DWORD UiChoice;
-        DWORD RevocationChecks;
-        DWORD UnionChoice;
-        void* FileInfo;
-        DWORD StateAction;
-        HANDLE StateData;
-        LPCWSTR UrlReference;
-        DWORD ProviderFlags;
-        DWORD UiContext;
-    };
+        mask = 0;
+        identity = nullptr;
+        if (header == nullptr || header->AceSize < sizeof(ACE_HEADER))
+            return false;
+
+        const BYTE* begin = reinterpret_cast<const BYTE*>(header);
+        const BYTE* end = begin + header->AceSize;
+        const BYTE* sid = nullptr;
+        switch (header->AceType)
+        {
+        case ACCESS_ALLOWED_ACE_TYPE:
+        {
+            const auto ace = reinterpret_cast<const ACCESS_ALLOWED_ACE*>(header);
+            mask = ace->Mask;
+            sid = reinterpret_cast<const BYTE*>(&ace->SidStart);
+            break;
+        }
+        case ACCESS_ALLOWED_CALLBACK_ACE_TYPE:
+        {
+            const auto ace = reinterpret_cast<const ACCESS_ALLOWED_CALLBACK_ACE*>(header);
+            mask = ace->Mask;
+            sid = reinterpret_cast<const BYTE*>(&ace->SidStart);
+            break;
+        }
+        case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+        {
+            const auto ace = reinterpret_cast<const ACCESS_ALLOWED_OBJECT_ACE*>(header);
+            mask = ace->Mask;
+            sid = reinterpret_cast<const BYTE*>(&ace->ObjectType);
+            if ((ace->Flags & ACE_OBJECT_TYPE_PRESENT) != 0)
+                sid += sizeof(GUID);
+            if ((ace->Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT) != 0)
+                sid += sizeof(GUID);
+            break;
+        }
+        case ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE:
+        {
+            const auto ace = reinterpret_cast<const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE*>(header);
+            mask = ace->Mask;
+            sid = reinterpret_cast<const BYTE*>(&ace->ObjectType);
+            if ((ace->Flags & ACE_OBJECT_TYPE_PRESENT) != 0)
+                sid += sizeof(GUID);
+            if ((ace->Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT) != 0)
+                sid += sizeof(GUID);
+            break;
+        }
+        case ACCESS_DENIED_ACE_TYPE:
+        case ACCESS_DENIED_OBJECT_ACE_TYPE:
+        case ACCESS_DENIED_CALLBACK_ACE_TYPE:
+        case ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE:
+            // A deny ACE does not grant the mutation rights this check is looking for.
+            return true;
+        default:
+            // Fail closed for an unfamiliar DACL entry instead of assuming it cannot grant
+            // mutation access.
+            return false;
+        }
+
+        if (sid < begin || sid >= end || !IsValidSid(const_cast<BYTE*>(sid)))
+            return false;
+        const DWORD sidLength = GetLengthSid(const_cast<BYTE*>(sid));
+        if (sidLength == 0 || sidLength > static_cast<DWORD>(end - sid))
+            return false;
+        identity = const_cast<BYTE*>(sid);
+        return true;
+    }
+
+    bool HasProtectedSecurity(HANDLE handle, ACCESS_MASK dangerousRights,
+        bool includeInheritedChildRights)
+    {
+        PSID owner = nullptr;
+        PACL dacl = nullptr;
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        const DWORD result = GetSecurityInfo(handle, SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &owner, nullptr, &dacl, nullptr, &descriptor);
+        if (result != ERROR_SUCCESS || descriptor == nullptr)
+            return false;
+
+        bool protectedSecurity = IsTrustedMachineIdentity(owner) && dacl != nullptr;
+        if (protectedSecurity)
+        {
+            for (DWORD index = 0; index < dacl->AceCount; ++index)
+            {
+                void* rawAce = nullptr;
+                if (!GetAce(dacl, index, &rawAce) || rawAce == nullptr)
+                {
+                    protectedSecurity = false;
+                    break;
+                }
+
+                const auto header = static_cast<const ACE_HEADER*>(rawAce);
+                if (!includeInheritedChildRights &&
+                    (header->AceFlags & INHERIT_ONLY_ACE) != 0)
+                    continue;
+
+                ACCESS_MASK mask = 0;
+                PSID identity = nullptr;
+                if (!TryGetAllowedAce(header, mask, identity))
+                {
+                    protectedSecurity = false;
+                    break;
+                }
+                if (identity != nullptr && (mask & dangerousRights) != 0 &&
+                    !IsTrustedMachineIdentity(identity))
+                {
+                    protectedSecurity = false;
+                    break;
+                }
+            }
+        }
+
+        LocalFree(descriptor);
+        return protectedSecurity;
+    }
+#endif
 
     class Module final
     {
@@ -152,6 +243,10 @@ namespace
                 return false;
 
             std::wstring current = root;
+#ifndef _DEBUG
+            if (!OpenDirectory(current, directory.size() == root.size()))
+                return false;
+#endif
             size_t position = 3;
             while (position < directory.size())
             {
@@ -168,7 +263,8 @@ namespace
                 if (current.back() != L'\\')
                     current.push_back(L'\\');
                 current.append(component);
-                if (!OpenDirectory(current))
+                const bool isPayloadDirectory = separator == std::wstring::npos;
+                if (!OpenDirectory(current, isPayloadDirectory))
                     return false;
                 if (separator == std::wstring::npos)
                     break;
@@ -193,6 +289,14 @@ namespace
                 handle = INVALID_HANDLE_VALUE;
                 return false;
             }
+#ifndef _DEBUG
+            if (!HasProtectedSecurity(handle, kPayloadDangerousRights, false))
+            {
+                CloseHandle(handle);
+                handle = INVALID_HANDLE_VALUE;
+                return false;
+            }
+#endif
             handles_.push_back(handle);
             return true;
         }
@@ -223,9 +327,9 @@ namespace
             return false;
         }
 
-        bool OpenDirectory(const std::wstring& path)
+        bool OpenDirectory(const std::wstring& path, bool isPayloadDirectory)
         {
-            const HANDLE handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+            const HANDLE handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | READ_CONTROL,
                 FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                 FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
             if (handle == INVALID_HANDLE_VALUE)
@@ -239,6 +343,18 @@ namespace
                 CloseHandle(handle);
                 return false;
             }
+#ifndef _DEBUG
+            const ACCESS_MASK dangerousRights = isPayloadDirectory
+                ? kPayloadDangerousRights
+                : kAncestorDangerousRights;
+            if (!HasProtectedSecurity(handle, dangerousRights, isPayloadDirectory))
+            {
+                CloseHandle(handle);
+                return false;
+            }
+#else
+            (void)isPayloadDirectory;
+#endif
             handles_.push_back(handle);
             return true;
         }
@@ -251,7 +367,7 @@ namespace
         return directory + L"\\" + name;
     }
 
-    std::wstring GetExecutableDirectory()
+    std::wstring GetExecutablePath()
     {
         std::vector<wchar_t> buffer(512);
         for (;;)
@@ -261,13 +377,18 @@ namespace
             if (length == 0)
                 return {};
             if (length < buffer.size() - 1)
-            {
-                std::wstring path(buffer.data(), length);
-                const auto separator = path.find_last_of(L"\\/");
-                return separator == std::wstring::npos ? std::wstring() : path.substr(0, separator);
-            }
+                return std::wstring(buffer.data(), length);
             buffer.resize(buffer.size() * 2);
         }
+    }
+
+    bool GetExecutableDirectory(const std::wstring& executablePath, std::wstring& directory)
+    {
+        const auto separator = executablePath.find_last_of(L"\\/");
+        if (separator == std::wstring::npos || separator == 0)
+            return false;
+        directory = executablePath.substr(0, separator);
+        return true;
     }
 
     Module LoadSystemModule(const wchar_t* name)
@@ -357,34 +478,6 @@ namespace
             return open_ && close_ && getProperty_ && create_ && hash_ && finish_ && destroy_;
         }
 
-        bool HashBuffer(const BYTE* data, ULONG length, std::array<BYTE, 32>& result) const
-        {
-            if (!IsAvailable())
-                return false;
-            BCRYPT_ALG_HANDLE algorithm = nullptr;
-            BCRYPT_HASH_HANDLE hashHandle = nullptr;
-            std::vector<BYTE> object;
-            bool success = false;
-            if (open_(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)
-                return false;
-            ULONG objectLength = 0;
-            ULONG copied = 0;
-            if (getProperty_(algorithm, BCRYPT_OBJECT_LENGTH,
-                    reinterpret_cast<PUCHAR>(&objectLength), sizeof(objectLength), &copied, 0) >= 0)
-            {
-                object.resize(objectLength);
-                if (create_(algorithm, &hashHandle, object.data(), objectLength,
-                        nullptr, 0, 0) >= 0 &&
-                    hash_(hashHandle, const_cast<PUCHAR>(data), length, 0) >= 0 &&
-                    finish_(hashHandle, result.data(), static_cast<ULONG>(result.size()), 0) >= 0)
-                    success = true;
-            }
-            if (hashHandle != nullptr)
-                destroy_(hashHandle);
-            close_(algorithm, 0);
-            return success;
-        }
-
         bool HashFile(HANDLE file, std::array<BYTE, 32>& result) const
         {
             if (!IsAvailable())
@@ -465,137 +558,6 @@ namespace
         DestroyFunction destroy_ = nullptr;
     };
 
-    class AuthenticodeVerifier final
-    {
-    public:
-        explicit AuthenticodeVerifier(const Sha256& sha256)
-            : sha256_(sha256), module_(LoadSystemModule(L"wintrust.dll"))
-        {
-            if (!module_)
-                return;
-            verify_ = Get<VerifyFunction>("WinVerifyTrust");
-            providerData_ = Get<ProviderDataFunction>("WTHelperProvDataFromStateData");
-            providerSigner_ = Get<ProviderSignerFunction>("WTHelperGetProvSignerFromChain");
-            providerCertificate_ = Get<ProviderCertificateFunction>("WTHelperGetProvCertFromChain");
-        }
-
-        bool Verify(const std::wstring& path, HANDLE fileHandle) const
-        {
-            if (!verify_ || !providerData_ || !providerSigner_ || !providerCertificate_)
-                return false;
-            if (!IsWindows8OrGreater())
-                return VerifyLegacy(path, fileHandle);
-
-            DWORD secondaryCount = 0;
-            if (VerifyModern(path, fileHandle, 0, true, secondaryCount))
-                return true;
-            if (secondaryCount > kMaximumSecondarySignatures)
-                return false;
-            for (DWORD index = 1; index <= secondaryCount; ++index)
-            {
-                DWORD ignored = 0;
-                if (VerifyModern(path, fileHandle, index, false, ignored))
-                    return true;
-            }
-            return false;
-        }
-
-    private:
-        template<typename Function>
-        Function Get(const char* name) const
-        {
-            return reinterpret_cast<Function>(GetProcAddress(module_.Get(), name));
-        }
-
-        bool IsExpectedSigner(HANDLE state) const
-        {
-            if (state == nullptr)
-                return false;
-            const auto data = providerData_(state);
-            if (data == nullptr)
-                return false;
-            const auto signer = providerSigner_(data, 0, FALSE, 0);
-            if (signer == nullptr)
-                return false;
-            const auto providerCertificate = providerCertificate_(signer, 0);
-            if (providerCertificate == nullptr || providerCertificate->pCert == nullptr ||
-                providerCertificate->pCert->pCertInfo == nullptr)
-                return false;
-            const auto& publicKey = providerCertificate->pCert->pCertInfo->
-                SubjectPublicKeyInfo.PublicKey;
-            std::array<BYTE, 32> hash{};
-            return publicKey.pbData != nullptr &&
-                   sha256_.HashBuffer(publicKey.pbData, publicKey.cbData, hash) &&
-                   hash == kExpectedPublicKeySha256;
-        }
-
-        bool VerifyModern(const std::wstring& path, HANDLE fileHandle, DWORD index,
-            bool getCount, DWORD& secondaryCount) const
-        {
-            TrustFileInfo fileInfo{ sizeof(fileInfo), path.c_str(), fileHandle, nullptr };
-            TrustSignatureSettings signatureSettings{};
-            signatureSettings.StructSize = sizeof(signatureSettings);
-            signatureSettings.Index = index;
-            signatureSettings.Flags = kVerifySpecificSignature |
-                (getCount ? kGetSecondarySignatureCount : 0);
-            TrustData data{};
-            data.StructSize = sizeof(data);
-            data.UiChoice = kTrustUiNone;
-            data.RevocationChecks = kRevokeNone;
-            data.UnionChoice = kChoiceFile;
-            data.FileInfo = &fileInfo;
-            data.StateAction = kStateActionVerify;
-            data.ProviderFlags = kCacheOnlyUrlRetrieval;
-            data.SignatureSettings = &signatureSettings;
-
-            GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-            const LONG result = verify_(reinterpret_cast<HWND>(INVALID_HANDLE_VALUE),
-                &action, &data);
-            secondaryCount = getCount ? signatureSettings.SecondarySignatureCount : 0;
-            const bool valid = result == ERROR_SUCCESS &&
-                signatureSettings.VerifiedSignatureIndex == index &&
-                IsExpectedSigner(data.StateData);
-            data.StateAction = kStateActionClose;
-            verify_(reinterpret_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data);
-            return valid;
-        }
-
-        bool VerifyLegacy(const std::wstring& path, HANDLE fileHandle) const
-        {
-            TrustFileInfo fileInfo{ sizeof(fileInfo), path.c_str(), fileHandle, nullptr };
-            LegacyTrustData data{};
-            data.StructSize = sizeof(data);
-            data.UiChoice = kTrustUiNone;
-            data.RevocationChecks = kRevokeNone;
-            data.UnionChoice = kChoiceFile;
-            data.FileInfo = &fileInfo;
-            data.StateAction = kStateActionVerify;
-            data.ProviderFlags = kCacheOnlyUrlRetrieval;
-
-            GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-            const LONG result = verify_(reinterpret_cast<HWND>(INVALID_HANDLE_VALUE),
-                &action, &data);
-            const bool valid = result == ERROR_SUCCESS && IsExpectedSigner(data.StateData);
-            data.StateAction = kStateActionClose;
-            verify_(reinterpret_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data);
-            return valid;
-        }
-
-        using VerifyFunction = LONG(WINAPI*)(HWND, GUID*, void*);
-        using ProviderDataFunction = CRYPT_PROVIDER_DATA*(WINAPI*)(HANDLE);
-        using ProviderSignerFunction = CRYPT_PROVIDER_SGNR*(WINAPI*)(CRYPT_PROVIDER_DATA*,
-            DWORD, BOOL, DWORD);
-        using ProviderCertificateFunction = CRYPT_PROVIDER_CERT*(WINAPI*)(
-            CRYPT_PROVIDER_SGNR*, DWORD);
-
-        const Sha256& sha256_;
-        Module module_;
-        VerifyFunction verify_ = nullptr;
-        ProviderDataFunction providerData_ = nullptr;
-        ProviderSignerFunction providerSigner_ = nullptr;
-        ProviderCertificateFunction providerCertificate_ = nullptr;
-    };
-
     bool IsAllowedPortableExecutable(const std::wstring& name)
     {
         static const wchar_t* allowed[] = {
@@ -636,33 +598,49 @@ namespace
         return unexpected;
     }
 
-    bool VerifyAndLeasePayload(const std::wstring& directory, LeaseSet& leases,
-        std::wstring& managedAssembly)
+    bool HasUiLoaderRedirection(const std::wstring& directory)
+    {
+        return GetFileAttributesW(JoinPath(directory, L"ProxiFyreUI.exe.local").c_str()) !=
+                   INVALID_FILE_ATTRIBUTES ||
+               GetFileAttributesW(JoinPath(directory, L"ProxiFyreUI.exe.manifest").c_str()) !=
+                   INVALID_FILE_ATTRIBUTES;
+    }
+
+    bool VerifyAndLeasePayload(const std::wstring& executablePath,
+        const std::wstring& directory, LeaseSet& leases, std::wstring& managedAssembly)
     {
         // Pin every normal directory component without delete sharing before opening any
-        // payload path. Otherwise a user-writable junction can be redirected after signature
-        // verification and before the CLR reopens the managed assembly by name.
+        // payload path. Otherwise a user-writable junction can be redirected after validation
+        // and before the CLR reopens the managed assembly by name.
         if (!leases.OpenDirectoryChain(directory))
             return false;
-        if (HasUnexpectedPortableExecutable(directory))
+        const auto executableNameOffset = executablePath.find_last_of(L"\\/");
+        const std::wstring executableName = executableNameOffset == std::wstring::npos
+            ? executablePath
+            : executablePath.substr(executableNameOffset + 1);
+        if (_wcsicmp(executableName.c_str(), L"ProxiFyreUI.exe") != 0 ||
+            HasUiLoaderRedirection(directory) || HasUnexpectedPortableExecutable(directory))
             return false;
-        const Sha256 sha256;
-        if (!sha256.IsAvailable())
+#ifndef _DEBUG
+        // The running launcher is part of the same elevated code boundary. Inspect and lease
+        // its directory entry as well so a permissive per-file ACL cannot bypass a protected
+        // parent directory.
+        HANDLE launcherHandle = INVALID_HANDLE_VALUE;
+        if (!leases.Open(executablePath, launcherHandle))
             return false;
-        const AuthenticodeVerifier authenticode(sha256);
-        const wchar_t* signedFiles[] = {
+#endif
+        // ProxiFyre releases are deliberately unsigned. Require and lease the complete managed
+        // startup chain, while the installer-protected directory and module allow-list prevent
+        // app-local code from being added or replaced during startup.
+        const wchar_t* requiredManagedFiles[] = {
             L"ProxiFyreUI.Managed.dll", L"ProxiFyre.Configuration.dll", L"Newtonsoft.Json.dll"
         };
-        for (const auto name : signedFiles)
+        for (const auto name : requiredManagedFiles)
         {
             const std::wstring path = JoinPath(directory, name);
             HANDLE handle = INVALID_HANDLE_VALUE;
             if (!leases.Open(path, handle))
                 return false;
-#ifndef _DEBUG
-            if (!authenticode.Verify(path, handle))
-                return false;
-#endif
             if (wcscmp(name, L"ProxiFyreUI.Managed.dll") == 0)
                 managedAssembly = path;
         }
@@ -672,6 +650,9 @@ namespace
         if (!leases.Open(configuration, configurationHandle))
             return false;
 #ifndef _DEBUG
+        const Sha256 sha256;
+        if (!sha256.IsAvailable())
+            return false;
         std::array<BYTE, 32> configurationHash{};
         if (!sha256.HashFile(configurationHandle, configurationHash) ||
             configurationHash != kExpectedUiConfigurationSha256)
@@ -680,12 +661,49 @@ namespace
         return !managedAssembly.empty();
     }
 
-    HRESULT RunManagedUi(const std::wstring& managedAssembly, DWORD& returnValue)
+    const wchar_t* GetManagedUiStageName(ManagedUiStage stage)
     {
+        switch (stage)
+        {
+        case ManagedUiStage::LoadMscoree: return L"Load mscoree.dll";
+        case ManagedUiStage::ResolveClrCreateInstance: return L"Resolve CLRCreateInstance";
+        case ManagedUiStage::CreateMetaHost: return L"Create CLR meta-host";
+        case ManagedUiStage::GetRuntime: return L"Locate CLR v4.0.30319";
+        case ManagedUiStage::IsLoadable: return L"Validate CLR loadability";
+        case ManagedUiStage::GetRuntimeHost: return L"Create CLR runtime host";
+        case ManagedUiStage::StartRuntime: return L"Start CLR";
+        case ManagedUiStage::ExecuteEntryPoint: return L"Execute managed entry point";
+        default: return L"Unknown CLR stage";
+        }
+    }
+
+    bool TryGetNetFrameworkRelease(DWORD& release)
+    {
+        release = 0;
+        HKEY key = nullptr;
+        const LONG opened = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full", 0,
+            KEY_QUERY_VALUE | KEY_WOW64_32KEY, &key);
+        if (opened != ERROR_SUCCESS)
+            return false;
+
+        DWORD type = 0;
+        DWORD size = sizeof(release);
+        const LONG queried = RegQueryValueExW(key, L"Release", nullptr, &type,
+            reinterpret_cast<BYTE*>(&release), &size);
+        RegCloseKey(key);
+        return queried == ERROR_SUCCESS && type == REG_DWORD && size == sizeof(release);
+    }
+
+    HRESULT RunManagedUi(const std::wstring& managedAssembly, DWORD& returnValue,
+        ManagedUiStage& failedStage)
+    {
+        failedStage = ManagedUiStage::LoadMscoree;
         using ClrCreateInstanceFunction = HRESULT(STDAPICALLTYPE*)(REFCLSID, REFIID, LPVOID*);
         Module mscoree = LoadSystemModule(L"mscoree.dll");
         if (!mscoree)
             return HRESULT_FROM_WIN32(GetLastError());
+        failedStage = ManagedUiStage::ResolveClrCreateInstance;
         const auto createInstance = reinterpret_cast<ClrCreateInstanceFunction>(
             GetProcAddress(mscoree.Get(), "CLRCreateInstance"));
         if (createInstance == nullptr)
@@ -694,24 +712,40 @@ namespace
         ICLRMetaHost* metaHost = nullptr;
         ICLRRuntimeInfo* runtimeInfo = nullptr;
         ICLRRuntimeHost* runtimeHost = nullptr;
+        failedStage = ManagedUiStage::CreateMetaHost;
         HRESULT result = createInstance(CLSID_CLRMetaHost, IID_ICLRMetaHost,
             reinterpret_cast<void**>(&metaHost));
         if (SUCCEEDED(result))
+        {
+            failedStage = ManagedUiStage::GetRuntime;
             result = metaHost->GetRuntime(L"v4.0.30319", IID_ICLRRuntimeInfo,
                 reinterpret_cast<void**>(&runtimeInfo));
+        }
         BOOL loadable = FALSE;
         if (SUCCEEDED(result))
+        {
+            failedStage = ManagedUiStage::IsLoadable;
             result = runtimeInfo->IsLoadable(&loadable);
+        }
         if (SUCCEEDED(result) && !loadable)
             result = HRESULT_FROM_WIN32(ERROR_BAD_ENVIRONMENT);
         if (SUCCEEDED(result))
+        {
+            failedStage = ManagedUiStage::GetRuntimeHost;
             result = runtimeInfo->GetInterface(CLSID_CLRRuntimeHost, IID_ICLRRuntimeHost,
                 reinterpret_cast<void**>(&runtimeHost));
+        }
         if (SUCCEEDED(result))
+        {
+            failedStage = ManagedUiStage::StartRuntime;
             result = runtimeHost->Start();
+        }
         if (SUCCEEDED(result))
+        {
+            failedStage = ManagedUiStage::ExecuteEntryPoint;
             result = runtimeHost->ExecuteInDefaultAppDomain(managedAssembly.c_str(),
                 L"ProxiFyreUI.ManagedEntryPoint", L"Run", L"", &returnValue);
+        }
 
         if (runtimeHost != nullptr)
             runtimeHost->Release();
@@ -719,12 +753,51 @@ namespace
             runtimeInfo->Release();
         if (metaHost != nullptr)
             metaHost->Release();
+        if (SUCCEEDED(result))
+            failedStage = ManagedUiStage::None;
         return result;
     }
 
     void ShowFailure(const wchar_t* message)
     {
         MessageBoxW(nullptr, message, L"ProxiFyre UI", MB_OK | MB_ICONERROR | MB_TASKMODAL);
+    }
+
+    void ShowManagedHostFailure(ManagedUiStage stage, HRESULT result)
+    {
+        wchar_t resultText[16]{};
+        swprintf_s(resultText, L"0x%08lX", static_cast<unsigned long>(result));
+        std::wstring message =
+            L"The validated ProxiFyre managed UI could not be started.\r\n\r\nStage: ";
+        message += GetManagedUiStageName(stage);
+        message += L"\r\nHRESULT: ";
+        message += resultText;
+
+        DWORD release = 0;
+        if (TryGetNetFrameworkRelease(release))
+        {
+            wchar_t releaseText[16]{};
+            swprintf_s(releaseText, L"%lu", static_cast<unsigned long>(release));
+            message += L"\r\n.NET Framework Release: ";
+            message += releaseText;
+        }
+        else
+        {
+            message += L"\r\n.NET Framework Release: not found";
+        }
+        message += L"\r\n\r\nRepair or install .NET Framework 4.7.2 or later only if the reported release is missing or older than 461808.";
+        ShowFailure(message.c_str());
+    }
+
+    void ShowManagedEntryPointFailure(DWORD result)
+    {
+        wchar_t resultText[16]{};
+        swprintf_s(resultText, L"0x%08lX", static_cast<unsigned long>(result));
+        std::wstring message =
+            L"The CLR started, but the ProxiFyre UI reported a managed startup failure.\r\n\r\nManaged result: ";
+        message += resultText;
+        message += L"\r\n\r\nReview ProxiFyreUI.startup.log in the installation directory if it was created.";
+        ShowFailure(message.c_str());
     }
 }
 
@@ -741,12 +814,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         return ERROR_ENVVAR_NOT_FOUND;
     }
 
-    const std::wstring directory = GetExecutableDirectory();
+    const std::wstring executablePath = GetExecutablePath();
+    std::wstring directory;
     LeaseSet leases;
     std::wstring managedAssembly;
-    if (directory.empty() || !VerifyAndLeasePayload(directory, leases, managedAssembly))
+    if (executablePath.empty() || !GetExecutableDirectory(executablePath, directory) ||
+        !VerifyAndLeasePayload(executablePath, directory, leases, managedAssembly))
     {
-        ShowFailure(L"The ProxiFyre UI payload is incomplete, contains an unexpected executable module, or failed its release integrity check. Reinstall it from an official signed archive.");
+#ifdef _DEBUG
+        ShowFailure(L"The ProxiFyre UI payload is incomplete, contains an unexpected executable module, or failed its fixed integrity checks.");
+#else
+        ShowFailure(L"The ProxiFyre UI payload is incomplete, contains an unexpected executable module, failed its fixed integrity checks, or is not in a protected per-machine directory. Install it with the official setup. A Release ZIP must be placed in an administrator-protected fixed-volume directory before the elevated GUI can run.");
+#endif
         return ERROR_INVALID_DATA;
     }
 
@@ -758,12 +837,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     }
 
     DWORD managedResult = 0;
-    const HRESULT result = RunManagedUi(managedAssembly, managedResult);
+    ManagedUiStage failedStage = ManagedUiStage::None;
+    const HRESULT result = RunManagedUi(managedAssembly, managedResult, failedStage);
     CoUninitialize();
     if (FAILED(result))
     {
-        ShowFailure(L"The verified ProxiFyre managed UI could not be started. Ensure .NET Framework 4.7.2 is installed.");
+        ShowManagedHostFailure(failedStage, result);
         return static_cast<int>(result);
+    }
+    if (managedResult != 0)
+    {
+        ShowManagedEntryPointFailure(managedResult);
+        return static_cast<int>(managedResult);
     }
     return static_cast<int>(managedResult);
 }

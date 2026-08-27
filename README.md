@@ -197,87 +197,20 @@ For public certificates, omit `tlsPinnedSha256` and leave `tlsAllowInvalidCertif
 
 ## Quick Start Guide
 
-This guide provides step-by-step instructions on how to set up and run the ProxiFyre application.
+Use the architecture-matched WiX bootstrapper for normal installation:
 
-### Pre-installation Steps
+1. From the [GitHub Releases page](https://github.com/wiresock/proxifyre/releases), download `ProxiFyre-<version>-win-<x86|x64|arm64>-setup.exe` for the machine's native Windows architecture and its `.sha256` sidecar. Setup rejects a mismatched native architecture before acquiring a kernel driver.
+2. Verify the setup executable's SHA-256 before elevation. ProxiFyre's first-party binaries and installers are deliberately unsigned, so Windows can display **Unknown publisher**. A checksum is meaningful as publisher provenance only when its expected value comes from a trusted release record or an independent channel.
+3. Run the setup executable as an administrator. Windows 7 requires Service Pack 1; install current servicing-stack and SHA-2 support updates and reboot first. WiX Burn detects and, when needed, downloads the pinned architecture-matched [Microsoft Visual C++ 2015-2022 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170) and official Windows Packet Filter 3.6.2.1 MSI from the upstream [`v3.6.2` release](https://github.com/wiresock/ndisapi/releases/tag/v3.6.2). It verifies each acquired payload against the digest bound into setup before installing ProxiFyre.
+4. Open **ProxiFyre** from the Start Menu, create or review `app-config.json`, and start the service from the GUI. The service is installed with demand/manual start and is intentionally left stopped until a valid configuration exists.
 
-#### 1. Install Windows Packet Filter (WinpkFilter)
+If the target machine is offline, install any missing architecture-matched Visual C++ runtime and Windows Packet Filter prerequisite manually, then retry. The standalone ProxiFyre MSI is independently usable only after both are present; it fails with an actionable prerequisite message instead of downloading another package.
 
-Windows Packet Filter is a critical dependency for our project.
+The MSI creates two declarative inbound program rules for installed `ProxiFyre.exe`: `ProxiFyre (TCP-In)` and `ProxiFyre (UDP-In)`. Both apply to Domain, Private, and Public profiles, use dynamic/any ports because the redirect listeners are allocated at runtime, and deny edge traversal. No rule is created for the GUI and no arbitrary global port is opened. Repair and upgrade reconcile the same rules; uninstall removes only those two ProxiFyre-owned rules.
 
-* Visit the [Windows Packet Filter Github page](https://github.com/wiresock/ndisapi/releases) to download the latest version.
-* Follow the instructions on the page to install it.
+The MSI installs `ProxiFyreService` as LocalSystem with a dependency on `NDISRD`, creates a Start Menu shortcut to `ProxiFyreUI.exe`, and offers a shared-desktop shortcut. Uninstall through Windows Apps/Installed apps stops and removes the service, product files, shortcuts, and firewall rules while preserving `app-config.json`, its backup, logs, GUI preferences, the Visual C++ runtime, and Windows Packet Filter. Both prerequisites are shared system dependencies and are never removed by ProxiFyre setup.
 
-#### 2. Install Visual Studio Runtime Libraries
-
-Visual Studio Runtime Libraries are required for running applications developed with Visual Studio.
-
-* Go to [Visual Studio 2022 redistributable download page](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170)
-* Identify your system architecture (x64, x86, or ARM64).
-* Download the appropriate installer for your platform to ensure compatibility and optimal performance.
-
-  * For x64 systems, download the x64 installer.
-  * For x86 systems, download the x86 installer.
-  * For ARM64 systems, download the ARM64 installer.
-* Locate the downloaded installer and double-click on it to begin the installation.
-* Follow the on-screen instructions to complete the installation
-
-Please ensure you download the correct installer to avoid any installation issues.
-
----
-
-### Installation Steps
-
-1. **Download the Latest Release**: Visit our [GitHub Releases page](https://github.com/wiresock/proxifyre/releases) to download the latest release of the ProxiFyre software.
-
-2. **Unzip the Software**: After downloading, extract the contents of the `.zip` file to your preferred location.
-
-3. **Create `app-config.json` File**: Following the template provided in the Configuration section of this document, create an `app-config.json` file. This file is crucial for the software to function properly. Save this file in the main application folder.
-
----
-
-### Running the Application
-
-4. **Run the Application**: Navigate to the directory where you extracted the software. Start `ProxiFyre.exe` from an Administrator console. Administrative privileges are required for reliable process ownership, exclusions, and packet redirection; interactive startup exits with an error when it is not elevated.
-
-⚠️ **Firewall Note**: If ProxiFyre does not appear to work, check Windows Firewall. ProxiFyre needs to accept and initiate network connections.
-
-* Temporarily disable the firewall to confirm if it’s blocking ProxiFyre.
-* If this resolves the issue, add an **inbound firewall rule** for `ProxiFyre.exe` instead of keeping the firewall disabled.
-
-  * Open **Windows Defender Firewall with Advanced Security**.
-  * Go to **Inbound Rules → New Rule... → Program**.
-  * Select `ProxiFyre.exe` and allow the connection.
-  * Apply to all profiles (Domain, Private, Public).
-
----
-
-### Running as a Service
-
-ProxiFyre can be installed and run as a Windows service. Follow these steps:
-
-1. Install the complete release with a trusted installer into a dedicated protected per-machine folder, normally beneath `C:\Program Files`. The payload directory and security-sensitive files must be owned by `SYSTEM`, `Administrators`, or `TrustedInstaller`, and their ACLs must not grant standard users or `CREATOR OWNER` write/control access. The GUI deliberately refuses to rewrite a user-controlled directory in place because already-open handles would survive an ACL change. Release builds refuse LocalSystem installation/start when this protected chain cannot be verified; Debug builds retain the repository-friendly development policy.
-2. Open a command prompt as an administrator and navigate to the protected directory containing `ProxiFyre.exe`.
-3. Use the following command to install the service:
-
-   ```
-   ProxiFyre.exe install
-   ```
-4. Start the service with:
-
-   ```
-   ProxiFyre.exe start
-   ```
-5. To stop the service, use:
-
-   ```
-   ProxiFyre.exe stop
-   ```
-6. If you wish to uninstall the service, use:
-
-   ```
-   ProxiFyre.exe uninstall
-   ```
+For standalone-MSI deployment, exact payload details, prerequisite detection, hashes, upgrade behavior, build commands, limitations, licensing considerations, and the full lifecycle validation matrix, see [docs/installer.md](docs/installer.md).
 
 ---
 
@@ -289,11 +222,11 @@ Logs are saved in the application folder under the `/logs` directory. The detail
 
 ## ProxiFyre GUI
 
-`ProxiFyreUI.exe` is the small native integrity host for the Windows Forms management application included with each architecture-specific release. It validates and locks `ProxiFyreUI.Managed.dll`, its managed dependencies, and the CLR configuration before starting .NET Framework. The application requires Windows, .NET Framework 4.7.2, and administrator approval. The GUI edits configuration, controls `ProxiFyreService`, follows logs, opens the active log file, and provides notification-area controls; `ProxiFyre.exe` remains the console/service networking engine. The GUI does not load or call `socksify.dll`. For each Windows identity and terminal session, only one GUI instance runs per application major/minor version; launching it again restores the existing window from the notification area.
+`ProxiFyreUI.exe` is the small native integrity host for the Windows Forms management application included with each architecture-specific release. Before starting .NET Framework it sanitizes CLR-control environment variables, rejects unexpected app-local executable modules, validates the fixed CLR configuration hash, and locks `ProxiFyreUI.Managed.dll` plus its managed dependencies against replacement. ProxiFyre's first-party modules are unsigned; the MSI-protected installation directory and published artifact SHA-256 are therefore important parts of the release boundary. The application requires administrator approval and .NET Framework 4.7.2 on x86/x64 or 4.8.1 on ARM64. The GUI edits configuration, controls `ProxiFyreService`, follows logs, opens the active log file, and provides notification-area controls; `ProxiFyre.exe` remains the console/service networking engine. The GUI does not load or call `socksify.dll`. For each Windows identity and terminal session, only one GUI instance runs per application major/minor version; launching it again restores the existing window from the notification area.
 
 The GUI locates the engine from the installed service registration first, then beside the GUI, then from the last explicitly selected path. Use **Browse for ProxiFyre.exe** when the engine is installed elsewhere. The Diagnostics tab shows the resolved engine, `app-config.json`, and `logs` paths. GUI preferences are stored separately under `%LocalAppData%\ProxiFyreUI`.
 
-When the service is absent, select **Install Service**. Release service installation/start additionally requires the complete engine payload to be beneath a protected per-machine directory whose owner and ACL chain prevent replacement by standard users. The GUI verifies and leases that payload but never tries to secure a user-controlled directory in place. To migrate an existing service from an unsafe location, stop and uninstall it, exit the GUI, install the complete release into a protected folder under `C:\Program Files`, launch the GUI from that copy, and install again; the installed registration intentionally takes precedence over Browse. When it is installed, **Uninstall service…** is available beside the primary service controls as well as under **Settings / Diagnostics**; uninstall stops the service first and preserves configuration, its backup, and logs. If Windows is still completing removal because another service-management handle is open, the GUI reports deletion pending. Before install/start/restart, the GUI distinguishes an uninstalled Windows Packet Filter dependency from an installed-but-stopped `NDISRD` service; SCM is allowed to start a registered dependency, while a genuinely missing driver is reported immediately with the download location. Installation invokes only the resolved engine with its fixed `install` lifecycle argument and refreshes the real Windows Service Control Manager state. Start, stop, and restart operations remain asynchronous, and a successful save is never reported as active proxying.
+The MSI normally creates `ProxiFyreService`; if its registration is later removed, **Install Service** can restore it from the protected installed payload, while an MSI repair remains the preferred way to reconcile all product components. Release service operations require the engine payload to remain beneath a protected per-machine directory whose owner and ACL chain prevent replacement by standard users. **Uninstall service…** in the GUI stops and removes only the service registration and preserves configuration, backup, and logs; uninstall the product through Windows Apps/Installed apps to remove product files, shortcuts, and the two MSI-owned firewall rules. Before install/start/restart, the GUI distinguishes a missing or incompatible Windows Packet Filter dependency from an installed-but-stopped `NDISRD` service. An active device is queried for API major `3` and API minor `0x0601` or newer; SCM may start a compatible registered dependency. Start, stop, and restart remain asynchronous, and a successful save is never reported as active proxying.
 
 Use the Routing tab to add or edit rules and move them into evaluation order. The first matching rule wins. **All unmatched applications** writes an explicit empty string (`"appNames": [""]`) and should be the last rule, because it shadows later rules. Exclusions are edited separately, take priority over the catch-all, and use permissive process-name/path substring matching; a VPN carrier process may need exclusion to avoid recursive routing.
 
@@ -307,9 +240,10 @@ Release output is written to `bin\exe\<x86|x64|ARM64>\<Debug|Release>\`. Restore
 nuget restore socksify.sln
 msbuild socksify.sln -t:Rebuild -v:minimal -p:Configuration=Release -p:Platform=x64 -p:Version=2.4.0
 vstest.console.exe bin\tests\x64\Release\ProxiFyre.Tests.dll /TestAdapterPath:packages\NUnit3TestAdapter.4.6.0\build\net462 /Platform:x64
+pwsh -File scripts\Build-Installer.ps1 -Platform x64 -Version 2.4.0
 ```
 
-Use `x86` in place of `x64` when running on a matching host. Build the ARM64 payload on x64 if the toolchain is installed, but run ARM64 tests only on Windows ARM64. See [docs/gui.md](docs/gui.md) for detailed architecture, security behavior, troubleshooting, and the manual validation checklist.
+Use `x86` in place of `x64` when running on a matching host. Build the ARM64 payload on x64 if the toolchain is installed, but run ARM64 tests only on Windows ARM64. See [docs/gui.md](docs/gui.md) for GUI architecture and behavior, and [docs/installer.md](docs/installer.md) for packaging, deployment, verification, and lifecycle testing.
 
 ---
 
@@ -325,13 +259,15 @@ Before starting the build process, ensure the following requirements are met:
    vcpkg install ms-gsl:x86-windows ms-gsl:x64-windows ms-gsl:arm64-windows
    ```
 
-3. **Add online NuGet Package Source:** In some cases, you may need to add an online NuGet Package Source. To do this, navigate to `Visual Studio -> Tools -> Options -> NuGet Package Manager -> Package Sources` and add `https://nuget.org/api/v2`.
+3. **Install PowerShell 7 and a .NET SDK:** installer packaging runs `pwsh` and restores the pinned WiX Toolset 6.0.2 SDK/extensions through `dotnet`.
+
+4. **Add online NuGet Package Source:** In some cases, you may need to add an online NuGet Package Source. To do this, navigate to `Visual Studio -> Tools -> Options -> NuGet Package Manager -> Package Sources` and add `https://api.nuget.org/v3/index.json`. Installer restore is restricted by `NuGet.Installer.Config` and package lock files.
 
 ---
 
 ## Projects
 
-This repository consists of six projects:
+This repository consists of nine production, UI, test, and packaging projects:
 
 ### 1. ndisapi.lib
 
@@ -351,8 +287,20 @@ This .NET Framework 4.7.2 class library contains the shared configuration models
 
 ### 5. ProxiFyreUI
 
-This .NET Framework 4.7.2 Windows Forms application edits configuration and manages the existing Windows service. It depends only on `ProxiFyre.Configuration` and Windows framework APIs; it is not an in-process proxy engine.
+This .NET Framework 4.7.2 Windows Forms assembly edits configuration and manages the existing Windows service. It depends only on `ProxiFyre.Configuration` and Windows framework APIs; it is not an in-process proxy engine.
 
-### 6. ProxiFyre.Tests
+### 6. ProxiFyreUILauncher
+
+This native architecture-specific host establishes the UI's DLL-loading, CLR-environment, module-allow-list, fixed-configuration-hash, and payload-lease boundary before starting `ProxiFyreUI.Managed.dll`.
+
+### 7. ProxiFyre.Tests
 
 This project contains automated configuration, persistence, path-handling, workspace-state, rollback, and diagnostics-redaction tests and does not require the native driver or a live service.
+
+### 8. ProxiFyre.Installer
+
+This WiX Toolset 6.0.2 project builds the architecture-specific MSI containing the engine, GUI, service definition, shortcuts, protected install-directory ACL, and declarative firewall rules.
+
+### 9. ProxiFyre.Bundle
+
+This WiX Toolset 6.0.2 Burn project builds the user-facing setup executable that conditionally acquires the pinned official Visual C++ runtime and Windows Packet Filter prerequisites before chaining the ProxiFyre MSI.
