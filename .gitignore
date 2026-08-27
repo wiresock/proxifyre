@@ -31,7 +31,7 @@
 *.config
 # Source-controlled .NET project configuration files are exceptions to the
 # broad runtime/build-output rule above.
-!ProxiFyreUI/App.config
+!ProxiFyreUI/ProxiFyreUI.exe.config
 !ProxiFyre.Configuration/packages.config
 !ProxiFyre.Tests/App.config
 !ProxiFyre.Tests/packages.config

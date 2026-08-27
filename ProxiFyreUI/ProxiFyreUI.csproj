@@ -83,6 +83,9 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
+    <Content Include="ProxiFyreUI.exe.config">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <None Include="..\assets\ProxiFyre.ico">
       <Link>ProxiFyre.ico</Link>
     </None>
@@ -108,10 +111,5 @@
     <MakeDir Directories="$(IntermediateOutputPath)" />
     <WriteCodeFragment Language="C#" OutputFile="$(IntermediateOutputPath)Version.cs" AssemblyAttributes="@(AssemblyAttributes)" />
     <ItemGroup><Compile Include="$(IntermediateOutputPath)Version.cs" /></ItemGroup>
-  </Target>
-  <Target Name="CopyNativeHostConfiguration" AfterTargets="Build">
-    <Copy SourceFiles="$(ProjectDir)App.config"
-          DestinationFiles="$(OutputPath)ProxiFyreUI.exe.config"
-          SkipUnchangedFiles="true" />
   </Target>
 </Project>

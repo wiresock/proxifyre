@@ -89,10 +89,5 @@
     <ResourceCompile Include="Resources.rc" />
     <ClInclude Include="resource.h" />
   </ItemGroup>
-  <Target Name="CopyUiConfiguration" AfterTargets="Build">
-    <Copy SourceFiles="$(ProjectDir)..\ProxiFyreUI\App.config"
-          DestinationFiles="$(OutDir)ProxiFyreUI.exe.config"
-          SkipUnchangedFiles="true" />
-  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
