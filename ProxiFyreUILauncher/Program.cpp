@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <VersionHelpers.h>
 #include <aclapi.h>
 #include <bcrypt.h>
 #include <metahost.h>
@@ -404,11 +405,27 @@ namespace
 
     bool ConfigureNativeSearchPath()
     {
+        // Removing the working directory closes the pre-Windows 8 DLL-preloading vector while
+        // retaining the standard application/System32 search order used by the CLR. Do this on
+        // every supported OS before applying the stronger modern policy below.
+        if (!SetDllDirectoryW(L""))
+            return false;
+
+        // Windows 7 GDI+ cannot initialize its installed-font collection after any nonzero
+        // SetDefaultDllDirectories call. The setting is process-wide and irreversible, so a
+        // managed fallback cannot repair WinForms after the CLR starts. Critical native modules
+        // are still loaded from absolute System32 paths, and Release payload directories are
+        // independently protected and checked before managed code runs.
+        if (!IsWindows8OrGreater())
+            return true;
+
         using SetDefaultDllDirectoriesFunction = BOOL(WINAPI*)(DWORD);
         const auto kernel = GetModuleHandleW(L"kernel32.dll");
+        if (kernel == nullptr)
+            return false;
         const auto function = reinterpret_cast<SetDefaultDllDirectoriesFunction>(
             GetProcAddress(kernel, "SetDefaultDllDirectories"));
-        return function == nullptr || function(kLoadLibrarySearchSystem32) != FALSE;
+        return function != nullptr && function(kLoadLibrarySearchSystem32) != FALSE;
     }
 
     bool StartsWith(const std::wstring& value, const wchar_t* prefix)
