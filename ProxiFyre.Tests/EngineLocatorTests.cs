@@ -3,6 +3,7 @@ using ProxiFyre.Configuration;
 using ProxiFyreUI.Infrastructure;
 using System;
 using System.IO;
+using System.Xml;
 using UiEngineLocationSource = ProxiFyreUI.Infrastructure.EngineLocationSource;
 
 namespace ProxiFyre.Tests
@@ -267,6 +268,24 @@ namespace ProxiFyre.Tests
 
             Assert.That(File.Exists(path), Is.True);
             Assert.That(UiStartupPayload.IsTrustedUiPayloadFile(path), Is.True);
+
+            var configuration = new XmlDocument();
+            configuration.Load(path);
+            var dpiAwareness = configuration.SelectSingleNode(
+                "/configuration/System.Windows.Forms.ApplicationConfigurationSection/" +
+                "add[@key='DpiAwareness']") as XmlElement;
+            var automaticResizing = configuration.SelectSingleNode(
+                "/configuration/System.Windows.Forms.ApplicationConfigurationSection/" +
+                "add[@key='EnableWindowsFormsHighDpiAutoResizing']") as XmlElement;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(dpiAwareness?.GetAttribute("value"), Is.EqualTo("PerMonitorV2"));
+                Assert.That(automaticResizing?.GetAttribute("value"), Is.EqualTo("true"));
+                Assert.That(configuration.SelectNodes(
+                    "/configuration/appSettings/add[@key='DpiAwareness' or " +
+                    "@key='EnableWindowsFormsHighDpiAutoResizing']")?.Count, Is.EqualTo(0));
+            });
         }
 
         [Test]

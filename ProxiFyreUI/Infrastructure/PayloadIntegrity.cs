@@ -331,7 +331,7 @@ namespace ProxiFyreUI.Infrastructure
     internal static class UiStartupPayload
     {
         internal const string UiConfigurationSha256 =
-            "ECEB47269DB5D3E22728F6DC60EC05450783F8B3C29074666837B3E763E8F4A6";
+            "104FEA6F8C0821CD27E28F0C0CC5F37B7F822168316AA1AE0FDEABBC1E81BF5D";
 
         public static IDisposable Acquire(string userInterfacePath)
         {

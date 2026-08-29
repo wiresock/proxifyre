@@ -575,8 +575,8 @@ namespace ProxiFyreUI.Forms
             this.notifyIcon.ContextMenuStrip = this.trayContextMenu; this.notifyIcon.Text = "ProxiFyre"; this.notifyIcon.Visible = true; this.notifyIcon.DoubleClick += new System.EventHandler(this.NotifyIcon_DoubleClick);
             this.serviceRefreshTimer.Interval = 3000; this.serviceRefreshTimer.Tick += new System.EventHandler(this.ServiceRefreshTimer_Tick);
             // form
-            this.AutoScaleDimensions = new System.Drawing.SizeF(7F, 15F);
-            this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
+            this.AutoScaleDimensions = new System.Drawing.SizeF(96F, 96F);
+            this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi;
             this.ClientSize = new System.Drawing.Size(1114, 690);
             this.Controls.Add(this.mainTabControl);
             this.Controls.Add(this.headerPanel);
