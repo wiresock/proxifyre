@@ -17,12 +17,9 @@ namespace ProxiFyre.Tests
         [Test]
         public void MainWindowHeaderAndActionsRemainUsableAtTwoHundredPercent()
         {
-            var form = new MainForm();
-            var scaledFonts = new Font[0];
-            try
+            using (var form = new MainForm())
+            using (ScaleToTwoHundredPercent(form))
             {
-                scaledFonts = ScaleToTwoHundredPercent(form);
-
                 var title = FindControl<Label>(form, "titleLabel");
                 var serviceLabel = FindControl<Label>(form, "serviceStateLabel");
                 var serviceValue = FindControl<Label>(form, "serviceStateValueLabel");
@@ -70,11 +67,6 @@ namespace ProxiFyre.Tests
                 Assert.That(grid.ColumnHeadersHeightSizeMode,
                     Is.EqualTo(DataGridViewColumnHeadersHeightSizeMode.AutoSize));
             }
-            finally
-            {
-                form.Dispose();
-                DisposeFonts(scaledFonts);
-            }
         }
 
         [Test]
@@ -88,56 +80,83 @@ namespace ProxiFyre.Tests
             };
             foreach (var form in forms)
             {
-                var scaledFonts = new Font[0];
-                try
+                using (form)
+                using (var scaledLayout = ScaleToTwoHundredPercent(form))
                 {
-                    scaledFonts = ScaleToTwoHundredPercent(form);
-                    AssertControlsAreContained(form.Controls.Cast<Control>().Where(control =>
-                        control is Button));
-                }
-                finally
-                {
-                    form.Dispose();
-                    DisposeFonts(scaledFonts);
+                    AssertControlsAreContained(GetControlTree(scaledLayout.Surface)
+                        .Where(control => control is Button));
                 }
             }
         }
 
-        private static Font[] ScaleToTwoHundredPercent(Form form)
+        private static ScaledLayout ScaleToTwoHundredPercent(Form form)
         {
             Assert.That(form.AutoScaleMode, Is.EqualTo(AutoScaleMode.Dpi));
             var originalClientSize = form.ClientSize;
             var originalFontHeight = form.Font.Height;
-            var fontSnapshots = GetControlTree(form)
+            var layoutSurface = new Panel
+            {
+                Font = form.Font,
+                Padding = form.Padding,
+                RightToLeft = form.RightToLeft,
+                Size = originalClientSize
+            };
+            var topLevelControls = form.Controls.Cast<Control>().ToArray();
+            form.SuspendLayout();
+            layoutSurface.SuspendLayout();
+            try
+            {
+                layoutSurface.Controls.AddRange(topLevelControls);
+                for (var index = 0; index < topLevelControls.Length; index++)
+                    layoutSurface.Controls.SetChildIndex(topLevelControls[index], index);
+            }
+            finally
+            {
+                form.ResumeLayout(false);
+                layoutSurface.ResumeLayout(false);
+            }
+
+            var fontSnapshots = GetControlTree(layoutSurface)
                 .Select(control => new KeyValuePair<Control, Font>(control, control.Font))
                 .ToArray();
 
             // CI normally runs at 96 DPI. At 192 DPI, point fonts retain their point size but
             // occupy roughly twice as many device pixels, so double both geometry and the
             // 96-DPI font metrics to exercise clipping without changing the runner display.
-            form.Scale(new SizeF(2F, 2F));
+            // Use a non-window layout surface because Form caps its bounds at the desktop's
+            // maximum tracking size, which is only 1024x768 on the hosted Windows runner.
             var scaledFonts = new List<Font>(fontSnapshots.Length);
-            foreach (var snapshot in fontSnapshots.Reverse())
+            try
             {
-                var originalFont = snapshot.Value;
-                var scaledFont = new Font(originalFont.FontFamily,
-                    originalFont.SizeInPoints * 2F, originalFont.Style, GraphicsUnit.Point,
-                    originalFont.GdiCharSet, originalFont.GdiVerticalFont);
-                snapshot.Key.Font = scaledFont;
-                scaledFonts.Add(scaledFont);
-            }
-            form.PerformLayout();
+                layoutSurface.Scale(new SizeF(2F, 2F));
+                foreach (var snapshot in fontSnapshots.Reverse())
+                {
+                    var originalFont = snapshot.Value;
+                    var scaledFont = new Font(originalFont.FontFamily,
+                        originalFont.SizeInPoints * 2F, originalFont.Style, GraphicsUnit.Point,
+                        originalFont.GdiCharSet, originalFont.GdiVerticalFont);
+                    snapshot.Key.Font = scaledFont;
+                    scaledFonts.Add(scaledFont);
+                }
+                layoutSurface.PerformLayout();
 
-            Assert.Multiple(() =>
+                Assert.Multiple(() =>
+                {
+                    Assert.That(layoutSurface.ClientSize.Width,
+                        Is.GreaterThanOrEqualTo(originalClientSize.Width * 2 - 2));
+                    Assert.That(layoutSurface.ClientSize.Height,
+                        Is.GreaterThanOrEqualTo(originalClientSize.Height * 2 - 2));
+                    Assert.That(layoutSurface.Font.Height,
+                        Is.GreaterThanOrEqualTo(originalFontHeight * 2 - 1));
+                });
+                return new ScaledLayout(layoutSurface, scaledFonts.ToArray());
+            }
+            catch
             {
-                Assert.That(form.ClientSize.Width,
-                    Is.GreaterThanOrEqualTo(originalClientSize.Width * 2 - 2));
-                Assert.That(form.ClientSize.Height,
-                    Is.GreaterThanOrEqualTo(originalClientSize.Height * 2 - 2));
-                Assert.That(form.Font.Height,
-                    Is.GreaterThanOrEqualTo(originalFontHeight * 2 - 1));
-            });
-            return scaledFonts.ToArray();
+                layoutSurface.Dispose();
+                DisposeFonts(scaledFonts);
+                throw;
+            }
         }
 
         private static IEnumerable<Control> GetControlTree(Control root)
@@ -175,6 +194,26 @@ namespace ProxiFyre.Tests
                 Assert.That(control.Parent.ClientRectangle.Contains(control.Bounds), Is.True,
                     "Control '{0}' is clipped by '{1}' at 200% scaling.",
                     control.Name, control.Parent.Name);
+            }
+        }
+
+        private sealed class ScaledLayout : IDisposable
+        {
+            private readonly Control _layoutSurface;
+            private readonly Font[] _fonts;
+
+            internal ScaledLayout(Control layoutSurface, Font[] fonts)
+            {
+                _layoutSurface = layoutSurface;
+                _fonts = fonts;
+            }
+
+            internal Control Surface => _layoutSurface;
+
+            public void Dispose()
+            {
+                _layoutSurface.Dispose();
+                DisposeFonts(_fonts);
             }
         }
     }
