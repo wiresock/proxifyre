@@ -111,6 +111,11 @@ jobs:
       - name: Build
         run: msbuild socksify.sln -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=${{ matrix.platform }} -property:Version=${{ env.VERSION }} -property:Repository=${{ github.repository }}
 
+      - name: Verify UI high-DPI configuration
+        if: matrix.platform == 'x64'
+        shell: pwsh
+        run: ./scripts/Test-UiHighDpiConfiguration.ps1
+
       - name: Run managed tests
         if: matrix.platform == 'x64'
         shell: pwsh
