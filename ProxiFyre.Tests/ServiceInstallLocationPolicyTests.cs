@@ -62,6 +62,28 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
+        public void AuthenticatedUsersModifyAceApplyingToAncestorIsRejectedForDelete()
+        {
+            var authenticatedUsers = new SecurityIdentifier(
+                WellKnownSidType.AuthenticatedUserSid, null);
+            var reportedRule = new FileSystemAccessRule(authenticatedUsers,
+                (FileSystemRights)0x001301bf, AccessControlType.Allow);
+            var ancestorDangerousRights =
+                FileSystemRights.Delete |
+                FileSystemRights.DeleteSubdirectoriesAndFiles |
+                FileSystemRights.ChangePermissions |
+                FileSystemRights.TakeOwnership;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(reportedRule.FileSystemRights & FileSystemRights.Delete,
+                    Is.EqualTo(FileSystemRights.Delete));
+                Assert.That(ServiceInstallLocationPolicy.GrantsDangerousAccess(reportedRule,
+                    ancestorDangerousRights, false), Is.True);
+            });
+        }
+
+        [Test]
         public void CreatorOwnerWriteInheritanceIsUnsafeForFuturePayloadFiles()
         {
             var creatorOwner = new SecurityIdentifier(WellKnownSidType.CreatorOwnerSid, null);
