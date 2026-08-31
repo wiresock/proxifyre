@@ -31,42 +31,42 @@ WiX 6 runs WixStdBA in a separate process, whose window does not inherit `Bundle
 
 ## Architecture-specific artifacts
 
-For version `2.5.1`, the packaging script emits these four current-version files beneath `bin\installer\<x86|x64|ARM64>\Release\`:
+For version `2.5.2`, the packaging script emits these four current-version files beneath `bin\installer\<x86|x64|ARM64>\Release\`:
 
 ```text
-ProxiFyre-2.5.1-win-x86.msi
-ProxiFyre-2.5.1-win-x86.msi.sha256
-ProxiFyre-2.5.1-win-x86-setup.exe
-ProxiFyre-2.5.1-win-x86-setup.exe.sha256
+ProxiFyre-2.5.2-win-x86.msi
+ProxiFyre-2.5.2-win-x86.msi.sha256
+ProxiFyre-2.5.2-win-x86-setup.exe
+ProxiFyre-2.5.2-win-x86-setup.exe.sha256
 ```
 
 The x64 and ARM64 directories use `x64` and `arm64` in the corresponding filenames. Use the package matching the machine's native Windows architecture. The bootstrapper checks that architecture before acquisition because Windows Packet Filter is a kernel driver; for example, the x86 setup deliberately does not use Windows' x86 emulation on an x64 machine. All five first-party architecture-bound runtime PE files (`ProxiFyre.exe`, the native UI host, both managed assemblies, and `socksify.dll`) plus the two native setup-helper DLLs are checked against the requested architecture before packaging.
 
 WiX materializes the verified, uncompressed Visual C++ and Windows Packet Filter source payloads while linking the bundle. The packaging script confines those layout byproducts to its guarded temporary staging directory and deletes them after validation. The script creates only the four current-version `ProxiFyre-*` files above; it does not clean unrelated or older files already in the selected output directory, and `-Force` replaces only those exact four paths. It refuses to build when either external prerequisite filename is already present in that directory so a stale layout cannot silently become an offline package. Setup must acquire missing prerequisites from their pinned official URLs or find them in Burn's package cache.
 
-For the `v2.5.1` tag, the release workflow publishes exactly these 18 assets:
+For the `v2.5.2` tag, the release workflow publishes exactly these 18 assets:
 
 ```text
-ProxiFyre-v2.5.1-x86.zip
-ProxiFyre-v2.5.1-x86.zip.sha256
-ProxiFyre-2.5.1-win-x86.msi
-ProxiFyre-2.5.1-win-x86.msi.sha256
-ProxiFyre-2.5.1-win-x86-setup.exe
-ProxiFyre-2.5.1-win-x86-setup.exe.sha256
+ProxiFyre-v2.5.2-x86.zip
+ProxiFyre-v2.5.2-x86.zip.sha256
+ProxiFyre-2.5.2-win-x86.msi
+ProxiFyre-2.5.2-win-x86.msi.sha256
+ProxiFyre-2.5.2-win-x86-setup.exe
+ProxiFyre-2.5.2-win-x86-setup.exe.sha256
 
-ProxiFyre-v2.5.1-x64.zip
-ProxiFyre-v2.5.1-x64.zip.sha256
-ProxiFyre-2.5.1-win-x64.msi
-ProxiFyre-2.5.1-win-x64.msi.sha256
-ProxiFyre-2.5.1-win-x64-setup.exe
-ProxiFyre-2.5.1-win-x64-setup.exe.sha256
+ProxiFyre-v2.5.2-x64.zip
+ProxiFyre-v2.5.2-x64.zip.sha256
+ProxiFyre-2.5.2-win-x64.msi
+ProxiFyre-2.5.2-win-x64.msi.sha256
+ProxiFyre-2.5.2-win-x64-setup.exe
+ProxiFyre-2.5.2-win-x64-setup.exe.sha256
 
-ProxiFyre-v2.5.1-ARM64.zip
-ProxiFyre-v2.5.1-ARM64.zip.sha256
-ProxiFyre-2.5.1-win-arm64.msi
-ProxiFyre-2.5.1-win-arm64.msi.sha256
-ProxiFyre-2.5.1-win-arm64-setup.exe
-ProxiFyre-2.5.1-win-arm64-setup.exe.sha256
+ProxiFyre-v2.5.2-ARM64.zip
+ProxiFyre-v2.5.2-ARM64.zip.sha256
+ProxiFyre-2.5.2-win-arm64.msi
+ProxiFyre-2.5.2-win-arm64.msi.sha256
+ProxiFyre-2.5.2-win-arm64-setup.exe
+ProxiFyre-2.5.2-win-arm64-setup.exe.sha256
 ```
 
 Installer filenames use the normalized lowercase architecture tokens `x86`, `x64`, and `arm64`. ZIP filenames retain the workflow matrix labels `x86`, `x64`, and `ARM64` and include the leading `v` from the release tag. Pull-request and manual non-tag runs use `ProxiFyre-ci-<run-id>-<matrix-platform>.zip` instead; they never publish a GitHub release. No release asset contains an offline copy of the Visual C++ or Windows Packet Filter installers.
@@ -201,7 +201,7 @@ Windows Packet Filter is a separate third-party product. Its licensing terms and
 Use the MSI directly only when the required .NET Framework, architecture-matched Visual C++ runtime, and Windows Packet Filter have already been provisioned:
 
 ```powershell
-msiexec.exe /i .\ProxiFyre-2.5.1-win-x64.msi
+msiexec.exe /i .\ProxiFyre-2.5.2-win-x64.msi
 ```
 
 On a clean machine without the compatible runtime files or registered driver/file version, the MSI exits with an actionable message directing the user to the setup executable and official prerequisite sources. It does not download prerequisites. It also never downloads .NET Framework: x86 and x64 packages require .NET Framework 4.7.2 or later, and the ARM64 package requires .NET Framework 4.8.1 or later.
@@ -210,9 +210,9 @@ Enterprise deployment can cache and validate .NET Framework and the official Vis
 
 ## Version source and release workflow
 
-`Directory.Build.props` is the repository's authoritative release-version source. For this release it defines `ProxiFyreReleaseVersion` as `2.5.1`, supplies that value as the default MSBuild `Version`, derives the four-part native resource tuple, and supplies the canonical repository identity. An explicit `/p:Version` remains available for controlled build and test scenarios, but the supported packaging script checks the `FileVersion` and `ProductVersion` of all five architecture-bound first-party runtime PE files and both native setup-helper DLLs against the same three-part value passed through `-Version`. It also verifies the MSI product version and Burn registration/display version. This prevents a package named for one release from silently containing binaries or setup helpers from another.
+`Directory.Build.props` is the repository's authoritative release-version source. For this release it defines `ProxiFyreReleaseVersion` as `2.5.2`, supplies that value as the default MSBuild `Version`, derives the four-part native resource tuple, and supplies the canonical repository identity. An explicit `/p:Version` remains available for controlled build and test scenarios, but the supported packaging script checks the `FileVersion` and `ProductVersion` of all five architecture-bound first-party runtime PE files and both native setup-helper DLLs against the same three-part value passed through `-Version`. It also verifies the MSI product version and Burn registration/display version. This prevents a package named for one release from silently containing binaries or setup helpers from another.
 
-The release workflow reads `ProxiFyreReleaseVersion` directly rather than deriving a version from an arbitrary tag. A publishing tag must match it byte-for-byte with one leading `v`: repository version `2.5.1` accepts only tag `v2.5.1`. Mismatched tags, extra leading zeroes, and prerelease suffixes fail before compilation. Windows Installer receives the canonical three-part value without `v`; prerelease versions are intentionally unsupported because MSI cannot preserve SemVer prerelease ordering safely.
+The release workflow reads `ProxiFyreReleaseVersion` directly rather than deriving a version from an arbitrary tag. A publishing tag must match it byte-for-byte with one leading `v`: repository version `2.5.2` accepts only tag `v2.5.2`. Mismatched tags, extra leading zeroes, and prerelease suffixes fail before compilation. Windows Installer receives the canonical three-part value without `v`; prerelease versions are intentionally unsupported because MSI cannot preserve SemVer prerelease ordering safely.
 
 Pull requests and manual `workflow_dispatch` runs build the same repository version but label their ZIPs `ci-<run-id>` and do not create a GitHub release. Tag builds run the x86, x64, and ARM64 Release matrix, run the managed test suite on the x64 leg, validate the unsigned payload and both installer packages on every leg, and upload the ZIP, MSI, online setup, and SHA-256 sidecars. The publishing job waits for all three architecture jobs, so a failed leg cannot create a partial release, then generates release notes and uses a draft-upload-publish sequence so the release is not exposed with a partial asset set. Repository-level GitHub release immutability, when enabled, remains a repository setting rather than something this workflow configures. The exact tag asset names are listed under [Architecture-specific artifacts](#architecture-specific-artifacts).
 
@@ -238,9 +238,9 @@ msbuild .\ProxiFyreSetupBootstrapper\ProxiFyreSetupBootstrapper.vcxproj -t:Resto
 msbuild .\ProxiFyreSetupEngineExtension\ProxiFyreSetupEngineExtension.vcxproj -t:Restore -v:minimal -p:RestoreLockedMode=true -p:RestoreConfigFile="$PWD\NuGet.Installer.Config"
 dotnet restore .\ProxiFyre.Installer\ProxiFyre.Installer.wixproj --configfile .\NuGet.Installer.Config --locked-mode
 dotnet restore .\ProxiFyre.Bundle\ProxiFyre.Bundle.wixproj --configfile .\NuGet.Installer.Config --locked-mode
-msbuild .\socksify.sln -t:Rebuild -v:minimal -p:Configuration=Release -p:Platform=x64 -p:Version=2.5.1
+msbuild .\socksify.sln -t:Rebuild -v:minimal -p:Configuration=Release -p:Platform=x64 -p:Version=2.5.2
 vstest.console.exe .\bin\tests\x64\Release\ProxiFyre.Tests.dll /TestAdapterPath:.\packages\NUnit3TestAdapter.4.6.0\build\net462 /Platform:x64
-pwsh -File .\scripts\Build-Installer.ps1 -Platform x64 -Version 2.5.1 -NoRestore
+pwsh -File .\scripts\Build-Installer.ps1 -Platform x64 -Version 2.5.2 -NoRestore
 ```
 
 Keep the three legacy `packages.config` restores separate from the locked native-helper and WiX restores. A solution-wide NuGet CLI restore does not preserve the reviewed restore boundary for the SDK-style installer projects. `NuGet.Installer.Config` and each package lock file constrain the two native setup helpers and both WiX projects to the reviewed package graph; `-NoRestore` is valid only after all four locked restores above succeed.
@@ -250,7 +250,7 @@ Repeat with `x86` and `ARM64`. Run architecture-specific tests only on a matchin
 ```powershell
 pwsh -File .\scripts\Build-Installer.ps1 `
   -Platform x64 `
-  -Version 2.5.1 `
+  -Version 2.5.2 `
   -WindowsPacketFilterMsiPath C:\staging\Windows.Packet.Filter.3.6.2.1.x64.msi `
   -VisualCppRedistributablePath C:\staging\VC_redist.x64.exe `
   -NoRestore
@@ -263,7 +263,7 @@ The script applies the same byte-length, SHA-256, SHA-512, version (where applic
 Every published ZIP, MSI, and setup executable has a `.sha256` sidecar. `Build-Installer.ps1` writes the MSI and setup sidecars, and the release workflow writes the ZIP sidecar:
 
 ```powershell
-$artifact = '.\ProxiFyre-2.5.1-win-x64-setup.exe'
+$artifact = '.\ProxiFyre-2.5.2-win-x64-setup.exe'
 $expected = ((Get-Content "$artifact.sha256" -Raw) -split '\s+')[0].ToLowerInvariant()
 $actual = (Get-FileHash $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actual -cne $expected) { throw "SHA-256 mismatch for $artifact" }
