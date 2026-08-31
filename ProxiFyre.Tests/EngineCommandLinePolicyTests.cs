@@ -1,0 +1,384 @@
+using NUnit.Framework;
+using ProxiFyre.Configuration;
+
+namespace ProxiFyre.Tests
+{
+    [TestFixture]
+    public sealed class EngineCommandLinePolicyTests
+    {
+        [Test]
+        public void StandardUserRequiresExplicitOptInForInteractiveRun()
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(new string[0], true, false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.False);
+                Assert.That(decision.UseLimitedMode, Is.False);
+                Assert.That(decision.Denial,
+                    Is.EqualTo(EngineCommandLineDenial.AdministratorPrivilegesRequired));
+            });
+        }
+
+        [Test]
+        public void ExactOptInEnablesLimitedInteractiveRunForStandardUser()
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(
+                new[] { "--allow-not-admin" }, true, false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.True);
+                Assert.That(decision.AllowNotAdministratorRequested, Is.True);
+                Assert.That(decision.UseLimitedMode, Is.True);
+                Assert.That(decision.IsLifecycleCommand, Is.False);
+                Assert.That(decision.RequiresProtectedServiceLocation, Is.False);
+            });
+        }
+
+        [Test]
+        public void ExplicitRunCommandCanUseLimitedInteractiveMode()
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(
+                new[] { "run", "--allow-not-admin" }, true, false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.True);
+                Assert.That(decision.UseLimitedMode, Is.True);
+                Assert.That(decision.IsLifecycleCommand, Is.False);
+            });
+        }
+
+        [TestCase("--ALLOW-NOT-ADMIN")]
+        [TestCase("--Allow-Not-Admin")]
+        [TestCase("--allow-not-admin ")]
+        public void OptInSwitchIsCaseAndWhitespaceSensitive(string argument)
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(
+                new[] { argument }, true, false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.False);
+                Assert.That(decision.AllowNotAdministratorRequested, Is.False);
+                Assert.That(decision.Denial,
+                    Is.EqualTo(EngineCommandLineDenial.AdministratorPrivilegesRequired));
+            });
+        }
+
+        [Test]
+        public void ElevatedRunDoesNotNeedLimitedModeEvenWhenSwitchIsPresent()
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(
+                new[] { "--allow-not-admin" }, true, true);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.True);
+                Assert.That(decision.AllowNotAdministratorRequested, Is.True);
+                Assert.That(decision.UseLimitedMode, Is.False);
+            });
+        }
+
+        [TestCase("install", true)]
+        [TestCase("uninstall", false)]
+        [TestCase("start", true)]
+        [TestCase("stop", false)]
+        public void OptInCannotBeCombinedWithLifecycleCommandInEitherOrder(
+            string command, bool requiresProtectedLocation)
+        {
+            foreach (var arguments in new[]
+                     {
+                         new[] { command, "--allow-not-admin" },
+                         new[] { "--allow-not-admin", command }
+                     })
+            {
+                var decision = EngineCommandLinePolicy.Evaluate(arguments, true, false);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(decision.CanRun, Is.False);
+                    Assert.That(decision.UseLimitedMode, Is.False);
+                    Assert.That(decision.LifecycleCommand, Is.EqualTo(command));
+                    Assert.That(decision.RequiresProtectedServiceLocation,
+                        Is.EqualTo(requiresProtectedLocation));
+                    Assert.That(decision.Denial, Is.EqualTo(
+                        EngineCommandLineDenial.AllowNotAdministratorWithServiceControlCommand));
+                });
+            }
+        }
+
+        [Test]
+        public void OptInCannotInvokeTopshelfCustomServiceCommand()
+        {
+            foreach (var arguments in new[]
+                     {
+                         new[] { "command", "128", "--allow-not-admin" },
+                         new[] { "--allow-not-admin", "command", "128" }
+                     })
+            {
+                var decision = EngineCommandLinePolicy.Evaluate(
+                    arguments, true, false);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(decision.CanRun, Is.False);
+                    Assert.That(decision.UseLimitedMode, Is.False);
+                    Assert.That(decision.IsLifecycleCommand, Is.False);
+                    Assert.That(decision.LifecycleCommand, Is.Null);
+                    Assert.That(decision.Denial, Is.EqualTo(
+                        EngineCommandLineDenial.AllowNotAdministratorWithServiceControlCommand));
+                });
+            }
+
+            var unelevatedWithoutOptIn = EngineCommandLinePolicy.Evaluate(
+                new[] { "command", "128" }, true, false);
+            var elevated = EngineCommandLinePolicy.Evaluate(
+                new[] { "command", "128" }, true, true);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(unelevatedWithoutOptIn.Denial,
+                    Is.EqualTo(EngineCommandLineDenial.AdministratorPrivilegesRequired));
+                Assert.That(elevated.CanRun, Is.True);
+                Assert.That(elevated.UseLimitedMode, Is.False);
+                Assert.That(elevated.IsLifecycleCommand, Is.False);
+            });
+        }
+
+        [TestCase("install")]
+        [TestCase("uninstall")]
+        [TestCase("start")]
+        [TestCase("stop")]
+        public void LifecycleCommandsRetainTopshelfPrivilegeHandling(string command)
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(
+                new[] { command }, true, false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.True);
+                Assert.That(decision.IsLifecycleCommand, Is.True);
+                Assert.That(decision.UseLimitedMode, Is.False);
+                Assert.That(decision.LifecycleCommand, Is.EqualTo(command));
+            });
+        }
+
+        [Test]
+        public void InstallWithStartModifierRetainsTopshelfBehavior()
+        {
+            foreach (var arguments in new[]
+                     {
+                         new[] { "INSTALL", "start" },
+                         new[] { "install", "--manual", "START" }
+                     })
+            {
+                foreach (var isElevated in new[] { false, true })
+                {
+                    var decision = EngineCommandLinePolicy.Evaluate(
+                        arguments, true, isElevated);
+
+                    Assert.Multiple(() =>
+                    {
+                        Assert.That(decision.CanRun, Is.True);
+                        Assert.That(decision.IsLifecycleCommand, Is.True);
+                        Assert.That(decision.LifecycleCommand, Is.EqualTo("install"));
+                        Assert.That(decision.UseLimitedMode, Is.False);
+                        Assert.That(decision.RequiresProtectedServiceLocation, Is.True);
+                        Assert.That(decision.Denial, Is.EqualTo(EngineCommandLineDenial.None));
+                    });
+                }
+            }
+        }
+
+        [Test]
+        public void InstallWithStartModifierCannotEnableLimitedMode()
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(
+                new[] { "install", "start", "--allow-not-admin" }, true, false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.False);
+                Assert.That(decision.IsLifecycleCommand, Is.False);
+                Assert.That(decision.LifecycleCommand, Is.EqualTo("install"));
+                Assert.That(decision.UseLimitedMode, Is.False);
+                Assert.That(decision.Denial, Is.EqualTo(
+                    EngineCommandLineDenial.AllowNotAdministratorWithServiceControlCommand));
+            });
+        }
+
+        [Test]
+        public void ConflictingOperationalCommandsCannotBypassPrivilegePolicy()
+        {
+            var commandLines = new[]
+            {
+                new[] { "run", "stop", "run" },
+                new[] { "stop", "run" },
+                new[] { "install", "uninstall" },
+                new[] { "start", "install" },
+                new[] { "install", "start", "run" },
+                new[] { "install", "install", "start" },
+                new[] { "stop", "command", "128" },
+                new[] { "command", "128", "run" },
+                new[] { "RUN", "STOP", "RUN" }
+            };
+
+            foreach (var arguments in commandLines)
+            {
+                foreach (var isElevated in new[] { false, true })
+                {
+                    var decision = EngineCommandLinePolicy.Evaluate(
+                        arguments, true, isElevated);
+
+                    Assert.Multiple(() =>
+                    {
+                        Assert.That(decision.CanRun, Is.False,
+                            string.Join(" ", arguments));
+                        Assert.That(decision.UseLimitedMode, Is.False,
+                            string.Join(" ", arguments));
+                        Assert.That(decision.IsLifecycleCommand, Is.False,
+                            string.Join(" ", arguments));
+                        Assert.That(decision.Denial, Is.EqualTo(
+                            EngineCommandLineDenial.ConflictingOperationalCommands),
+                            string.Join(" ", arguments));
+                    });
+                }
+            }
+        }
+
+        [Test]
+        public void RepeatedIdenticalOperationalCommandsRetainTopshelfBehavior()
+        {
+            var stop = EngineCommandLinePolicy.Evaluate(
+                new[] { "stop", "STOP" }, true, false);
+            var unelevatedRun = EngineCommandLinePolicy.Evaluate(
+                new[] { "run", "RUN" }, true, false);
+            var elevatedRun = EngineCommandLinePolicy.Evaluate(
+                new[] { "run", "RUN" }, true, true);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(stop.CanRun, Is.True);
+                Assert.That(stop.IsLifecycleCommand, Is.True);
+                Assert.That(stop.LifecycleCommand, Is.EqualTo("stop"));
+                Assert.That(unelevatedRun.CanRun, Is.False);
+                Assert.That(unelevatedRun.Denial, Is.EqualTo(
+                    EngineCommandLineDenial.AdministratorPrivilegesRequired));
+                Assert.That(elevatedRun.CanRun, Is.True);
+                Assert.That(elevatedRun.UseLimitedMode, Is.False);
+            });
+        }
+
+        [Test]
+        public void NonInteractiveInvocationCannotEnableLimitedMode()
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(
+                new[] { "--allow-not-admin" }, false, false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.False);
+                Assert.That(decision.UseLimitedMode, Is.False);
+                Assert.That(decision.RequiresProtectedServiceLocation, Is.True);
+                Assert.That(decision.Denial, Is.EqualTo(
+                    EngineCommandLineDenial.AllowNotAdministratorRequiresInteractiveSession));
+            });
+        }
+
+        [Test]
+        public void UnelevatedNonInteractiveRunWithoutSwitchRemainsDenied()
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(new string[0], false, false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.False);
+                Assert.That(decision.UseLimitedMode, Is.False);
+                Assert.That(decision.RequiresProtectedServiceLocation, Is.True);
+                Assert.That(decision.Denial,
+                    Is.EqualTo(EngineCommandLineDenial.AdministratorPrivilegesRequired));
+            });
+        }
+
+        [Test]
+        public void ElevatedNonInteractiveServiceRunKeepsNormalMode()
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(new string[0], false, true);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.True);
+                Assert.That(decision.UseLimitedMode, Is.False);
+                Assert.That(decision.RequiresProtectedServiceLocation, Is.True);
+            });
+        }
+
+        [TestCase("help")]
+        [TestCase("--help")]
+        [TestCase("-h")]
+        [TestCase("/?")]
+        public void HelpRemainsAvailableWithoutElevation(string helpArgument)
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(
+                new[] { "--allow-not-admin", helpArgument }, true, false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.True);
+                Assert.That(decision.IsHelpCommand, Is.True);
+                Assert.That(decision.UseLimitedMode, Is.False);
+            });
+        }
+
+        [Test]
+        public void NonInteractiveHelpDoesNotRequireProtectedServiceLocation()
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(
+                new[] { "--allow-not-admin", "--help" }, false, false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.True);
+                Assert.That(decision.IsHelpCommand, Is.True);
+                Assert.That(decision.UseLimitedMode, Is.False);
+                Assert.That(decision.RequiresProtectedServiceLocation, Is.False);
+            });
+        }
+
+        [TestCase("run", "--help")]
+        [TestCase("unknown", "help")]
+        public void HelpTokenDoesNotBypassElevationForAnotherInvocation(
+            string otherArgument, string helpArgument)
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(
+                new[] { otherArgument, helpArgument }, true, false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.False);
+                Assert.That(decision.IsHelpCommand, Is.False);
+                Assert.That(decision.Denial,
+                    Is.EqualTo(EngineCommandLineDenial.AdministratorPrivilegesRequired));
+            });
+        }
+
+        [Test]
+        public void ProtectedInstallAndStartAreDetectedRegardlessOfArgumentOrder()
+        {
+            var install = EngineCommandLinePolicy.Evaluate(
+                new[] { "--instance", "portable", "INSTALL" }, true, true);
+            var start = EngineCommandLinePolicy.Evaluate(
+                new[] { "ignored", "Start" }, true, true);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(install.RequiresProtectedServiceLocation, Is.True);
+                Assert.That(install.LifecycleCommand, Is.EqualTo("install"));
+                Assert.That(start.RequiresProtectedServiceLocation, Is.True);
+                Assert.That(start.LifecycleCommand, Is.EqualTo("start"));
+            });
+        }
+    }
+}

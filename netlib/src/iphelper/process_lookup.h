@@ -24,15 +24,18 @@ namespace iphelper
          * @param id Process ID
          * @param name Process name (will be converted to uppercase)
          * @param path Full path to the process executable (will be converted to uppercase)
+         * @param resolved Whether the process owner was resolved from the system connection table
          *
          * @note All string parameters are automatically converted to uppercase and the
          *       device path is computed from the provided path.
          */
-        network_process(const unsigned long id, std::wstring name, std::wstring path)
+        network_process(const unsigned long id, std::wstring name, std::wstring path,
+            const bool resolved = true)
             : name(std::move(name)),
             path_name(std::move(path)),
             device_path_name(convert_to_device_path(path_name)),
-            id(id)
+            id(id),
+            resolved(resolved)
         {
             this->name = to_upper(this->name);
             this->path_name = to_upper(this->path_name);
@@ -112,6 +115,7 @@ namespace iphelper
         std::wstring path_name;             ///< Full path to executable (uppercase)
         std::wstring device_path_name;      ///< Device path version of path_name (uppercase)
         unsigned long id{};                 ///< Process ID
+        bool resolved{ true };              ///< True when the owning process was resolved successfully
         std::optional<uint16_t> tcp_proxy_port = std::nullopt; // Optional TCP proxy port if the process is associated with a proxy
         std::optional<uint16_t> udp_proxy_port = std::nullopt; // Optional UDP proxy port if the process is associated with a proxy
         // These cache flags can be set from match_app_name()/packet handlers running on
@@ -177,7 +181,11 @@ namespace iphelper
             std::shared_ptr<std::ostream> log_stream = nullptr)
             : netlib::log::logger<process_lookup>(log_level, std::move(log_stream))
         {
-            default_process_ = std::make_shared<network_process>(0, L"SYSTEM", L"SYSTEM");
+            // The shared default represents any connection whose owner could not be resolved
+            // (including protected, elevated, system, and other-user processes). Keep that
+            // state explicit so callers can choose a fail-safe direct-routing policy without
+            // conflating it with a genuinely resolved process named SYSTEM.
+            default_process_ = std::make_shared<network_process>(0, L"SYSTEM", L"SYSTEM", false);
             initialize_tcp_table();
             initialize_udp_table();
         }

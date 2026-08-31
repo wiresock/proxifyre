@@ -4,6 +4,18 @@ ProxiFyre reads `app-config.json` from the directory containing the resolved `Pr
 
 Configuration changes do not alter a running service. Use **Apply & Restart** in the GUI, or restart `ProxiFyreService` after editing the file manually.
 
+## Optional unelevated console mode
+
+The normal GUI and Windows service workflows remain elevated. A portable manager can instead start the engine in an explicitly limited, interactive console mode:
+
+```console
+ProxiFyre.exe --allow-not-admin
+```
+
+`--allow-not-admin` is an exact, case-sensitive opt-in and is accepted only for a normal interactive run. It cannot be combined with Topshelf's `install`, `uninstall`, `start`, or `stop` lifecycle commands or its `command` service-control verb, and it has no effect on service execution. Windows Packet Filter must already be installed and accessible; if the engine cannot open the driver, startup fails instead of silently running without redirection. The engine writes a prominent warning to the console and log whenever the limited mode is active.
+
+Process ownership lookup is best effort for a standard user. ProxiFyre can route applications it resolves normally, but Windows may deny access to protected, elevated, system, or other-user processes. Traffic with an unresolved owner remains direct, including when the configuration contains the `"appNames": [""]` catch-all. This fail-direct behavior prevents an unresolved privileged process from being mistaken for an ordinary catch-all match, but it also means the mode is **not** a strict current-user isolation or leak-prevention boundary. Use the elevated service when complete machine-wide attribution and enforcement are required.
+
 ## Complete example
 
 ```json

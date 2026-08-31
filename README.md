@@ -53,6 +53,16 @@ The installer registers the service but intentionally leaves it stopped until a 
 
 Windows 7 is supported only with Service Pack 1. A fully patched image with current servicing-stack and SHA-2 support updates, followed by a reboot after applicable updates, is the recommended baseline. Setup includes narrowly scoped compatibility handling for legacy WinINet behavior while retaining digest verification of downloaded prerequisites. See the [installer documentation](docs/installer.md#windows-7-baseline) for the exact behavior and limitations.
 
+### Optional unelevated console mode
+
+Portable launchers can opt into a limited interactive mode after Windows Packet Filter is installed:
+
+```console
+ProxiFyre.exe --allow-not-admin
+```
+
+The switch is exact and case-sensitive. This mode cannot install, start, stop, or remove the Windows service, or send custom service-control commands. Process attribution is best effort without administrator rights: traffic whose owner cannot be resolved—which may include protected, elevated, system, or other-user processes—remains direct even when a catch-all rule is configured. Treat this as a compatibility mode for selected applications, not a strict current-user security boundary. See the [configuration reference](docs/configuration.md#optional-unelevated-console-mode) for details.
+
 ## Configuration
 
 The GUI edits `app-config.json` beside `ProxiFyre.exe`. A minimal configuration looks like this:

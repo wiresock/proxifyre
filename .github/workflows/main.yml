@@ -111,6 +111,15 @@ jobs:
       - name: Build
         run: msbuild socksify.sln -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=${{ matrix.platform }} -property:Version=${{ env.VERSION }} -property:Repository=${{ github.repository }}
 
+      - name: Verify optional unelevated mode
+        shell: pwsh
+        run: ./scripts/Test-UnelevatedModeConfiguration.ps1 -Platform '${{ matrix.platform }}'
+
+      - name: Smoke-test optional unelevated command line
+        if: matrix.platform == 'x64'
+        shell: pwsh
+        run: ./scripts/Test-UnelevatedModeConfiguration.ps1 -Platform x64 -RunCommandLineSmokeTest
+
       - name: Verify UI high-DPI configuration
         if: matrix.platform == 'x64'
         shell: pwsh

@@ -214,7 +214,8 @@ namespace Socksifier
         /// Private constructor for singleton pattern.
         /// </summary>
         /// <param name="log_level">The logging level to use.</param>
-        Socksifier(LogLevel log_level);
+        /// <param name="bypassUnresolvedProcesses">Whether unresolved process owners must remain direct.</param>
+        Socksifier(LogLevel log_level, bool bypassUnresolvedProcesses);
 
     public:
         /// <summary>
@@ -233,6 +234,14 @@ namespace Socksifier
         /// <param name="log_level">The logging level to use.</param>
         /// <returns>The singleton instance.</returns>
         static Socksifier^ Socksifier::GetInstance(LogLevel log_level);
+
+        /// <summary>
+        /// Gets the singleton instance of the Socksifier with an explicit unresolved-owner policy.
+        /// </summary>
+        /// <param name="log_level">The logging level to use.</param>
+        /// <param name="bypassUnresolvedProcesses">Whether unresolved process owners must remain direct.</param>
+        /// <returns>The singleton instance.</returns>
+        static Socksifier^ Socksifier::GetInstance(LogLevel log_level, bool bypassUnresolvedProcesses);
 
         /// <summary>
         /// Gets the singleton instance of the Socksifier.
@@ -376,6 +385,11 @@ namespace Socksifier
         /// Pointer to the unmanaged implementation.
         /// </summary>
         socksify_unmanaged* unmanaged_ptr_{ nullptr };
+
+        /// <summary>
+        /// Immutable unresolved-owner policy captured when this singleton was constructed.
+        /// </summary>
+        bool bypass_unresolved_processes_{ false };
 
         /// <summary>
         /// Event used to signal log events to the logging thread.
