@@ -52,9 +52,9 @@ Windows Packet Filter and the architecture-matched Visual C++ runtime are target
    ```
    - Takes: 2-5 minutes. Set timeout to 10+ minutes.
 
-2. **Build the solution**. `Directory.Build.props` is the single repository release-version source and currently declares `2.5.2`; normal local builds inherit it. An explicit version is appropriate for release verification and controlled tests, but it must match the repository value for a release:
+2. **Build the solution**. `Directory.Build.props` is the single repository release-version source and currently declares `2.6.0`; normal local builds inherit it. An explicit version is appropriate for release verification and controlled tests, but it must match the repository value for a release:
    ```cmd
-   msbuild socksify.sln -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=x64 -property:Version=2.5.2
+   msbuild socksify.sln -t:rebuild -verbosity:minimal -property:Configuration=Release -property:Platform=x64 -property:Version=2.6.0
    ```
    - **NEVER CANCEL**: Build takes 5-8 minutes on average. Set timeout to 15+ minutes.
    - For other platforms, replace `x64` with `x86` or `ARM64`
@@ -68,9 +68,9 @@ Windows Packet Filter and the architecture-matched Visual C++ runtime are target
 
 4. **Build and validate the MSI and online setup** after the isolated restores and solution build:
    ```powershell
-   pwsh -File scripts\Build-Installer.ps1 -Platform x64 -Version 2.5.2 -NoRestore
+   pwsh -File scripts\Build-Installer.ps1 -Platform x64 -Version 2.6.0 -NoRestore
    ```
-   The release tag must be exactly `v2.5.2` when `Directory.Build.props` declares `2.5.2`.
+   The release tag must be exactly `v2.6.0` when `Directory.Build.props` declares `2.6.0`.
 
 ## Running the Application (Windows Only)
 
