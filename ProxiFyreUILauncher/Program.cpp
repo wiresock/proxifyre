@@ -49,6 +49,66 @@ namespace
     constexpr wchar_t kTrustedInstallerSid[] =
         L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
 
+    std::wstring FormatAccessMask(ACCESS_MASK mask)
+    {
+        wchar_t hexadecimal[16]{};
+        swprintf_s(hexadecimal, L"0x%08lX", static_cast<unsigned long>(mask));
+
+        struct NamedRight
+        {
+            ACCESS_MASK mask;
+            const wchar_t* name;
+        };
+        constexpr NamedRight namedRights[] = {
+            { GENERIC_ALL, L"GENERIC_ALL" },
+            { GENERIC_WRITE, L"GENERIC_WRITE" },
+            { DELETE, L"DELETE" },
+            { WRITE_DAC, L"WRITE_DAC" },
+            { WRITE_OWNER, L"WRITE_OWNER" },
+            { FILE_DELETE_CHILD, L"FILE_DELETE_CHILD" },
+            { FILE_WRITE_DATA, L"FILE_WRITE_DATA/FILE_ADD_FILE" },
+            { FILE_APPEND_DATA, L"FILE_APPEND_DATA/FILE_ADD_SUBDIRECTORY" },
+            { FILE_WRITE_EA, L"FILE_WRITE_EA" },
+            { FILE_WRITE_ATTRIBUTES, L"FILE_WRITE_ATTRIBUTES" }
+        };
+
+        std::wstring result(hexadecimal);
+        std::wstring names;
+        for (const auto& right : namedRights)
+        {
+            if ((mask & right.mask) == 0)
+                continue;
+            if (!names.empty())
+                names += L", ";
+            names += right.name;
+        }
+        if (!names.empty())
+        {
+            result += L" (";
+            result += names;
+            result += L")";
+        }
+        return result;
+    }
+
+    std::wstring FormatSid(PSID identity)
+    {
+        if (identity == nullptr || !IsValidSid(identity))
+            return L"<missing or invalid>";
+
+        LPWSTR value = nullptr;
+        if (!ConvertSidToStringSidW(identity, &value) || value == nullptr)
+            return L"<unavailable>";
+        const std::wstring result(value);
+        LocalFree(value);
+        return result;
+    }
+
+    std::wstring RejectedPathPrefix(const std::wstring& path)
+    {
+        return L"Rejected path: " + path + L"\r\nReason: ";
+    }
+
     bool IsTrustedMachineIdentity(PSID identity)
     {
         if (identity == nullptr || !IsValidSid(identity))
@@ -134,9 +194,11 @@ namespace
         return true;
     }
 
-    bool HasProtectedSecurity(HANDLE handle, ACCESS_MASK dangerousRights,
-        bool includeInheritedChildRights)
+    bool HasProtectedSecurity(HANDLE handle, const std::wstring& path,
+        ACCESS_MASK dangerousRights, bool includeInheritedChildRights,
+        std::wstring& failureReason)
     {
+        failureReason.clear();
         PSID owner = nullptr;
         PACL dacl = nullptr;
         PSECURITY_DESCRIPTOR descriptor = nullptr;
@@ -144,9 +206,28 @@ namespace
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             &owner, nullptr, &dacl, nullptr, &descriptor);
         if (result != ERROR_SUCCESS || descriptor == nullptr)
+        {
+            const DWORD error = result == ERROR_SUCCESS ? ERROR_INVALID_SECURITY_DESCR : result;
+            failureReason = RejectedPathPrefix(path) +
+                L"Windows could not read a valid owner and DACL (Win32 error " +
+                std::to_wstring(error) + L").";
+            if (descriptor != nullptr)
+                LocalFree(descriptor);
             return false;
+        }
 
-        bool protectedSecurity = IsTrustedMachineIdentity(owner) && dacl != nullptr;
+        bool protectedSecurity = IsTrustedMachineIdentity(owner);
+        if (!protectedSecurity)
+        {
+            failureReason = RejectedPathPrefix(path) + L"owner SID " + FormatSid(owner) +
+                L" is not a trusted machine identity.";
+        }
+        else if (dacl == nullptr)
+        {
+            protectedSecurity = false;
+            failureReason = RejectedPathPrefix(path) +
+                L"the object has no discretionary access-control list.";
+        }
         if (protectedSecurity)
         {
             for (DWORD index = 0; index < dacl->AceCount; ++index)
@@ -155,6 +236,9 @@ namespace
                 if (!GetAce(dacl, index, &rawAce) || rawAce == nullptr)
                 {
                     protectedSecurity = false;
+                    failureReason = RejectedPathPrefix(path) +
+                        L"the DACL contains an unreadable ACE at index " +
+                        std::to_wstring(index) + L".";
                     break;
                 }
 
@@ -168,12 +252,25 @@ namespace
                 if (!TryGetAllowedAce(header, mask, identity))
                 {
                     protectedSecurity = false;
+                    failureReason = RejectedPathPrefix(path) +
+                        L"the DACL contains an unsupported or malformed ACE at index " +
+                        std::to_wstring(index) + L".";
                     break;
                 }
                 if (identity != nullptr && (mask & dangerousRights) != 0 &&
                     !IsTrustedMachineIdentity(identity))
                 {
                     protectedSecurity = false;
+                    failureReason = RejectedPathPrefix(path) +
+                        L"an untrusted allow ACE grants prohibited mutation access.\r\n"
+                        L"Trustee SID: " + FormatSid(identity) +
+                        L"\r\nACE mask: " + FormatAccessMask(mask) +
+                        L"\r\nProhibited rights: " +
+                        FormatAccessMask(mask & dangerousRights) +
+                        L"\r\nACE origin: " +
+                        ((header->AceFlags & INHERITED_ACE) != 0
+                            ? std::wstring(L"inherited")
+                            : std::wstring(L"explicit"));
                     break;
                 }
             }
@@ -227,8 +324,10 @@ namespace
                 CloseHandle(*iterator);
         }
 
-        bool OpenDirectoryChain(const std::wstring& directory)
+        bool OpenDirectoryChain(const std::wstring& directory,
+            std::wstring& failureReason)
         {
+            failureReason.clear();
             if (directory.size() < 3 || directory[1] != L':' ||
                 (directory[2] != L'\\' && directory[2] != L'/'))
                 return false;
@@ -245,7 +344,7 @@ namespace
 
             std::wstring current = root;
 #ifndef _DEBUG
-            if (!OpenDirectory(current, directory.size() == root.size()))
+            if (!OpenDirectory(current, directory.size() == root.size(), failureReason))
                 return false;
 #endif
             size_t position = 3;
@@ -265,7 +364,7 @@ namespace
                     current.push_back(L'\\');
                 current.append(component);
                 const bool isPayloadDirectory = separator == std::wstring::npos;
-                if (!OpenDirectory(current, isPayloadDirectory))
+                if (!OpenDirectory(current, isPayloadDirectory, failureReason))
                     return false;
                 if (separator == std::wstring::npos)
                     break;
@@ -274,7 +373,8 @@ namespace
             return true;
         }
 
-        bool Open(const std::wstring& path, HANDLE& handle)
+        bool Open(const std::wstring& path, HANDLE& handle,
+            std::wstring& failureReason)
         {
             handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                 OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
@@ -291,12 +391,15 @@ namespace
                 return false;
             }
 #ifndef _DEBUG
-            if (!HasProtectedSecurity(handle, kPayloadDangerousRights, false))
+            if (!HasProtectedSecurity(handle, path, kPayloadDangerousRights, false,
+                    failureReason))
             {
                 CloseHandle(handle);
                 handle = INVALID_HANDLE_VALUE;
                 return false;
             }
+#else
+            (void)failureReason;
 #endif
             handles_.push_back(handle);
             return true;
@@ -328,7 +431,8 @@ namespace
             return false;
         }
 
-        bool OpenDirectory(const std::wstring& path, bool isPayloadDirectory)
+        bool OpenDirectory(const std::wstring& path, bool isPayloadDirectory,
+            std::wstring& failureReason)
         {
             const HANDLE handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | READ_CONTROL,
                 FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
@@ -348,13 +452,15 @@ namespace
             const ACCESS_MASK dangerousRights = isPayloadDirectory
                 ? kPayloadDangerousRights
                 : kAncestorDangerousRights;
-            if (!HasProtectedSecurity(handle, dangerousRights, isPayloadDirectory))
+            if (!HasProtectedSecurity(handle, path, dangerousRights, isPayloadDirectory,
+                    failureReason))
             {
                 CloseHandle(handle);
                 return false;
             }
 #else
             (void)isPayloadDirectory;
+            (void)failureReason;
 #endif
             handles_.push_back(handle);
             return true;
@@ -624,12 +730,14 @@ namespace
     }
 
     bool VerifyAndLeasePayload(const std::wstring& executablePath,
-        const std::wstring& directory, LeaseSet& leases, std::wstring& managedAssembly)
+        const std::wstring& directory, LeaseSet& leases, std::wstring& managedAssembly,
+        std::wstring& failureReason)
     {
+        failureReason.clear();
         // Pin every normal directory component without delete sharing before opening any
         // payload path. Otherwise a user-writable junction can be redirected after validation
         // and before the CLR reopens the managed assembly by name.
-        if (!leases.OpenDirectoryChain(directory))
+        if (!leases.OpenDirectoryChain(directory, failureReason))
             return false;
         const auto executableNameOffset = executablePath.find_last_of(L"\\/");
         const std::wstring executableName = executableNameOffset == std::wstring::npos
@@ -643,7 +751,7 @@ namespace
         // its directory entry as well so a permissive per-file ACL cannot bypass a protected
         // parent directory.
         HANDLE launcherHandle = INVALID_HANDLE_VALUE;
-        if (!leases.Open(executablePath, launcherHandle))
+        if (!leases.Open(executablePath, launcherHandle, failureReason))
             return false;
 #endif
         // ProxiFyre releases are deliberately unsigned. Require and lease the complete managed
@@ -656,7 +764,7 @@ namespace
         {
             const std::wstring path = JoinPath(directory, name);
             HANDLE handle = INVALID_HANDLE_VALUE;
-            if (!leases.Open(path, handle))
+            if (!leases.Open(path, handle, failureReason))
                 return false;
             if (wcscmp(name, L"ProxiFyreUI.Managed.dll") == 0)
                 managedAssembly = path;
@@ -664,7 +772,7 @@ namespace
 
         const std::wstring configuration = JoinPath(directory, L"ProxiFyreUI.exe.config");
         HANDLE configurationHandle = INVALID_HANDLE_VALUE;
-        if (!leases.Open(configuration, configurationHandle))
+        if (!leases.Open(configuration, configurationHandle, failureReason))
             return false;
 #ifndef _DEBUG
         const Sha256 sha256;
@@ -780,6 +888,23 @@ namespace
         MessageBoxW(nullptr, message, L"ProxiFyre UI", MB_OK | MB_ICONERROR | MB_TASKMODAL);
     }
 
+    void ShowPayloadVerificationFailure(const std::wstring& details)
+    {
+#ifdef _DEBUG
+        std::wstring message =
+            L"The ProxiFyre UI payload is incomplete, contains an unexpected executable module, or failed its fixed integrity checks.";
+#else
+        std::wstring message =
+            L"The ProxiFyre UI payload is incomplete, contains an unexpected executable module, failed its fixed integrity checks, or is not in a protected per-machine directory. Install it with the official setup. A Release ZIP must be placed in an administrator-protected fixed-volume directory before the elevated GUI can run.";
+#endif
+        if (!details.empty())
+        {
+            message += L"\r\n\r\nVerification details:\r\n";
+            message += details;
+        }
+        ShowFailure(message.c_str());
+    }
+
     void ShowManagedHostFailure(ManagedUiStage stage, HRESULT result)
     {
         wchar_t resultText[16]{};
@@ -835,14 +960,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     std::wstring directory;
     LeaseSet leases;
     std::wstring managedAssembly;
+    std::wstring verificationFailure;
     if (executablePath.empty() || !GetExecutableDirectory(executablePath, directory) ||
-        !VerifyAndLeasePayload(executablePath, directory, leases, managedAssembly))
+        !VerifyAndLeasePayload(executablePath, directory, leases, managedAssembly,
+            verificationFailure))
     {
-#ifdef _DEBUG
-        ShowFailure(L"The ProxiFyre UI payload is incomplete, contains an unexpected executable module, or failed its fixed integrity checks.");
-#else
-        ShowFailure(L"The ProxiFyre UI payload is incomplete, contains an unexpected executable module, failed its fixed integrity checks, or is not in a protected per-machine directory. Install it with the official setup. A Release ZIP must be placed in an administrator-protected fixed-volume directory before the elevated GUI can run.");
-#endif
+        ShowPayloadVerificationFailure(verificationFailure);
         return ERROR_INVALID_DATA;
     }
 

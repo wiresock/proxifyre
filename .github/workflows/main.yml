@@ -116,6 +116,11 @@ jobs:
         shell: pwsh
         run: ./scripts/Test-UiHighDpiConfiguration.ps1
 
+      - name: Verify UI launcher security diagnostics
+        if: matrix.platform == 'x64'
+        shell: pwsh
+        run: ./scripts/Test-UiLauncherSecurityDiagnostics.ps1 -Platform x64
+
       - name: Run managed tests
         if: matrix.platform == 'x64'
         shell: pwsh
