@@ -55,6 +55,7 @@ namespace ProxiFyre.Configuration
             var serviceControlCommand = FindKnownArgument(arguments, ServiceControlCommands);
             var operationalCommandCount = CountDistinctKnownArguments(
                 arguments, OperationalCommands);
+            var isInstallAndStartCommand = IsInstallAndStartInvocation(arguments);
             var isHelpCommand = IsHelpOnlyInvocation(arguments);
             var allowNotAdministratorRequested = ContainsExactArgument(arguments,
                 AllowNotAdministratorSwitch);
@@ -66,8 +67,9 @@ namespace ProxiFyre.Configuration
 
             // Topshelf applies recognized verbs in argument order, so the final verb can replace
             // an earlier lifecycle command. Reject ambiguous command lines before the lifecycle
-            // privilege exemption can be used to reach a later interactive `run` verb.
-            if (operationalCommandCount > 1)
+            // privilege exemption can be used to reach a later interactive `run` verb. The one
+            // documented composition is `install start`, which installs and then starts the service.
+            if (operationalCommandCount > 1 && !isInstallAndStartCommand)
             {
                 return new EngineCommandLineDecision(lifecycleCommand, false,
                     isHelpCommand, allowNotAdministratorRequested, false,
@@ -167,6 +169,34 @@ namespace ProxiFyre.Configuration
             }
 
             return count;
+        }
+
+        private static bool IsInstallAndStartInvocation(string[] arguments)
+        {
+            var operationalCommandIndex = 0;
+            foreach (var argument in arguments)
+            {
+                if (FindKnownArgument(new[] { argument }, OperationalCommands) == null)
+                    continue;
+
+                if (operationalCommandIndex == 0 &&
+                    string.Equals(argument, "install", StringComparison.OrdinalIgnoreCase))
+                {
+                    operationalCommandIndex++;
+                    continue;
+                }
+
+                if (operationalCommandIndex == 1 &&
+                    string.Equals(argument, "start", StringComparison.OrdinalIgnoreCase))
+                {
+                    operationalCommandIndex++;
+                    continue;
+                }
+
+                return false;
+            }
+
+            return operationalCommandIndex == 2;
         }
 
         private static bool IsHelpOnlyInvocation(string[] arguments)

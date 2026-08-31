@@ -166,6 +166,50 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
+        public void InstallWithStartModifierRetainsTopshelfBehavior()
+        {
+            foreach (var arguments in new[]
+                     {
+                         new[] { "INSTALL", "start" },
+                         new[] { "install", "--manual", "START" }
+                     })
+            {
+                foreach (var isElevated in new[] { false, true })
+                {
+                    var decision = EngineCommandLinePolicy.Evaluate(
+                        arguments, true, isElevated);
+
+                    Assert.Multiple(() =>
+                    {
+                        Assert.That(decision.CanRun, Is.True);
+                        Assert.That(decision.IsLifecycleCommand, Is.True);
+                        Assert.That(decision.LifecycleCommand, Is.EqualTo("install"));
+                        Assert.That(decision.UseLimitedMode, Is.False);
+                        Assert.That(decision.RequiresProtectedServiceLocation, Is.True);
+                        Assert.That(decision.Denial, Is.EqualTo(EngineCommandLineDenial.None));
+                    });
+                }
+            }
+        }
+
+        [Test]
+        public void InstallWithStartModifierCannotEnableLimitedMode()
+        {
+            var decision = EngineCommandLinePolicy.Evaluate(
+                new[] { "install", "start", "--allow-not-admin" }, true, false);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(decision.CanRun, Is.False);
+                Assert.That(decision.IsLifecycleCommand, Is.False);
+                Assert.That(decision.LifecycleCommand, Is.EqualTo("install"));
+                Assert.That(decision.UseLimitedMode, Is.False);
+                Assert.That(decision.Denial, Is.EqualTo(
+                    EngineCommandLineDenial.AllowNotAdministratorWithServiceControlCommand));
+            });
+        }
+
+        [Test]
         public void ConflictingOperationalCommandsCannotBypassPrivilegePolicy()
         {
             var commandLines = new[]
@@ -173,6 +217,9 @@ namespace ProxiFyre.Tests
                 new[] { "run", "stop", "run" },
                 new[] { "stop", "run" },
                 new[] { "install", "uninstall" },
+                new[] { "start", "install" },
+                new[] { "install", "start", "run" },
+                new[] { "install", "install", "start" },
                 new[] { "stop", "command", "128" },
                 new[] { "command", "128", "run" },
                 new[] { "RUN", "STOP", "RUN" }
