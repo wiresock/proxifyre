@@ -128,6 +128,63 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
+        public void ConflictingOperationalCommandsCannotBypassPrivilegePolicy()
+        {
+            var commandLines = new[]
+            {
+                new[] { "run", "stop", "run" },
+                new[] { "stop", "run" },
+                new[] { "install", "uninstall" },
+                new[] { "RUN", "STOP", "RUN" }
+            };
+
+            foreach (var arguments in commandLines)
+            {
+                foreach (var isElevated in new[] { false, true })
+                {
+                    var decision = EngineCommandLinePolicy.Evaluate(
+                        arguments, true, isElevated);
+
+                    Assert.Multiple(() =>
+                    {
+                        Assert.That(decision.CanRun, Is.False,
+                            string.Join(" ", arguments));
+                        Assert.That(decision.UseLimitedMode, Is.False,
+                            string.Join(" ", arguments));
+                        Assert.That(decision.IsLifecycleCommand, Is.False,
+                            string.Join(" ", arguments));
+                        Assert.That(decision.Denial, Is.EqualTo(
+                            EngineCommandLineDenial.ConflictingOperationalCommands),
+                            string.Join(" ", arguments));
+                    });
+                }
+            }
+        }
+
+        [Test]
+        public void RepeatedIdenticalOperationalCommandsRetainTopshelfBehavior()
+        {
+            var stop = EngineCommandLinePolicy.Evaluate(
+                new[] { "stop", "STOP" }, true, false);
+            var unelevatedRun = EngineCommandLinePolicy.Evaluate(
+                new[] { "run", "RUN" }, true, false);
+            var elevatedRun = EngineCommandLinePolicy.Evaluate(
+                new[] { "run", "RUN" }, true, true);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(stop.CanRun, Is.True);
+                Assert.That(stop.IsLifecycleCommand, Is.True);
+                Assert.That(stop.LifecycleCommand, Is.EqualTo("stop"));
+                Assert.That(unelevatedRun.CanRun, Is.False);
+                Assert.That(unelevatedRun.Denial, Is.EqualTo(
+                    EngineCommandLineDenial.AdministratorPrivilegesRequired));
+                Assert.That(elevatedRun.CanRun, Is.True);
+                Assert.That(elevatedRun.UseLimitedMode, Is.False);
+            });
+        }
+
+        [Test]
         public void NonInteractiveInvocationCannotEnableLimitedMode()
         {
             var decision = EngineCommandLinePolicy.Evaluate(

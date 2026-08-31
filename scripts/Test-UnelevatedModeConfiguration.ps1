@@ -145,6 +145,12 @@ if ($RunCommandLineSmokeTest) {
         throw "Topshelf rejected the opt-in help invocation with exit code $LASTEXITCODE. $helpOutput"
     }
 
+    $conflictingOutput = & $enginePath 'run' 'stop' 'run' 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 87) {
+        throw ('Conflicting Topshelf verbs bypassed the privilege policy; expected ' +
+            "ERROR_INVALID_PARAMETER (87), got $LASTEXITCODE. $conflictingOutput")
+    }
+
     $invalidOutput = & $enginePath 'install' '--allow-not-admin' 2>&1 | Out-String
     if ($LASTEXITCODE -ne 87) {
         throw ('The opt-in switch reached a service lifecycle command; expected ' +

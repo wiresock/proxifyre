@@ -19,6 +19,15 @@ namespace ProxiFyre.Configuration
             "stop"
         };
 
+        private static readonly string[] OperationalCommands =
+        {
+            "run",
+            "install",
+            "uninstall",
+            "start",
+            "stop"
+        };
+
         private static readonly string[] HelpCommands =
         {
             "help",
@@ -33,6 +42,8 @@ namespace ProxiFyre.Configuration
             arguments = arguments ?? Array.Empty<string>();
 
             var lifecycleCommand = FindKnownArgument(arguments, LifecycleCommands);
+            var operationalCommandCount = CountDistinctKnownArguments(
+                arguments, OperationalCommands);
             var isHelpCommand = IsHelpOnlyInvocation(arguments);
             var allowNotAdministratorRequested = ContainsExactArgument(arguments,
                 AllowNotAdministratorSwitch);
@@ -41,6 +52,17 @@ namespace ProxiFyre.Configuration
                 (string.Equals(lifecycleCommand, "install", StringComparison.OrdinalIgnoreCase) ||
                  string.Equals(lifecycleCommand, "start", StringComparison.OrdinalIgnoreCase) ||
                  !isUserInteractive);
+
+            // Topshelf applies recognized verbs in argument order, so the final verb can replace
+            // an earlier lifecycle command. Reject ambiguous command lines before the lifecycle
+            // privilege exemption can be used to reach a later interactive `run` verb.
+            if (operationalCommandCount > 1)
+            {
+                return new EngineCommandLineDecision(lifecycleCommand, false,
+                    isHelpCommand, allowNotAdministratorRequested, false,
+                    requiresProtectedServiceLocation,
+                    EngineCommandLineDenial.ConflictingOperationalCommands);
+            }
 
             if (allowNotAdministratorRequested && lifecycleCommand != null)
             {
@@ -110,6 +132,32 @@ namespace ProxiFyre.Configuration
             return null;
         }
 
+        private static int CountDistinctKnownArguments(
+            string[] arguments, string[] expectedArguments)
+        {
+            var count = 0;
+            var foundArguments = new bool[expectedArguments.Length];
+            foreach (var argument in arguments)
+            {
+                for (var index = 0; index < expectedArguments.Length; index++)
+                {
+                    if (!string.Equals(argument, expectedArguments[index],
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    if (!foundArguments[index])
+                    {
+                        foundArguments[index] = true;
+                        count++;
+                    }
+
+                    break;
+                }
+            }
+
+            return count;
+        }
+
         private static bool IsHelpOnlyInvocation(string[] arguments)
         {
             var foundHelp = false;
@@ -138,6 +186,7 @@ namespace ProxiFyre.Configuration
     {
         None,
         AdministratorPrivilegesRequired,
+        ConflictingOperationalCommands,
         AllowNotAdministratorWithLifecycleCommand,
         AllowNotAdministratorRequiresInteractiveSession
     }

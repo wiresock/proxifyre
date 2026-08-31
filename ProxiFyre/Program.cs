@@ -443,6 +443,9 @@ namespace ProxiFyre
         {
             switch (denial)
             {
+                case EngineCommandLineDenial.ConflictingOperationalCommands:
+                    return "ProxiFyre received more than one operational command. Specify only one " +
+                           "of run, install, uninstall, start, or stop.";
                 case EngineCommandLineDenial.AllowNotAdministratorWithLifecycleCommand:
                     return "--allow-not-admin is available only for an interactive console run; " +
                            "it cannot be combined with install, uninstall, start, or stop.";
