@@ -10,15 +10,20 @@
 /// Sets up the unmanaged core, log event, and starts the logging thread.
 /// </summary>
 /// <param name="log_level">The logging level to use.</param>
-Socksifier::Socksifier::Socksifier(LogLevel log_level)
+/// <param name="bypassUnresolvedProcesses">Whether unresolved process owners must remain direct.</param>
+Socksifier::Socksifier::Socksifier(LogLevel log_level, const bool bypassUnresolvedProcesses)
 {
+    bypass_unresolved_processes_ = bypassUnresolvedProcesses;
+
     // Default poll interval (ms). Without this the field is 0 and log_thread() busy-spins
     // (WaitOne(0)) until the managed side assigns LogEventInterval.
     log_event_interval_ = 1000;
 
     try
     {
-        unmanaged_ptr_ = socksify_unmanaged::get_instance(static_cast<log_level_mx>(log_level));
+        unmanaged_ptr_ = socksify_unmanaged::get_instance(
+            static_cast<log_level_mx>(log_level),
+            bypassUnresolvedProcesses);
     }
     catch (const std::exception& exception)
     {
@@ -158,13 +163,25 @@ void Socksifier::Socksifier::SetLogLimit(const UInt32 value)
 /// <returns>The singleton instance.</returns>
 Socksifier::Socksifier^ Socksifier::Socksifier::GetInstance(const LogLevel log_level)
 {
-    if (instance_ == nullptr)
-    {
-        msclr::lock l(Socksifier::typeid);
+    return GetInstance(log_level, false);
+}
 
-        if (instance_ == nullptr)
-            instance_ = gcnew Socksifier(log_level);
-    }
+/// <summary>
+/// Gets the current singleton with an explicit unresolved-owner policy, creating it if needed.
+/// </summary>
+/// <param name="log_level">The logging level to use.</param>
+/// <param name="bypassUnresolvedProcesses">Whether unresolved process owners must remain direct.</param>
+/// <returns>The singleton instance.</returns>
+Socksifier::Socksifier^ Socksifier::Socksifier::GetInstance(const LogLevel log_level,
+    const bool bypassUnresolvedProcesses)
+{
+    msclr::lock l(Socksifier::typeid);
+
+    if (instance_ == nullptr)
+        instance_ = gcnew Socksifier(log_level, bypassUnresolvedProcesses);
+    else if (instance_->bypass_unresolved_processes_ != bypassUnresolvedProcesses)
+        throw gcnew InvalidOperationException(
+            "The Socksifier singleton is already initialized with a different unresolved-owner policy.");
 
     return instance_;
 }

@@ -1,4 +1,7 @@
 #pragma once
+
+#include "process_routing_policy.h"
+
 namespace proxy
 {
     /**
@@ -358,6 +361,16 @@ namespace proxy
         std::shared_ptr<std::ostream> pcap_log_stream_;
 
         /**
+         * @brief When true, traffic whose owning process could not be resolved is never
+         *        matched to a proxy and therefore remains direct.
+         *
+         * This is used by the explicitly requested limited/unelevated console mode. The
+         * default is false so service and elevated operation retain the existing behavior,
+         * including catch-all mappings for the synthetic unresolved process.
+         */
+        bool bypass_unresolved_processes_{ false };
+
+        /**
         * @brief Atomic boolean to track the active status of the router.
         */
         std::atomic_bool is_active_{ false };
@@ -515,15 +528,19 @@ namespace proxy
          *                  For instance, if log_level > netlib::log::log_level::debug, the router creates a pcap file for capturing network packets.
          * @param log_stream Optional reference to an output stream for logging.
          * @param pcap_log_stream Optional reference to an output stream for pcap logging.
+         * @param bypass_unresolved_processes When true, traffic with an unresolved process
+         *        owner is kept direct instead of being eligible for application matching.
          */
         explicit socks_local_router(const log_level log_level = log_level::error,
                                     std::shared_ptr<std::ostream> log_stream = nullptr,
-                                    std::shared_ptr<std::ostream> pcap_log_stream = nullptr) :
+                                    std::shared_ptr<std::ostream> pcap_log_stream = nullptr,
+                                    const bool bypass_unresolved_processes = false) :
                                     logger(log_level, std::move(log_stream)),
                                     static_filters_{ true, true, log_level_, log_stream_ },
                                     process_lookup_v4_{ log_level_, log_stream_ },
                                     process_lookup_v6_{ log_level_, log_stream_ },
-                                    pcap_log_stream_(std::move(pcap_log_stream))
+                                    pcap_log_stream_(std::move(pcap_log_stream)),
+                                    bypass_unresolved_processes_(bypass_unresolved_processes)
         {
             using namespace std::string_literals;
 
@@ -1788,6 +1805,13 @@ namespace proxy
         bool match_app_name(const std::wstring& app, const std::shared_ptr<iphelper::network_process>& process) const
         {
             if (!process) return false;
+
+            // In explicitly enabled limited/unelevated mode, process attribution is
+            // best-effort. Never let an unresolved synthetic owner match either a named
+            // application or the empty catch-all pattern; its traffic must remain direct.
+            // The flag defaults to false, preserving the existing elevated/service behavior.
+            if (should_bypass_unresolved_process(bypass_unresolved_processes_, process->resolved))
+                return false;
 
             // Exclude the current process by process ID (not cached since it's a quick check)
             if (process->id == ::GetCurrentProcessId())

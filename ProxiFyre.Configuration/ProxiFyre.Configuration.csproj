@@ -73,6 +73,7 @@
     <Compile Include="ConfigurationSerializer.cs" />
     <Compile Include="ConfigurationValidator.cs" />
     <Compile Include="ConfigurationValueParser.cs" />
+    <Compile Include="EngineCommandLinePolicy.cs" />
     <Compile Include="EndpointParser.cs" />
     <Compile Include="LogMessageLevelParser.cs" />
     <Compile Include="Models.cs" />

@@ -26,8 +26,9 @@ class socksify_unmanaged  // NOLINT(clang-diagnostic-padded)
     /**
      * @brief Constructs a socksify_unmanaged instance with the specified log level.
      * @param log_level The logging level to use for the proxy gateway.
+     * @param bypass_unresolved_processes Whether unresolved process owners must remain direct.
      */
-    explicit socksify_unmanaged(log_level_mx log_level);
+    explicit socksify_unmanaged(log_level_mx log_level, bool bypass_unresolved_processes);
 
 public:
     /**
@@ -44,9 +45,11 @@ public:
     /**
      * @brief Gets the singleton instance of socksify_unmanaged.
      * @param log_level The logging level to use (default: log_level_mx::all).
+     * @param bypass_unresolved_processes Whether unresolved process owners must remain direct.
      * @return Pointer to the singleton instance.
      */
-    static socksify_unmanaged* get_instance(log_level_mx log_level = log_level_mx::all);
+    static socksify_unmanaged* get_instance(log_level_mx log_level = log_level_mx::all,
+        bool bypass_unresolved_processes = false);
 
     /**
      * @brief Starts the proxy gateway and network filter.
@@ -178,4 +181,5 @@ private:
     /// </summary>
     std::optional<std::ofstream> pcap_log_file_;
     log_level_mx log_level_{ log_level_mx::error }; ///< The current log level.
+    const bool bypass_unresolved_processes_{ false }; ///< Immutable unresolved-owner routing policy.
 };

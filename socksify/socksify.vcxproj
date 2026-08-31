@@ -266,6 +266,7 @@
     <ClInclude Include="..\netlib\src\proxy\schannel_tls_stream.h" />
     <ClInclude Include="..\netlib\src\proxy\socks5_tcp_proxy_socket.h" />
     <ClInclude Include="..\netlib\src\proxy\socks5_udp_proxy_socket.h" />
+    <ClInclude Include="..\netlib\src\proxy\process_routing_policy.h" />
     <ClInclude Include="..\netlib\src\proxy\socks5_common.h" />
     <ClInclude Include="..\netlib\src\proxy\socks_local_router.h" />
     <ClInclude Include="..\netlib\src\proxy\tcp_proxy_server.h" />

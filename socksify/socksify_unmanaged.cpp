@@ -12,10 +12,13 @@ struct mutex_impl
  * @brief Constructs the socksify_unmanaged singleton instance.
  * Initializes Winsock, logging, and the SOCKS5 local router.
  * @param log_level The logging level to use for the proxy gateway.
+ * @param bypass_unresolved_processes Whether unresolved process owners must remain direct.
  * @throws std::runtime_error if WSAStartup or pcap log file creation fails.
  */
-socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
-    log_level_{ log_level }
+socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level,
+    const bool bypass_unresolved_processes) :
+    log_level_{ log_level },
+    bypass_unresolved_processes_{ bypass_unresolved_processes }
 {
     using namespace std::string_literals;
 
@@ -133,7 +136,8 @@ socksify_unmanaged::socksify_unmanaged(const log_level_mx log_level) :
         pcap_log_file_ ?
         std::shared_ptr<std::ostream>(&pcap_log_file_.value(), [](std::ostream*) {
             // No-op deleter - the stream is owned by the optional member variable
-            }) : nullptr
+            }) : nullptr,
+        bypass_unresolved_processes
     );
 
     if (!proxy_)
@@ -160,11 +164,16 @@ socksify_unmanaged::~socksify_unmanaged()
 /**
  * @brief Gets the singleton instance of socksify_unmanaged.
  * @param log_level The logging level to use (default: log_level_mx::all).
+ * @param bypass_unresolved_processes Whether unresolved process owners must remain direct.
  * @return Pointer to the singleton instance.
  */
-socksify_unmanaged* socksify_unmanaged::get_instance(const log_level_mx log_level)
+socksify_unmanaged* socksify_unmanaged::get_instance(const log_level_mx log_level,
+    const bool bypass_unresolved_processes)
 {
-    static socksify_unmanaged inst(log_level); // NOLINT(clang-diagnostic-exit-time-destructors)
+    static socksify_unmanaged inst(log_level, bypass_unresolved_processes); // NOLINT(clang-diagnostic-exit-time-destructors)
+    if (inst.bypass_unresolved_processes_ != bypass_unresolved_processes)
+        throw std::logic_error(
+            "The unmanaged Socksifier singleton is already initialized with a different unresolved-owner policy.");
     return &inst;
 }
 

@@ -82,6 +82,7 @@
     <Compile Include="ConfigurationValidatorTests.cs" />
     <Compile Include="DiagnosticsBuilderTests.cs" />
     <Compile Include="EngineLocatorTests.cs" />
+    <Compile Include="EngineCommandLinePolicyTests.cs" />
     <Compile Include="HighDpiLayoutTests.cs" />
     <Compile Include="InvalidCertificateConfirmationPolicyTests.cs" />
     <Compile Include="LogTailerTests.cs" />
