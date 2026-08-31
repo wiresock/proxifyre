@@ -445,10 +445,11 @@ namespace ProxiFyre
             {
                 case EngineCommandLineDenial.ConflictingOperationalCommands:
                     return "ProxiFyre received more than one operational command. Specify only one " +
-                           "of run, install, uninstall, start, or stop.";
-                case EngineCommandLineDenial.AllowNotAdministratorWithLifecycleCommand:
+                           "of run, install, uninstall, start, stop, or command.";
+                case EngineCommandLineDenial.AllowNotAdministratorWithServiceControlCommand:
                     return "--allow-not-admin is available only for an interactive console run; " +
-                           "it cannot be combined with install, uninstall, start, or stop.";
+                           "it cannot be combined with service-control commands: install, " +
+                           "uninstall, start, stop, or command.";
                 case EngineCommandLineDenial.AllowNotAdministratorRequiresInteractiveSession:
                     return "--allow-not-admin cannot be used by the Windows service or another " +
                            "non-interactive session. Run ProxiFyre interactively instead.";

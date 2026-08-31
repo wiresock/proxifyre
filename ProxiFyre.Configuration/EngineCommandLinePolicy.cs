@@ -19,13 +19,23 @@ namespace ProxiFyre.Configuration
             "stop"
         };
 
+        private static readonly string[] ServiceControlCommands =
+        {
+            "install",
+            "uninstall",
+            "start",
+            "stop",
+            "command"
+        };
+
         private static readonly string[] OperationalCommands =
         {
             "run",
             "install",
             "uninstall",
             "start",
-            "stop"
+            "stop",
+            "command"
         };
 
         private static readonly string[] HelpCommands =
@@ -42,6 +52,7 @@ namespace ProxiFyre.Configuration
             arguments = arguments ?? Array.Empty<string>();
 
             var lifecycleCommand = FindKnownArgument(arguments, LifecycleCommands);
+            var serviceControlCommand = FindKnownArgument(arguments, ServiceControlCommands);
             var operationalCommandCount = CountDistinctKnownArguments(
                 arguments, OperationalCommands);
             var isHelpCommand = IsHelpOnlyInvocation(arguments);
@@ -64,11 +75,11 @@ namespace ProxiFyre.Configuration
                     EngineCommandLineDenial.ConflictingOperationalCommands);
             }
 
-            if (allowNotAdministratorRequested && lifecycleCommand != null)
+            if (allowNotAdministratorRequested && serviceControlCommand != null)
             {
                 return new EngineCommandLineDecision(lifecycleCommand, false,
                     isHelpCommand, true, false, requiresProtectedServiceLocation,
-                    EngineCommandLineDenial.AllowNotAdministratorWithLifecycleCommand);
+                    EngineCommandLineDenial.AllowNotAdministratorWithServiceControlCommand);
             }
 
             // Help must remain available to a standard user. The opt-in switch has no runtime
@@ -187,7 +198,7 @@ namespace ProxiFyre.Configuration
         None,
         AdministratorPrivilegesRequired,
         ConflictingOperationalCommands,
-        AllowNotAdministratorWithLifecycleCommand,
+        AllowNotAdministratorWithServiceControlCommand,
         AllowNotAdministratorRequiresInteractiveSession
     }
 

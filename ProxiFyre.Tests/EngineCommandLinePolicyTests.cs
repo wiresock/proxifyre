@@ -104,9 +104,47 @@ namespace ProxiFyre.Tests
                     Assert.That(decision.RequiresProtectedServiceLocation,
                         Is.EqualTo(requiresProtectedLocation));
                     Assert.That(decision.Denial, Is.EqualTo(
-                        EngineCommandLineDenial.AllowNotAdministratorWithLifecycleCommand));
+                        EngineCommandLineDenial.AllowNotAdministratorWithServiceControlCommand));
                 });
             }
+        }
+
+        [Test]
+        public void OptInCannotInvokeTopshelfCustomServiceCommand()
+        {
+            foreach (var arguments in new[]
+                     {
+                         new[] { "command", "128", "--allow-not-admin" },
+                         new[] { "--allow-not-admin", "command", "128" }
+                     })
+            {
+                var decision = EngineCommandLinePolicy.Evaluate(
+                    arguments, true, false);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(decision.CanRun, Is.False);
+                    Assert.That(decision.UseLimitedMode, Is.False);
+                    Assert.That(decision.IsLifecycleCommand, Is.False);
+                    Assert.That(decision.LifecycleCommand, Is.Null);
+                    Assert.That(decision.Denial, Is.EqualTo(
+                        EngineCommandLineDenial.AllowNotAdministratorWithServiceControlCommand));
+                });
+            }
+
+            var unelevatedWithoutOptIn = EngineCommandLinePolicy.Evaluate(
+                new[] { "command", "128" }, true, false);
+            var elevated = EngineCommandLinePolicy.Evaluate(
+                new[] { "command", "128" }, true, true);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(unelevatedWithoutOptIn.Denial,
+                    Is.EqualTo(EngineCommandLineDenial.AdministratorPrivilegesRequired));
+                Assert.That(elevated.CanRun, Is.True);
+                Assert.That(elevated.UseLimitedMode, Is.False);
+                Assert.That(elevated.IsLifecycleCommand, Is.False);
+            });
         }
 
         [TestCase("install")]
@@ -135,6 +173,8 @@ namespace ProxiFyre.Tests
                 new[] { "run", "stop", "run" },
                 new[] { "stop", "run" },
                 new[] { "install", "uninstall" },
+                new[] { "stop", "command", "128" },
+                new[] { "command", "128", "run" },
                 new[] { "RUN", "STOP", "RUN" }
             };
 

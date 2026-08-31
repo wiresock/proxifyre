@@ -145,10 +145,25 @@ if ($RunCommandLineSmokeTest) {
         throw "Topshelf rejected the opt-in help invocation with exit code $LASTEXITCODE. $helpOutput"
     }
 
-    $conflictingOutput = & $enginePath 'run' 'stop' 'run' 2>&1 | Out-String
+    $customCommandOutput =
+        & $enginePath '--allow-not-admin' 'command' '127' 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 87) {
+        throw ('The opt-in switch reached Topshelf service control; expected ' +
+            "ERROR_INVALID_PARAMETER (87), got $LASTEXITCODE. $customCommandOutput")
+    }
+
+    # Keep the executable smoke safe if this policy regresses: the unknown trailing option
+    # makes Topshelf validation fail before ConsoleRunHost can start the packet engine.
+    $conflictingOutput =
+        & $enginePath 'run' 'stop' 'run' '--policy-regression-guard' 2>&1 | Out-String
     if ($LASTEXITCODE -ne 87) {
         throw ('Conflicting Topshelf verbs bypassed the privilege policy; expected ' +
             "ERROR_INVALID_PARAMETER (87), got $LASTEXITCODE. $conflictingOutput")
+    }
+    if (-not $conflictingOutput.Contains(
+            'run, install, uninstall, start, stop, or command',
+            [StringComparison]::Ordinal)) {
+        throw "The conflicting-command diagnostic omits a supported verb. $conflictingOutput"
     }
 
     $invalidOutput = & $enginePath 'install' '--allow-not-admin' 2>&1 | Out-String

@@ -61,7 +61,7 @@ Portable launchers can opt into a limited interactive mode after Windows Packet 
 ProxiFyre.exe --allow-not-admin
 ```
 
-The switch is exact and case-sensitive. This mode cannot install, start, stop, or remove the Windows service. Process attribution is best effort without administrator rights: traffic whose owner cannot be resolved—which may include protected, elevated, system, or other-user processes—remains direct even when a catch-all rule is configured. Treat this as a compatibility mode for selected applications, not a strict current-user security boundary. See the [configuration reference](docs/configuration.md#optional-unelevated-console-mode) for details.
+The switch is exact and case-sensitive. This mode cannot install, start, stop, or remove the Windows service, or send custom service-control commands. Process attribution is best effort without administrator rights: traffic whose owner cannot be resolved—which may include protected, elevated, system, or other-user processes—remains direct even when a catch-all rule is configured. Treat this as a compatibility mode for selected applications, not a strict current-user security boundary. See the [configuration reference](docs/configuration.md#optional-unelevated-console-mode) for details.
 
 ## Configuration
 
