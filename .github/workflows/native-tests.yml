@@ -1,0 +1,81 @@
+name: 'Native tests'
+
+# Builds and runs the native x64 GoogleTest executable (netlib-tests). This workflow is
+# independent of release packaging and signing: it produces no release artifacts and needs no
+# secrets. The commands mirror the local instructions in netlib/README.md.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  netlib-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: ['Debug', 'Release']
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout from GitHub
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v3
+        with:
+          vs-version: '[17.0,18.0)'
+
+      - name: Install vcpkg
+        shell: bash
+        run: |
+          git clone https://github.com/Microsoft/vcpkg.git
+          cd vcpkg
+          ./bootstrap-vcpkg.sh
+          ./vcpkg integrate install
+
+      - name: Install native dependencies via vcpkg
+        run: ./vcpkg/vcpkg install ms-gsl:x64-windows
+
+      - name: Restore GoogleTest package
+        shell: pwsh
+        run: |
+          msbuild netlib-tests\netlib-tests.vcxproj -t:Restore -p:RestorePackagesConfig=true "-p:SolutionDir=${{ github.workspace }}\" -p:Platform=x64 -verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw "GoogleTest restore failed with exit code $LASTEXITCODE." }
+
+      - name: Build netlib-tests
+        shell: pwsh
+        run: |
+          msbuild socksify.sln -t:netlib-tests -m -verbosity:minimal -property:Configuration=${{ matrix.configuration }} -property:Platform=x64
+          if ($LASTEXITCODE -ne 0) { throw "netlib-tests build failed with exit code $LASTEXITCODE." }
+
+      - name: Run netlib-tests
+        shell: pwsh
+        run: |
+          $exe = "bin\tests\x64\${{ matrix.configuration }}\netlib-tests.exe"
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Test executable '$exe' was not produced." }
+
+          # Environment-dependent cases that cannot be exercised on the runner are reported as
+          # UNSUPPORTED (not as passes). They are accepted here explicitly and surfaced as
+          # warnings; any assertion failure, crash, or zero-test run still fails the job.
+          $output = & $exe --netlib_allow_unsupported "--gtest_output=xml:bin\tests\x64\${{ matrix.configuration }}\netlib-tests.xml" 2>&1
+          $exitCode = $LASTEXITCODE
+          $output | ForEach-Object { Write-Host $_ }
+
+          $output | ForEach-Object { "$_" } | Where-Object { $_.StartsWith('[ UNSUPPORTED ]') } | Select-Object -Unique | ForEach-Object {
+            Write-Host "::warning title=netlib-tests unsupported case::$_"
+          }
+          $summary = $output | ForEach-Object { "$_" } | Where-Object { $_.StartsWith('netlib-tests summary:') } | Select-Object -Last 1
+          if ($summary) { "### netlib-tests (${{ matrix.configuration }})`n`n$summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append }
+
+          if ($exitCode -ne 0) { throw "netlib-tests failed with exit code $exitCode." }
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: netlib-tests-${{ matrix.configuration }}
+          path: bin\tests\x64\${{ matrix.configuration }}\netlib-tests.xml
+          if-no-files-found: ignore
