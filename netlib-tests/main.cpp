@@ -70,27 +70,50 @@ int main(int argc, char** argv)
     const auto& unit_test = *::testing::UnitTest::GetInstance();
     const auto unsupported = netlib_test::unsupported_cases();
 
-    std::cout << "\nnetlib-tests summary: " << unit_test.test_to_run_count() << " test(s) run, "
-        << unit_test.successful_test_count() << " without assertion failures, "
-        << unit_test.failed_test_count() << " failed, "
-        << unsupported.size() << " unsupported on this host.\n";
+    // Classify every test that ran: failed (any assertion failure), unsupported (recorded an
+    // environmental limitation and did not fail), or verified (neither).
+    std::set<std::string> unsupported_tests;
+    for (const auto& item : unsupported)
+        unsupported_tests.insert(item.test);
+
+    int run = 0, verified = 0, unsupported_only = 0, failed = 0;
+    for (int i = 0; i < unit_test.total_test_case_count(); ++i)
+    {
+        const auto* test_case = unit_test.GetTestCase(i);
+        for (int j = 0; j < test_case->total_test_count(); ++j)
+        {
+            const auto* info = test_case->GetTestInfo(j);
+            if (!info->should_run())
+                continue;
+            ++run;
+            if (info->result()->Failed())
+                ++failed;
+            else if (unsupported_tests.contains(std::string(test_case->name()) + "." + info->name()))
+                ++unsupported_only;
+            else
+                ++verified;
+        }
+    }
+
+    std::cout << "\nnetlib-tests summary: " << run << " run: " << verified << " verified, "
+        << unsupported_only << " unsupported, " << failed << " failed.\n";
 
     for (const auto& item : unsupported)
-        std::cout << "[ UNSUPPORTED ] " << item << '\n';
+        std::cout << "[ UNSUPPORTED ] " << item.test << ": " << item.reason << '\n';
 
     if (result != 0)
         return result;
 
-    if (unit_test.test_to_run_count() == 0)
+    if (run == 0)
     {
         // A filter that matches nothing must not be mistaken for a passing run.
         std::cerr << "netlib-tests: no tests were run.\n";
         return 4;
     }
 
-    if (!unsupported.empty() && !allow_unsupported)
+    if (unsupported_only != 0 && !allow_unsupported)
     {
-        std::cerr << "netlib-tests: " << unsupported.size()
+        std::cerr << "netlib-tests: " << unsupported_only
             << " case(s) could not be exercised on this host and were NOT verified. "
             << "Pass " << allow_unsupported_flag << " to accept this explicitly.\n";
         return 5;

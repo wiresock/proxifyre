@@ -88,12 +88,17 @@
   <ItemGroup>
     <ClInclude Include="pch.h" />
     <ClInclude Include="test_support.h" />
+    <ClInclude Include="..\netlib\test\iphelper\os_tables.h" />
+    <ClInclude Include="..\netlib\test\iphelper\process_lookup_cases.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="helper_process_test.cpp" />
+    <ClCompile Include="..\netlib\test\iphelper\os_tables_test.cpp" />
+    <ClCompile Include="..\netlib\test\iphelper\process_lookup_failure_test.cpp" />
     <ClCompile Include="..\netlib\test\iphelper\process_lookup_test.cpp" />
   </ItemGroup>
   <ItemGroup>
