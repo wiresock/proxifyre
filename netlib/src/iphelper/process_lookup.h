@@ -1,6 +1,7 @@
 #pragma once
 
 #include "owner_module_resolver.h"
+#include "owner_memo.h"
 
 namespace iphelper
 {
@@ -111,6 +112,12 @@ namespace iphelper
             return upper_case;
         }
 
+        /// Service names need no device path; a DOS drive path with no conversion is partial.
+        [[nodiscard]] bool has_complete_device_path() const noexcept
+        {
+            return path_name.size() < 2 || path_name[1] != L':' || !device_path_name.empty();
+        }
+
         std::wstring name;                  ///< Process name (uppercase)
         std::wstring path_name;             ///< Full path to executable (uppercase)
         std::wstring device_path_name;      ///< Device path version of path_name (uppercase)
@@ -124,6 +131,44 @@ namespace iphelper
         std::atomic<bool> excluded{ false };    ///< Whether the process is excluded from proxying
         std::atomic<bool> bypass_tcp{ false };  ///< Whether TCP connections should bypass proxying (no proxy configured)
         std::atomic<bool> bypass_udp{ false };  ///< Whether UDP connections should bypass proxying (no proxy configured)
+    };
+
+    /**
+     * @brief The operating-system services process_lookup builds its tables from.
+     *
+     * process_lookup takes this as a defaulted template argument so that the native tests can
+     * substitute deterministic connection tables and owner resolution while the production table
+     * ingestion and enrichment code runs unchanged. Production code always uses this type.
+     */
+    struct system_ownership_source
+    {
+        static DWORD get_extended_tcp_table(const PVOID buffer, const PDWORD size, const BOOL order,
+            const ULONG family, const TCP_TABLE_CLASS table_class, const ULONG reserved) noexcept
+        {
+            return ::GetExtendedTcpTable(buffer, size, order, family, table_class, reserved);
+        }
+
+        static DWORD get_extended_udp_table(const PVOID buffer, const PDWORD size, const BOOL order,
+            const ULONG family, const UDP_TABLE_CLASS table_class, const ULONG reserved) noexcept
+        {
+            return ::GetExtendedUdpTable(buffer, size, order, family, table_class, reserved);
+        }
+
+        static owner_module_resolver::extended_result resolve_from_pid_and_tag_extended(const DWORD pid,
+            const DWORD service_tag)
+        {
+            return owner_module_resolver::resolve_from_pid_and_tag_extended(pid, service_tag);
+        }
+
+        static bool resolve_from_pid_and_tag(const DWORD pid, const DWORD service_tag,
+            owner_module_resolver::result& out)
+        {
+            return owner_module_resolver::resolve_from_pid_and_tag(pid, service_tag, out);
+        }
+
+        /// Owners enriched while ingesting one captured table (see owner_memo).
+        template <class Process>
+        using owner_memo_type = owner_memo<Process>;
     };
 
     /**
@@ -143,11 +188,13 @@ namespace iphelper
      * - Fallback mechanisms for service tag resolution
      *
      * @tparam T IP address type (net::ip_address_v4 or net::ip_address_v6)
+     * @tparam Source Connection tables and owner resolution (system_ownership_source; tests only
+     *         substitute a deterministic source)
      *
      * @note Designed as a non-copyable, non-movable class to ensure singleton-like behavior
      */
-    template <typename T>
-    class process_lookup final : public netlib::log::logger<process_lookup<T>>
+    template <typename T, typename Source = system_ownership_source>
+    class process_lookup final : public netlib::log::logger<process_lookup<T, Source>>
     {
         using log_level = netlib::log::log_level;
 
@@ -505,12 +552,14 @@ namespace iphelper
          * for a TCP connection entry from the system's connection table.
          *
          * @param row Pointer to MIB_TCPROW_OWNER_MODULE structure
-         * @return Shared pointer to network_process if successful, nullptr otherwise
+         * @return The owner (null if unresolved) and whether it is complete enough to share with
+         *         later rows of the same PID and service tag; a service's host-image fallback or
+         *         a drive path without its device form is used for this row only
          *
          * @note Implements fallback from service tag to process image resolution
          * @note Logs resolution attempts and results for debugging
          */
-        std::shared_ptr<network_process>
+        owner_enrichment<network_process>
             process_tcp_entry_v4(const PMIB_TCPROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
@@ -519,11 +568,11 @@ namespace iphelper
                     "TCPv4 entry with system process PID = {} ({}) skipping resolution",
                     pid,
                     pid == 0 ? "Idle" : "System");
-                return nullptr;
+                return {};
             }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
-            const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
+            const auto ext = Source::resolve_from_pid_and_tag_extended(pid, tag);
             if (ext.error == owner_module_resolver::error_code::success) {
                 NETLIB_DEBUG(
                     "Resolved TCPv4 owner: pid={} tag={} name=\"{}\" path=\"{}\"",
@@ -532,15 +581,16 @@ namespace iphelper
                     tools::strings::to_string(ext.data.base_name),
                     tools::strings::to_string(ext.data.full_path));
 
-                return std::make_shared<network_process>(
+                auto owner = std::make_shared<network_process>(
                     pid,
                     std::wstring{ ext.data.base_name },
                     std::wstring{ ext.data.full_path }
                 );
+                return { owner, owner->has_complete_device_path() };
             }
 
             if (tag != 0 && ext.error == owner_module_resolver::error_code::service_not_found) {
-                if (owner_module_resolver::result img{}; owner_module_resolver::resolve_from_pid_and_tag(pid, 0, img)) {
+                if (owner_module_resolver::result img{}; Source::resolve_from_pid_and_tag(pid, 0, img)) {
                     NETLIB_DEBUG(
                         "Service tag not found; fell back to process image (TCPv4): pid={} tag={} name=\"{}\" path=\"{}\"",
                         pid,
@@ -548,11 +598,11 @@ namespace iphelper
                         tools::strings::to_string(img.base_name),
                         tools::strings::to_string(img.full_path));
 
-                    return std::make_shared<network_process>(
+                    return { std::make_shared<network_process>(
                         pid,
                         std::move(img.base_name),
                         std::move(img.full_path)
-                    );
+                    ), false }; // keep this row's fallback, but retry the service on its next row
                 }
             }
 
@@ -563,7 +613,7 @@ namespace iphelper
                 error_code_to_string(ext.error),
                 ext.error_message.empty() ? "" : std::format(" msg=\"{}\"", tools::strings::to_string(ext.error_message)));
 
-            return nullptr;
+            return {};
         }
 
         /**
@@ -573,12 +623,14 @@ namespace iphelper
          * for a TCP connection entry from the system's IPv6 connection table.
          *
          * @param row Pointer to MIB_TCP6ROW_OWNER_MODULE structure
-         * @return Shared pointer to network_process if successful, nullptr otherwise
+         * @return The owner (null if unresolved) and whether it is complete enough to share with
+         *         later rows of the same PID and service tag; a service's host-image fallback or
+         *         a drive path without its device form is used for this row only
          *
          * @note Implements fallback from service tag to process image resolution
          * @note Logs resolution attempts and results for debugging
          */
-        std::shared_ptr<network_process>
+        owner_enrichment<network_process>
             process_tcp_entry_v6(const PMIB_TCP6ROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
@@ -587,11 +639,11 @@ namespace iphelper
                     "TCPv6 entry with system process PID = {} ({}) skipping resolution",
                     pid,
                     pid == 0 ? "Idle" : "System");
-                return nullptr;
+                return {};
             }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
-            const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
+            const auto ext = Source::resolve_from_pid_and_tag_extended(pid, tag);
             if (ext.error == owner_module_resolver::error_code::success) {
                 NETLIB_DEBUG(
                     "Resolved TCPv6 owner: pid={} tag={} name=\"{}\" path=\"{}\"",
@@ -600,15 +652,16 @@ namespace iphelper
                     tools::strings::to_string(ext.data.base_name),
                     tools::strings::to_string(ext.data.full_path));
 
-                return std::make_shared<network_process>(
+                auto owner = std::make_shared<network_process>(
                     pid,
                     std::wstring{ ext.data.base_name },
                     std::wstring{ ext.data.full_path }
                 );
+                return { owner, owner->has_complete_device_path() };
             }
 
             if (tag != 0 && ext.error == owner_module_resolver::error_code::service_not_found) {
-                if (owner_module_resolver::result img{}; owner_module_resolver::resolve_from_pid_and_tag(pid, 0, img)) {
+                if (owner_module_resolver::result img{}; Source::resolve_from_pid_and_tag(pid, 0, img)) {
                     NETLIB_DEBUG(
                         "Service tag not found; fell back to process image (TCPv6): pid={} tag={} name=\"{}\" path=\"{}\"",
                         pid,
@@ -616,11 +669,11 @@ namespace iphelper
                         tools::strings::to_string(img.base_name),
                         tools::strings::to_string(img.full_path));
 
-                    return std::make_shared<network_process>(
+                    return { std::make_shared<network_process>(
                         pid,
                         std::move(img.base_name),
                         std::move(img.full_path)
-                    );
+                    ), false }; // keep this row's fallback, but retry the service on its next row
                 }
             }
 
@@ -631,7 +684,7 @@ namespace iphelper
                 error_code_to_string(ext.error),
                 ext.error_message.empty() ? "" : std::format(" msg=\"{}\"", tools::strings::to_string(ext.error_message)));
 
-            return nullptr;
+            return {};
         }
 
         /**
@@ -641,12 +694,14 @@ namespace iphelper
          * for a UDP endpoint entry from the system's connection table.
          *
          * @param row Pointer to MIB_UDPROW_OWNER_MODULE structure
-         * @return Shared pointer to network_process if successful, nullptr otherwise
+         * @return The owner (null if unresolved) and whether it is complete enough to share with
+         *         later rows of the same PID and service tag; a service's host-image fallback or
+         *         a drive path without its device form is used for this row only
          *
          * @note Implements fallback from service tag to process image resolution
          * @note Logs resolution attempts and results for debugging
          */
-        std::shared_ptr<network_process>
+        owner_enrichment<network_process>
             process_udp_entry_v4(const PMIB_UDPROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
@@ -655,11 +710,11 @@ namespace iphelper
                     "UDPv4 entry with system process PID = {} ({}) skipping resolution",
                     pid,
                     pid == 0 ? "Idle" : "System");
-                return nullptr;
+                return {};
             }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
-            const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
+            const auto ext = Source::resolve_from_pid_and_tag_extended(pid, tag);
             if (ext.error == owner_module_resolver::error_code::success) {
                 NETLIB_DEBUG(
                     "Resolved UDPv4 owner: pid={} tag={} name=\"{}\" path=\"{}\"",
@@ -668,15 +723,16 @@ namespace iphelper
                     tools::strings::to_string(ext.data.base_name),
                     tools::strings::to_string(ext.data.full_path));
 
-                return std::make_shared<network_process>(
+                auto owner = std::make_shared<network_process>(
                     pid,
                     std::wstring{ ext.data.base_name },
                     std::wstring{ ext.data.full_path }
                 );
+                return { owner, owner->has_complete_device_path() };
             }
 
             if (tag != 0 && ext.error == owner_module_resolver::error_code::service_not_found) {
-                if (owner_module_resolver::result img{}; owner_module_resolver::resolve_from_pid_and_tag(pid, 0, img)) {
+                if (owner_module_resolver::result img{}; Source::resolve_from_pid_and_tag(pid, 0, img)) {
                     NETLIB_DEBUG(
                         "Service tag not found; fell back to process image (UDPv4): pid={} tag={} name=\"{}\" path=\"{}\"",
                         pid,
@@ -684,11 +740,11 @@ namespace iphelper
                         tools::strings::to_string(img.base_name),
                         tools::strings::to_string(img.full_path));
 
-                    return std::make_shared<network_process>(
+                    return { std::make_shared<network_process>(
                         pid,
                         std::move(img.base_name),
                         std::move(img.full_path)
-                    );
+                    ), false }; // keep this row's fallback, but retry the service on its next row
                 }
             }
 
@@ -699,7 +755,7 @@ namespace iphelper
                 error_code_to_string(ext.error),
                 ext.error_message.empty() ? "" : std::format(" msg=\"{}\"", tools::strings::to_string(ext.error_message)));
 
-            return nullptr;
+            return {};
         }
 
         /**
@@ -709,12 +765,14 @@ namespace iphelper
          * for a UDP endpoint entry from the system's IPv6 connection table.
          *
          * @param row Pointer to MIB_UDP6ROW_OWNER_MODULE structure
-         * @return Shared pointer to network_process if successful, nullptr otherwise
+         * @return The owner (null if unresolved) and whether it is complete enough to share with
+         *         later rows of the same PID and service tag; a service's host-image fallback or
+         *         a drive path without its device form is used for this row only
          *
          * @note Implements fallback from service tag to process image resolution
          * @note Logs resolution attempts and results for debugging
          */
-        std::shared_ptr<network_process>
+        owner_enrichment<network_process>
             process_udp_entry_v6(const PMIB_UDP6ROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
@@ -723,11 +781,11 @@ namespace iphelper
                     "UDPv6 entry with system process PID = {} ({}) skipping resolution",
                     pid,
                     pid == 0 ? "Idle" : "System");
-                return nullptr;
+                return {};
             }
             const DWORD tag = owner_module_resolver::service_tag_from_owning_module_info(row->OwningModuleInfo);
 
-            const auto ext = owner_module_resolver::resolve_from_pid_and_tag_extended(pid, tag);
+            const auto ext = Source::resolve_from_pid_and_tag_extended(pid, tag);
             if (ext.error == owner_module_resolver::error_code::success) {
                 NETLIB_DEBUG(
                     "Resolved UDPv6 owner: pid={} tag={} name=\"{}\" path=\"{}\"",
@@ -736,15 +794,16 @@ namespace iphelper
                     tools::strings::to_string(ext.data.base_name),
                     tools::strings::to_string(ext.data.full_path));
 
-                return std::make_shared<network_process>(
+                auto owner = std::make_shared<network_process>(
                     pid,
                     std::wstring{ ext.data.base_name },
                     std::wstring{ ext.data.full_path }
                 );
+                return { owner, owner->has_complete_device_path() };
             }
 
             if (tag != 0 && ext.error == owner_module_resolver::error_code::service_not_found) {
-                if (owner_module_resolver::result img{}; owner_module_resolver::resolve_from_pid_and_tag(pid, 0, img)) {
+                if (owner_module_resolver::result img{}; Source::resolve_from_pid_and_tag(pid, 0, img)) {
                     NETLIB_DEBUG(
                         "Service tag not found; fell back to process image (UDPv6): pid={} tag={} name=\"{}\" path=\"{}\"",
                         pid,
@@ -752,11 +811,11 @@ namespace iphelper
                         tools::strings::to_string(img.base_name),
                         tools::strings::to_string(img.full_path));
 
-                    return std::make_shared<network_process>(
+                    return { std::make_shared<network_process>(
                         pid,
                         std::move(img.base_name),
                         std::move(img.full_path)
-                    );
+                    ), false }; // keep this row's fallback, but retry the service on its next row
                 }
             }
 
@@ -767,7 +826,7 @@ namespace iphelper
                 error_code_to_string(ext.error),
                 ext.error_message.empty() ? "" : std::format(" msg=\"{}\"", tools::strings::to_string(ext.error_message)));
 
-            return nullptr;
+            return {};
         }
 
         /// <summary>
@@ -812,7 +871,7 @@ namespace iphelper
             auto buffer = std::make_unique<char[]>(size);
             for (;;)
             {
-                const auto result = ::GetExtendedTcpTable(buffer.get(), &size, FALSE, AF_INET6,
+                const auto result = Source::get_extended_tcp_table(buffer.get(), &size, FALSE, AF_INET6,
                     TCP_TABLE_OWNER_MODULE_CONNECTIONS, 0);
                 if (result == NO_ERROR)
                     break;
@@ -822,6 +881,9 @@ namespace iphelper
             }
 
             auto* table = reinterpret_cast<PMIB_TCP6TABLE_OWNER_MODULE>(buffer.get());
+            // This AF_INET6 table is a separate capture from the AF_INET one: a PID may have been
+            // reused between them, so it gets its own memo.
+            typename Source::template owner_memo_type<network_process> owners;
             for (size_t i = 0; i < table->dwNumEntries; ++i)
             {
                 uint32_t local_v4 = 0, remote_v4 = 0;
@@ -829,7 +891,8 @@ namespace iphelper
                     !is_v4_mapped_address(table->table[i].ucRemoteAddr, remote_v4))
                     continue; // genuine IPv6 connection: handled by the v6 instance
 
-                if (auto process_ptr = process_tcp_entry_v6(&table->table[i]))
+                if (auto process_ptr = memoized_owner(owners, &table->table[i],
+                    [this](const PMIB_TCP6ROW_OWNER_MODULE row) { return process_tcp_entry_v6(row); }))
                 {
                     // Keep a genuine AF_INET entry if one already exists for this 4-tuple.
                     tcp_to_app.try_emplace(
@@ -858,7 +921,7 @@ namespace iphelper
             auto buffer = std::make_unique<char[]>(size);
             for (;;)
             {
-                const auto result = ::GetExtendedUdpTable(buffer.get(), &size, FALSE, AF_INET6,
+                const auto result = Source::get_extended_udp_table(buffer.get(), &size, FALSE, AF_INET6,
                     UDP_TABLE_OWNER_MODULE, 0);
                 if (result == NO_ERROR)
                     break;
@@ -868,6 +931,8 @@ namespace iphelper
             }
 
             auto* table = reinterpret_cast<PMIB_UDP6TABLE_OWNER_MODULE>(buffer.get());
+            // A separate capture from the AF_INET one, with its own memo (see add_v4_mapped_tcp_sessions).
+            typename Source::template owner_memo_type<network_process> owners;
             for (size_t i = 0; i < table->dwNumEntries; ++i)
             {
                 uint32_t local_v4 = 0;
@@ -875,7 +940,8 @@ namespace iphelper
                 if (!mapped && !is_unspecified_v6_address(table->table[i].ucLocalAddr))
                     continue; // genuine IPv6-only endpoint
 
-                if (auto process_ptr = process_udp_entry_v6(&table->table[i]))
+                if (auto process_ptr = memoized_owner(owners, &table->table[i],
+                    [this](const PMIB_UDP6ROW_OWNER_MODULE row) { return process_udp_entry_v6(row); }))
                 {
                     udp_to_app.try_emplace(
                         net::ip_endpoint<net::ip_address_v4>(
@@ -909,7 +975,7 @@ namespace iphelper
                     auto table_size = table_buffer_size_tcp_;
 
                     for (;;) {
-                        const uint32_t result = ::GetExtendedTcpTable(
+                        const uint32_t result = Source::get_extended_tcp_table(
                             table_buffer_tcp_.get(),
                             &table_size,
                             FALSE,
@@ -927,8 +993,10 @@ namespace iphelper
 
                     if constexpr (std::is_same_v<T, net::ip_address_v4>) {
                         auto* table = reinterpret_cast<PMIB_TCPTABLE_OWNER_MODULE>(table_buffer_tcp_.get());
+                        typename Source::template owner_memo_type<network_process> owners; // this capture only
                         for (size_t i = 0; i < table->dwNumEntries; i++) {
-                            if (auto process_ptr = process_tcp_entry_v4(&table->table[i])) {
+                            if (auto process_ptr = memoized_owner(owners, &table->table[i],
+                                [this](const PMIB_TCPROW_OWNER_MODULE row) { return process_tcp_entry_v4(row); })) {
                                 tcp_to_app[net::ip_session<T>(
                                     T{ table->table[i].dwLocalAddr },
                                     T{ table->table[i].dwRemoteAddr },
@@ -945,8 +1013,10 @@ namespace iphelper
                     }
                     else {
                         auto* table = reinterpret_cast<PMIB_TCP6TABLE_OWNER_MODULE>(table_buffer_tcp_.get());
+                        typename Source::template owner_memo_type<network_process> owners; // this capture only
                         for (size_t i = 0; i < table->dwNumEntries; i++) {
-                            if (auto process_ptr = process_tcp_entry_v6(&table->table[i])) {
+                            if (auto process_ptr = memoized_owner(owners, &table->table[i],
+                                [this](const PMIB_TCP6ROW_OWNER_MODULE row) { return process_tcp_entry_v6(row); })) {
                                 tcp_to_app[net::ip_session<T>(
                                     T{ table->table[i].ucLocalAddr },
                                     T{ table->table[i].ucRemoteAddr },
@@ -993,7 +1063,7 @@ namespace iphelper
                     auto table_size = table_buffer_size_udp_;
 
                     for (;;) {
-                        const uint32_t result = ::GetExtendedUdpTable(
+                        const uint32_t result = Source::get_extended_udp_table(
                             table_buffer_udp_.get(),
                             &table_size,
                             FALSE,
@@ -1011,8 +1081,10 @@ namespace iphelper
 
                     if constexpr (std::is_same_v<T, net::ip_address_v4>) {
                         auto* table = reinterpret_cast<PMIB_UDPTABLE_OWNER_MODULE>(table_buffer_udp_.get());
+                        typename Source::template owner_memo_type<network_process> owners; // this capture only
                         for (size_t i = 0; i < table->dwNumEntries; i++) {
-                            if (auto process_ptr = process_udp_entry_v4(&table->table[i])) {
+                            if (auto process_ptr = memoized_owner(owners, &table->table[i],
+                                [this](const PMIB_UDPROW_OWNER_MODULE row) { return process_udp_entry_v4(row); })) {
                                 udp_to_app[net::ip_endpoint<T>(
                                     T{ table->table[i].dwLocalAddr },
                                     ntohs(static_cast<uint16_t>(table->table[i].dwLocalPort)))]
@@ -1027,8 +1099,10 @@ namespace iphelper
                     }
                     else {
                         auto* table = reinterpret_cast<PMIB_UDP6TABLE_OWNER_MODULE>(table_buffer_udp_.get());
+                        typename Source::template owner_memo_type<network_process> owners; // this capture only
                         for (size_t i = 0; i < table->dwNumEntries; i++) {
-                            if (auto process_ptr = process_udp_entry_v6(&table->table[i])) {
+                            if (auto process_ptr = memoized_owner(owners, &table->table[i],
+                                [this](const PMIB_UDP6ROW_OWNER_MODULE row) { return process_udp_entry_v6(row); })) {
                                 udp_to_app[net::ip_endpoint<T>(
                                     T{ table->table[i].ucLocalAddr },
                                     ntohs(static_cast<uint16_t>(table->table[i].dwLocalPort)),
