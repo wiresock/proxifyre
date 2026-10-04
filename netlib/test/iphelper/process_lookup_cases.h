@@ -7,7 +7,9 @@
 // failure probes (process_lookup_failure_test.cpp), which inject helper or table-query faults.
 //
 // Outcome rules for every dual-stack case:
-//   * the end-to-end IPv4 lookup result is always asserted;
+//   * the folding cases assert the end-to-end IPv4 lookup result before evaluating isolation;
+//     the precedence cases evaluate isolation first and run no lookup assertion unless the
+//     helper's row is isolated. An UNSUPPORTED reason states exactly which stage was reached;
 //   * an OS table query failure is a test FAILURE (never UNSUPPORTED, never "absent");
 //   * a helper launch/protocol/timeout/socket failure is a test FAILURE;
 //   * UNSUPPORTED is recorded only when successful captures of both address-family tables show
@@ -85,16 +87,30 @@ namespace netlib_test::process_lookup_cases
         return local_port(pair.client.get(), client_family, pair.client_port);
     }
 
+    // Stage descriptions for a not-isolated outcome. Each states exactly what had and had not
+    // been asserted when the isolation precondition stopped the case, so the UNSUPPORTED reason
+    // (console line and XML property alike) never overstates the executed coverage.
+    //
+    // Folding cases: the lookup of this process's own dual-stack socket was already asserted,
+    // but a native row for the same endpoint means that result need not have come from the fold.
+    inline constexpr const char* folding_not_isolated_stage =
+        "the end-to-end IPv4 lookup of the dual-stack socket owned by this process was verified, "
+        "but the supplementary fold was not isolated, so that result may also hold through a "
+        "native AF_INET row";
+    // Precedence cases: isolation is checked before any lookup, so nothing was asserted.
+    inline constexpr const char* precedence_not_isolated_stage =
+        "the dual-stack binding held by the helper was not isolated in the OS tables, so no "
+        "ownership or precedence assertion was run";
+
     // Leaves the calling test function according to an isolation decision. Returns normally
-    // only for `isolated`.
-#define NETLIB_TEST_REQUIRE_ISOLATION(result_expr)                                                  \
+    // only for `isolated`. `stage` is one of the descriptions above.
+#define NETLIB_TEST_REQUIRE_ISOLATION(result_expr, stage)                                           \
     do {                                                                                            \
         const auto netlib_isolation_ = (result_expr);                                               \
         if (netlib_isolation_.state == ::netlib_test::os_tables::isolation::query_failed)           \
             FAIL() << "OS table capture failed; isolation was not evaluated: " << netlib_isolation_.detail; \
         if (netlib_isolation_.state == ::netlib_test::os_tables::isolation::not_isolated)           \
-            NETLIB_TEST_UNSUPPORTED("the end-to-end IPv4 lookup was asserted, but the supplementary " \
-                "fold was not isolated: " + netlib_isolation_.detail);                              \
+            NETLIB_TEST_UNSUPPORTED(std::string{ stage } + ": " + netlib_isolation_.detail);        \
     } while (false)
 
     // ------------------------------------------------------------------------------------
@@ -118,7 +134,7 @@ namespace netlib_test::process_lookup_cases
 
         NETLIB_TEST_REQUIRE_ISOLATION(tables::mapped_tcp_isolation(
             tables::capture_protocol(tables::protocol::tcp, options.tables),
-            test.self_pid_, pair.listen_port, pair.client_port));
+            test.self_pid_, pair.listen_port, pair.client_port), folding_not_isolated_stage);
     }
 
     inline void unspecified_v6_udp_case(const process_lookup_fixture& test, const case_options& options)
@@ -136,7 +152,7 @@ namespace netlib_test::process_lookup_cases
 
         NETLIB_TEST_REQUIRE_ISOLATION(tables::mapped_udp_isolation(
             tables::capture_protocol(tables::protocol::udp, options.tables),
-            tables::v6_unspecified, test.self_pid_, port));
+            tables::v6_unspecified, test.self_pid_, port), folding_not_isolated_stage);
     }
 
     inline void mapped_v6_udp_exact_case(const process_lookup_fixture& test, const case_options& options)
@@ -154,7 +170,7 @@ namespace netlib_test::process_lookup_cases
 
         NETLIB_TEST_REQUIRE_ISOLATION(tables::mapped_udp_isolation(
             tables::capture_protocol(tables::protocol::udp, options.tables),
-            tables::v4_mapped_loopback, test.self_pid_, port));
+            tables::v4_mapped_loopback, test.self_pid_, port), folding_not_isolated_stage);
     }
 
     // ------------------------------------------------------------------------------------
@@ -184,9 +200,10 @@ namespace netlib_test::process_lookup_cases
         const uint16_t port = started.port;
         ASSERT_NE(child.pid(), test.self_pid_);
 
+        // Checked before any lookup: a not-isolated row means this case asserted nothing.
         NETLIB_TEST_REQUIRE_ISOLATION(tables::mapped_udp_isolation(
             tables::capture_protocol(tables::protocol::udp, options.tables),
-            helper_row_address, child.pid(), port));
+            helper_row_address, child.pid(), port), precedence_not_isolated_stage);
 
         iphelper::process_lookup<v4> lookup;
         ASSERT_TRUE(lookup.actualize(false, true));

@@ -49,8 +49,14 @@ Running the tests requires Windows 10 / Windows Server 2016 or newer (for the jo
 attribute; on an older host the helper launch fails before any process is created). This is a
 requirement of the test host only and does not change the supported platforms of the product.
 
+When a dual-stack path is not isolated, the UNSUPPORTED reason states the stage the case reached:
+the folding cases have already verified the end-to-end IPv4 lookup of this process's own socket
+(only the supplementary fold itself is unverified), while the precedence cases stop before any
+ownership or precedence assertion.
+
 `DISABLED_NetlibFailureProbe.*` tests inject faults into the real case bodies; they are run only
-as subprocesses by `ProcessLookupFailureProbeTest` and `ProcessLookupProbeExitTest`, which check
-their exit codes, output, and XML. `DISABLED_HelperLifecycleProbe.HoldAtCreationBoundary` runs
-only as the parent subprocess of `HelperLifecycleTest`, which terminates it at the
-process-creation boundary and verifies that the still-suspended helper exits.
+as subprocesses by `ProcessLookupFailureProbeTest`, `ProcessLookupUnsupportedStageTest`, and
+`ProcessLookupProbeExitTest`, which check their exit codes, output, and XML.
+`DISABLED_HelperLifecycleProbe.HoldAtCreationBoundary` runs only as the parent subprocess of
+`HelperLifecycleTest`, which terminates it at the process-creation boundary and verifies that the
+still-suspended helper exits.
