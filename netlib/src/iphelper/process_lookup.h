@@ -6,21 +6,24 @@
 namespace iphelper
 {
     /**
-     * @brief Represents a network process with associated module information.
+     * @brief The identity of a process that owns network connections: process ID, name,
+     *        executable path, and device path. All string fields are converted to uppercase for
+     *        consistent matching.
      *
-     * This structure encapsulates information about a process that owns network connections,
-     * including process ID, name, executable path, and device path. All string fields are
-     * automatically converted to uppercase for consistent matching.
+     * This is what enriching one owner-module table row yields, and what every row of the same
+     * (PID, service tag) in one captured table shares through the owner memo (owner_memo.h). It
+     * is immutable once constructed. Routing state is deliberately not part of it: each row's
+     * network_process carries its own.
      */
-    struct network_process  // NOLINT(clang-diagnostic-padded)
+    struct owner_identity
     {
         /**
          * @brief Default constructor.
          */
-        network_process() = default;
+        owner_identity() = default;
 
         /**
-         * @brief Constructs a network_process with the specified information.
+         * @brief Constructs an owner_identity with the specified information.
          *
          * @param id Process ID
          * @param name Process name (will be converted to uppercase)
@@ -30,7 +33,7 @@ namespace iphelper
          * @note All string parameters are automatically converted to uppercase and the
          *       device path is computed from the provided path.
          */
-        network_process(const unsigned long id, std::wstring name, std::wstring path,
+        owner_identity(const unsigned long id, std::wstring name, std::wstring path,
             const bool resolved = true)
             : name(std::move(name)),
             path_name(std::move(path)),
@@ -123,6 +126,42 @@ namespace iphelper
         std::wstring device_path_name;      ///< Device path version of path_name (uppercase)
         unsigned long id{};                 ///< Process ID
         bool resolved{ true };              ///< True when the owning process was resolved successfully
+    };
+
+    /**
+     * @brief Represents a network process with associated module information.
+     *
+     * One network_process is published for each connection-table row: its identity
+     * (owner_identity, possibly copied from an enrichment shared with other rows of the same
+     * process in the same capture) plus the routing state the packet handlers cache for this row.
+     * The routing state is per row, so a decision cached while routing one connection never
+     * applies to another, including after the proxy configuration changes at runtime.
+     */
+    struct network_process : owner_identity  // NOLINT(clang-diagnostic-padded)
+    {
+        /**
+         * @brief Default constructor.
+         */
+        network_process() = default;
+
+        /**
+         * @brief Constructs a network_process with the specified information (see owner_identity).
+         */
+        network_process(const unsigned long id, std::wstring name, std::wstring path,
+            const bool resolved = true)
+            : owner_identity(id, std::move(name), std::move(path), resolved)
+        {
+        }
+
+        /**
+         * @brief A row's own owner object for an identity: the identity is copied, the routing
+         *        state starts fresh.
+         */
+        explicit network_process(const owner_identity& identity)
+            : owner_identity(identity)
+        {
+        }
+
         std::optional<uint16_t> tcp_proxy_port = std::nullopt; // Optional TCP proxy port if the process is associated with a proxy
         std::optional<uint16_t> udp_proxy_port = std::nullopt; // Optional UDP proxy port if the process is associated with a proxy
         // These cache flags can be set from match_owner_to_app()/route_owner() running on
@@ -166,7 +205,7 @@ namespace iphelper
             return owner_module_resolver::resolve_from_pid_and_tag(pid, service_tag, out);
         }
 
-        /// Owners enriched while ingesting one captured table (see owner_memo).
+        /// Identities enriched while ingesting one captured table (see owner_memo).
         template <class Process>
         using owner_memo_type = owner_memo<Process>;
     };
@@ -559,7 +598,7 @@ namespace iphelper
          * @note Implements fallback from service tag to process image resolution
          * @note Logs resolution attempts and results for debugging
          */
-        owner_enrichment<network_process>
+        owner_enrichment<const owner_identity>
             process_tcp_entry_v4(const PMIB_TCPROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
@@ -581,7 +620,7 @@ namespace iphelper
                     tools::strings::to_string(ext.data.base_name),
                     tools::strings::to_string(ext.data.full_path));
 
-                auto owner = std::make_shared<network_process>(
+                auto owner = std::make_shared<const owner_identity>(
                     pid,
                     std::wstring{ ext.data.base_name },
                     std::wstring{ ext.data.full_path }
@@ -598,7 +637,7 @@ namespace iphelper
                         tools::strings::to_string(img.base_name),
                         tools::strings::to_string(img.full_path));
 
-                    return { std::make_shared<network_process>(
+                    return { std::make_shared<const owner_identity>(
                         pid,
                         std::move(img.base_name),
                         std::move(img.full_path)
@@ -630,7 +669,7 @@ namespace iphelper
          * @note Implements fallback from service tag to process image resolution
          * @note Logs resolution attempts and results for debugging
          */
-        owner_enrichment<network_process>
+        owner_enrichment<const owner_identity>
             process_tcp_entry_v6(const PMIB_TCP6ROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
@@ -652,7 +691,7 @@ namespace iphelper
                     tools::strings::to_string(ext.data.base_name),
                     tools::strings::to_string(ext.data.full_path));
 
-                auto owner = std::make_shared<network_process>(
+                auto owner = std::make_shared<const owner_identity>(
                     pid,
                     std::wstring{ ext.data.base_name },
                     std::wstring{ ext.data.full_path }
@@ -669,7 +708,7 @@ namespace iphelper
                         tools::strings::to_string(img.base_name),
                         tools::strings::to_string(img.full_path));
 
-                    return { std::make_shared<network_process>(
+                    return { std::make_shared<const owner_identity>(
                         pid,
                         std::move(img.base_name),
                         std::move(img.full_path)
@@ -701,7 +740,7 @@ namespace iphelper
          * @note Implements fallback from service tag to process image resolution
          * @note Logs resolution attempts and results for debugging
          */
-        owner_enrichment<network_process>
+        owner_enrichment<const owner_identity>
             process_udp_entry_v4(const PMIB_UDPROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
@@ -723,7 +762,7 @@ namespace iphelper
                     tools::strings::to_string(ext.data.base_name),
                     tools::strings::to_string(ext.data.full_path));
 
-                auto owner = std::make_shared<network_process>(
+                auto owner = std::make_shared<const owner_identity>(
                     pid,
                     std::wstring{ ext.data.base_name },
                     std::wstring{ ext.data.full_path }
@@ -740,7 +779,7 @@ namespace iphelper
                         tools::strings::to_string(img.base_name),
                         tools::strings::to_string(img.full_path));
 
-                    return { std::make_shared<network_process>(
+                    return { std::make_shared<const owner_identity>(
                         pid,
                         std::move(img.base_name),
                         std::move(img.full_path)
@@ -772,7 +811,7 @@ namespace iphelper
          * @note Implements fallback from service tag to process image resolution
          * @note Logs resolution attempts and results for debugging
          */
-        owner_enrichment<network_process>
+        owner_enrichment<const owner_identity>
             process_udp_entry_v6(const PMIB_UDP6ROW_OWNER_MODULE row) noexcept
         {
             const DWORD pid = row->dwOwningPid;
@@ -794,7 +833,7 @@ namespace iphelper
                     tools::strings::to_string(ext.data.base_name),
                     tools::strings::to_string(ext.data.full_path));
 
-                auto owner = std::make_shared<network_process>(
+                auto owner = std::make_shared<const owner_identity>(
                     pid,
                     std::wstring{ ext.data.base_name },
                     std::wstring{ ext.data.full_path }
@@ -811,7 +850,7 @@ namespace iphelper
                         tools::strings::to_string(img.base_name),
                         tools::strings::to_string(img.full_path));
 
-                    return { std::make_shared<network_process>(
+                    return { std::make_shared<const owner_identity>(
                         pid,
                         std::move(img.base_name),
                         std::move(img.full_path)
@@ -883,7 +922,7 @@ namespace iphelper
             auto* table = reinterpret_cast<PMIB_TCP6TABLE_OWNER_MODULE>(buffer.get());
             // This AF_INET6 table is a separate capture from the AF_INET one: a PID may have been
             // reused between them, so it gets its own memo.
-            typename Source::template owner_memo_type<network_process> owners;
+            typename Source::template owner_memo_type<const owner_identity> owners;
             for (size_t i = 0; i < table->dwNumEntries; ++i)
             {
                 uint32_t local_v4 = 0, remote_v4 = 0;
@@ -891,7 +930,7 @@ namespace iphelper
                     !is_v4_mapped_address(table->table[i].ucRemoteAddr, remote_v4))
                     continue; // genuine IPv6 connection: handled by the v6 instance
 
-                if (auto process_ptr = memoized_owner(owners, &table->table[i],
+                if (const auto identity = memoized_owner(owners, &table->table[i],
                     [this](const PMIB_TCP6ROW_OWNER_MODULE row) { return process_tcp_entry_v6(row); }))
                 {
                     // Keep a genuine AF_INET entry if one already exists for this 4-tuple.
@@ -901,7 +940,7 @@ namespace iphelper
                             net::ip_address_v4{ remote_v4 },
                             ntohs(static_cast<uint16_t>(table->table[i].dwLocalPort)),
                             ntohs(static_cast<uint16_t>(table->table[i].dwRemotePort))),
-                        std::move(process_ptr));
+                        std::make_shared<network_process>(*identity));
                 }
             }
         }
@@ -932,7 +971,7 @@ namespace iphelper
 
             auto* table = reinterpret_cast<PMIB_UDP6TABLE_OWNER_MODULE>(buffer.get());
             // A separate capture from the AF_INET one, with its own memo (see add_v4_mapped_tcp_sessions).
-            typename Source::template owner_memo_type<network_process> owners;
+            typename Source::template owner_memo_type<const owner_identity> owners;
             for (size_t i = 0; i < table->dwNumEntries; ++i)
             {
                 uint32_t local_v4 = 0;
@@ -940,14 +979,14 @@ namespace iphelper
                 if (!mapped && !is_unspecified_v6_address(table->table[i].ucLocalAddr))
                     continue; // genuine IPv6-only endpoint
 
-                if (auto process_ptr = memoized_owner(owners, &table->table[i],
+                if (const auto identity = memoized_owner(owners, &table->table[i],
                     [this](const PMIB_UDP6ROW_OWNER_MODULE row) { return process_udp_entry_v6(row); }))
                 {
                     udp_to_app.try_emplace(
                         net::ip_endpoint<net::ip_address_v4>(
                             net::ip_address_v4{ mapped ? local_v4 : 0u },
                             ntohs(static_cast<uint16_t>(table->table[i].dwLocalPort))),
-                        std::move(process_ptr));
+                        std::make_shared<network_process>(*identity));
                 }
             }
         }
@@ -993,16 +1032,16 @@ namespace iphelper
 
                     if constexpr (std::is_same_v<T, net::ip_address_v4>) {
                         auto* table = reinterpret_cast<PMIB_TCPTABLE_OWNER_MODULE>(table_buffer_tcp_.get());
-                        typename Source::template owner_memo_type<network_process> owners; // this capture only
+                        typename Source::template owner_memo_type<const owner_identity> owners; // this capture only
                         for (size_t i = 0; i < table->dwNumEntries; i++) {
-                            if (auto process_ptr = memoized_owner(owners, &table->table[i],
+                            if (const auto identity = memoized_owner(owners, &table->table[i],
                                 [this](const PMIB_TCPROW_OWNER_MODULE row) { return process_tcp_entry_v4(row); })) {
                                 tcp_to_app[net::ip_session<T>(
                                     T{ table->table[i].dwLocalAddr },
                                     T{ table->table[i].dwRemoteAddr },
                                     ntohs(static_cast<uint16_t>(table->table[i].dwLocalPort)),
                                     ntohs(static_cast<uint16_t>(table->table[i].dwRemotePort)))]
-                                    = std::move(process_ptr);
+                                    = std::make_shared<network_process>(*identity);
                             }
                         }
 
@@ -1013,9 +1052,9 @@ namespace iphelper
                     }
                     else {
                         auto* table = reinterpret_cast<PMIB_TCP6TABLE_OWNER_MODULE>(table_buffer_tcp_.get());
-                        typename Source::template owner_memo_type<network_process> owners; // this capture only
+                        typename Source::template owner_memo_type<const owner_identity> owners; // this capture only
                         for (size_t i = 0; i < table->dwNumEntries; i++) {
-                            if (auto process_ptr = memoized_owner(owners, &table->table[i],
+                            if (const auto identity = memoized_owner(owners, &table->table[i],
                                 [this](const PMIB_TCP6ROW_OWNER_MODULE row) { return process_tcp_entry_v6(row); })) {
                                 tcp_to_app[net::ip_session<T>(
                                     T{ table->table[i].ucLocalAddr },
@@ -1024,7 +1063,7 @@ namespace iphelper
                                     ntohs(static_cast<uint16_t>(table->table[i].dwRemotePort)),
                                     table->table[i].dwLocalScopeId,
                                     table->table[i].dwRemoteScopeId)]
-                                    = std::move(process_ptr);
+                                    = std::make_shared<network_process>(*identity);
                             }
                         }
                     }
@@ -1081,14 +1120,14 @@ namespace iphelper
 
                     if constexpr (std::is_same_v<T, net::ip_address_v4>) {
                         auto* table = reinterpret_cast<PMIB_UDPTABLE_OWNER_MODULE>(table_buffer_udp_.get());
-                        typename Source::template owner_memo_type<network_process> owners; // this capture only
+                        typename Source::template owner_memo_type<const owner_identity> owners; // this capture only
                         for (size_t i = 0; i < table->dwNumEntries; i++) {
-                            if (auto process_ptr = memoized_owner(owners, &table->table[i],
+                            if (const auto identity = memoized_owner(owners, &table->table[i],
                                 [this](const PMIB_UDPROW_OWNER_MODULE row) { return process_udp_entry_v4(row); })) {
                                 udp_to_app[net::ip_endpoint<T>(
                                     T{ table->table[i].dwLocalAddr },
                                     ntohs(static_cast<uint16_t>(table->table[i].dwLocalPort)))]
-                                    = std::move(process_ptr);
+                                    = std::make_shared<network_process>(*identity);
                             }
                         }
 
@@ -1099,15 +1138,15 @@ namespace iphelper
                     }
                     else {
                         auto* table = reinterpret_cast<PMIB_UDP6TABLE_OWNER_MODULE>(table_buffer_udp_.get());
-                        typename Source::template owner_memo_type<network_process> owners; // this capture only
+                        typename Source::template owner_memo_type<const owner_identity> owners; // this capture only
                         for (size_t i = 0; i < table->dwNumEntries; i++) {
-                            if (auto process_ptr = memoized_owner(owners, &table->table[i],
+                            if (const auto identity = memoized_owner(owners, &table->table[i],
                                 [this](const PMIB_UDP6ROW_OWNER_MODULE row) { return process_udp_entry_v6(row); })) {
                                 udp_to_app[net::ip_endpoint<T>(
                                     T{ table->table[i].ucLocalAddr },
                                     ntohs(static_cast<uint16_t>(table->table[i].dwLocalPort)),
                                     0)]
-                                    = std::move(process_ptr);
+                                    = std::make_shared<network_process>(*identity);
                             }
                         }
                     }

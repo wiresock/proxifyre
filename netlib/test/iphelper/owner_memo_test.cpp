@@ -7,8 +7,9 @@
 // build enrich each (PID, service tag) once instead of once per row.
 //
 // Ported from WireSock (fa8f028b7bd4c88fb2903803f7be06f7814d82b9,
-// netlib/test/iphelper/owner_memo_test.cpp). Proxifyre's network_process carries atomic routing
-// flags and is not copyable, so owners compared here are constructed independently.
+// netlib/test/iphelper/owner_memo_test.cpp). The memoized type is Proxifyre's immutable
+// owner_identity; process_lookup builds each row's network_process (which adds the routing state)
+// from it, so no mutable state is ever shared between rows.
 //
 // The rows are the real Windows row types (TCPv4/v6, UDPv4/v6 owner-module rows) and the loop is
 // the build's loop: every row goes through memoized_owner(). The enrichment is a scripted double
@@ -20,7 +21,7 @@
 namespace iphelper::test {
 namespace {
 
-using process_ptr = std::shared_ptr<network_process>;
+using identity_ptr = std::shared_ptr<const owner_identity>;
 
 template <class Row>
 Row make_row(const DWORD pid, const DWORD service_tag, const DWORD local_port)
@@ -44,7 +45,7 @@ public:
     void reuse_pid(const DWORD pid) { ++generation_[pid]; }
 
     template <class Row>
-    process_ptr operator()(const Row* row)
+    identity_ptr operator()(const Row* row)
     {
         ++calls;
         const DWORD pid = row->dwOwningPid;
@@ -59,7 +60,7 @@ public:
             if (!it->second[ordinal_[k]++])
                 return nullptr;
         ++successes;
-        return std::make_shared<network_process>(pid, name(pid, tag), L"PROC-" + std::to_wstring(generation_[pid]));
+        return std::make_shared<const owner_identity>(pid, name(pid, tag), L"PROC-" + std::to_wstring(generation_[pid]));
     }
 
     static std::wstring name(const DWORD pid, const DWORD tag)
@@ -80,7 +81,7 @@ private:
 /// What one build publishes: local port -> owner (null when the row was left out).
 struct build_result
 {
-    std::vector<std::pair<DWORD, process_ptr>> owners;
+    std::vector<std::pair<DWORD, identity_ptr>> owners;
     size_t memoized = 0;
 
     /// tuple -> (pid, name, path) for comparing builds by content rather than by object.
@@ -92,7 +93,7 @@ struct build_result
                 f.emplace_back(port, owner->id, owner->name, owner->path_name);
         return f;
     }
-    [[nodiscard]] process_ptr at(const DWORD port) const
+    [[nodiscard]] identity_ptr at(const DWORD port) const
     {
         for (const auto& [p, owner] : owners)
             if (p == port)
@@ -106,7 +107,7 @@ template <class Row>
 build_result build_memoized(const std::vector<Row>& rows, fake_enricher& enrich)
 {
     build_result result;
-    owner_memo<network_process> owners; // this build only
+    owner_memo<const owner_identity> owners; // this build only
     for (const auto& row : rows)
         result.owners.emplace_back(row.dwLocalPort,
             memoized_owner(owners, &row, [&](const Row* r) { return enrich(r); }));
@@ -211,13 +212,13 @@ TYPED_TEST(OwnerMemoTest, SystemRowsBypassTheMemo)
 TYPED_TEST(OwnerMemoTest, SystemRowsAreNotStoredEvenWhenTheirEnrichmentSucceeds)
 {
     // The memo itself keeps PID 0/4 out of its storage, whatever the enrichment returns.
-    owner_memo<network_process> owners;
+    owner_memo<const owner_identity> owners;
     const auto idle = make_row<TypeParam>(0, 0, 40200);
     const auto system = make_row<TypeParam>(4, 0, 40201);
     int calls = 0;
-    const auto enrich = [&](const TypeParam* row) -> owner_enrichment<network_process> {
+    const auto enrich = [&](const TypeParam* row) -> owner_enrichment<const owner_identity> {
         ++calls;
-        return { std::make_shared<network_process>(row->dwOwningPid, L"SYSTEM", L"SYSTEM"), true };
+        return { std::make_shared<const owner_identity>(row->dwOwningPid, L"SYSTEM", L"SYSTEM"), true };
     };
     for (int i = 0; i < 3; ++i)
     {
@@ -298,14 +299,14 @@ TYPED_TEST(OwnerMemoTest, PartialEnrichmentIsReturnedButRetriedUntilComplete)
 {
     // A service lookup can fail while its host-image fallback succeeds. Keeping that owner
     // for row 1 must not prevent row 2 from recovering the service identity.
-    owner_memo<network_process> owners;
+    owner_memo<const owner_identity> owners;
     auto row = make_row<TypeParam>(1501, 7, 52001);
-    const auto host = std::make_shared<network_process>(1501, L"HOST.EXE", L"HOST.EXE");
-    const auto service = std::make_shared<network_process>(1501, L"SERVICE", L"SERVICE");
+    const auto host = std::make_shared<const owner_identity>(1501, L"HOST.EXE", L"HOST.EXE");
+    const auto service = std::make_shared<const owner_identity>(1501, L"SERVICE", L"SERVICE");
     int calls = 0;
-    const auto enrich = [&](const TypeParam*) -> owner_enrichment<network_process> {
-        return ++calls == 1 ? owner_enrichment<network_process>{host, false}
-                            : owner_enrichment<network_process>{service, true};
+    const auto enrich = [&](const TypeParam*) -> owner_enrichment<const owner_identity> {
+        return ++calls == 1 ? owner_enrichment<const owner_identity>{host, false}
+                            : owner_enrichment<const owner_identity>{service, true};
     };
     const auto first = memoized_owner(owners, &row, enrich);
     EXPECT_EQ(first, host);
@@ -321,12 +322,12 @@ TYPED_TEST(OwnerMemoTest, PartialEnrichmentIsReturnedButRetriedUntilComplete)
 
 TYPED_TEST(OwnerMemoTest, RepeatedPartialEnrichmentIsNeverMemoized)
 {
-    owner_memo<network_process> owners;
+    owner_memo<const owner_identity> owners;
     auto row = make_row<TypeParam>(1502, 9, 52002);
-    const auto host = std::make_shared<network_process>(1502, L"HOST.EXE", L"HOST.EXE");
+    const auto host = std::make_shared<const owner_identity>(1502, L"HOST.EXE", L"HOST.EXE");
     int calls = 0;
     for (int i = 0; i < 3; ++i)
-        EXPECT_EQ(memoized_owner(owners, &row, [&](const TypeParam*) -> owner_enrichment<network_process> {
+        EXPECT_EQ(memoized_owner(owners, &row, [&](const TypeParam*) -> owner_enrichment<const owner_identity> {
             ++calls;
             return {host, false};
         }), host);
@@ -337,10 +338,10 @@ TYPED_TEST(OwnerMemoTest, RepeatedPartialEnrichmentIsNeverMemoized)
 TYPED_TEST(OwnerMemoTest, IncompleteDevicePathIsRetriedWithoutDroppingItsRow)
 {
     // Simulate the outputs of a failed, then successful, QueryDosDeviceW conversion. The two
-    // owners are built independently (network_process is not copyable).
+    // owners are built independently.
     const auto make_owner = [](std::wstring device_path)
     {
-        auto owner = std::make_shared<network_process>();
+        auto owner = std::make_shared<owner_identity>();
         owner->id = 1503;
         owner->name = L"APP.EXE";
         owner->path_name = L"X:\\APP.EXE";
@@ -350,9 +351,9 @@ TYPED_TEST(OwnerMemoTest, IncompleteDevicePathIsRetriedWithoutDroppingItsRow)
     auto row = make_row<TypeParam>(1503, 0, 52003);
     const auto partial = make_owner(L"");
     const auto complete = make_owner(L"\\DEVICE\\VOLUME\\APP.EXE");
-    owner_memo<network_process> owners;
+    owner_memo<const owner_identity> owners;
     int calls = 0;
-    const auto enrich = [&](const TypeParam*) -> owner_enrichment<network_process> {
+    const auto enrich = [&](const TypeParam*) -> owner_enrichment<const owner_identity> {
         const auto owner = ++calls == 1 ? partial : complete;
         return {owner, owner->has_complete_device_path()};
     };
@@ -367,18 +368,18 @@ TYPED_TEST(OwnerMemoTest, IncompleteDevicePathIsRetriedWithoutDroppingItsRow)
 
 TEST(OwnerMemoMetadataTest, NonDrivePathsNeedNoDeviceConversion)
 {
-    network_process service(1504, L"SERVICE", L"SERVICE");
+    owner_identity service(1504, L"SERVICE", L"SERVICE");
     EXPECT_TRUE(service.has_complete_device_path());
     EXPECT_TRUE(service.device_path_name.empty());
-    network_process unc(1504, L"APP.EXE", L"\\\\SERVER\\SHARE\\APP.EXE");
+    owner_identity unc(1504, L"APP.EXE", L"\\\\SERVER\\SHARE\\APP.EXE");
     EXPECT_TRUE(unc.has_complete_device_path());
-    network_process empty;
+    owner_identity empty;
     EXPECT_TRUE(empty.has_complete_device_path());
 }
 
 TEST(OwnerMemoMetadataTest, DrivePathIsCompleteOnlyWithItsDevicePath)
 {
-    network_process partial;
+    owner_identity partial;
     partial.path_name = L"X:\\APP.EXE";
     EXPECT_FALSE(partial.has_complete_device_path());
     partial.device_path_name = L"\\DEVICE\\HARDDISKVOLUME9\\APP.EXE";
@@ -389,11 +390,11 @@ TEST(OwnerMemoMetadataTest, CompletenessDoesNotChangeTheResolvedState)
 {
     // Memoization completeness and ownership resolution are separate properties: an owner with
     // an incomplete device path is still a resolved owner.
-    network_process partial(1505, L"APP.EXE", L"X:\\APP.EXE");
+    owner_identity partial(1505, L"APP.EXE", L"X:\\APP.EXE");
     partial.device_path_name.clear();
     EXPECT_FALSE(partial.has_complete_device_path());
     EXPECT_TRUE(partial.resolved);
-    const network_process unresolved(0, L"SYSTEM", L"SYSTEM", false);
+    const owner_identity unresolved(0, L"SYSTEM", L"SYSTEM", false);
     EXPECT_TRUE(unresolved.has_complete_device_path());
     EXPECT_FALSE(unresolved.resolved);
 }
@@ -403,7 +404,7 @@ TEST(OwnerMemoMetadataTest, CompletenessDoesNotChangeTheResolvedState)
 TYPED_TEST(OwnerMemoTest, PidReusedAfterEnrichmentKeepsCapturedOwnerForThisBuild)
 {
     const auto row = make_row<TypeParam>(1601, 0, 53001);
-    owner_memo<network_process> owners;
+    owner_memo<const owner_identity> owners;
     fake_enricher enrich;
     const auto first = memoized_owner(owners, &row, [&](const auto* r) { return enrich(r); });
     enrich.reuse_pid(1601);
@@ -412,7 +413,7 @@ TYPED_TEST(OwnerMemoTest, PidReusedAfterEnrichmentKeepsCapturedOwnerForThisBuild
     EXPECT_EQ(first, later);
     EXPECT_EQ(later->path_name, L"PROC-0");
     EXPECT_EQ(per_row->path_name, L"PROC-1");
-    owner_memo<network_process> next_build;
+    owner_memo<const owner_identity> next_build;
     EXPECT_EQ(memoized_owner(next_build, &row, [&](const auto* r) { return enrich(r); })->path_name, L"PROC-1");
 }
 
@@ -421,7 +422,7 @@ TYPED_TEST(OwnerMemoTest, PidReusedBeforeFirstEnrichmentHasTheBaselineRace)
     const auto row = make_row<TypeParam>(1602, 0, 53002);
     fake_enricher enrich;
     enrich.reuse_pid(1602); // capture happened first; neither implementation has a process birth time
-    owner_memo<network_process> owners;
+    owner_memo<const owner_identity> owners;
     const auto memo = memoized_owner(owners, &row, [&](const auto* r) { return enrich(r); });
     const auto per_row = enrich(&row);
     EXPECT_EQ(memo->path_name, L"PROC-1");
@@ -474,7 +475,7 @@ struct failing_allocator
 
 TYPED_TEST(OwnerMemoTest, MemoizingFailureThrowsAndMemoizesNothing)
 {
-    using memo_t = owner_memo<network_process, failing_allocator<std::pair<const std::uint64_t, process_ptr>>>;
+    using memo_t = owner_memo<const owner_identity, failing_allocator<std::pair<const std::uint64_t, identity_ptr>>>;
     memo_t owners;
     const auto row = make_row<TypeParam>(1700, 0, 54000);
     fake_enricher enrich;

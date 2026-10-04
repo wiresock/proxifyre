@@ -25,9 +25,9 @@ namespace iphelper
      * @brief Owners already enriched during one captured connection table, keyed by (PID, service tag).
      *
      * A table holds many rows per process: every connection of a browser, a download manager or a
-     * service. Enriching a row (process identity check, owner metadata, device path, the
-     * network_process itself) gives the same result for every row of the same PID and service tag in
-     * one enumeration, so it is done for the first such row and the object is shared by the rest.
+     * service. Enriching a row (process identity check, owner metadata, device path) gives the same
+     * result for every row of the same PID and service tag in one enumeration, so it is done for
+     * the first such row and the resulting identity is shared by the rest.
      *
      * - Lifetime: one captured OS table. Nothing carries over to the next enumeration, so a PID that
      *   another process reuses later is enriched afresh. An IPv4 build that also folds rows from an
@@ -41,12 +41,15 @@ namespace iphelper
      *   very OpenProcess call this avoids. Within one build the first row's validation is the one
      *   closest to the enumeration, so a PID reused mid-build cannot make later rows of the same
      *   PID resolve to the new process (which re-validating every row could).
-     * - The shared owner carries mutable per-owner routing state (exclusion and bypass flags,
-     *   optional proxy ports). Those are decided from the owner's identity and the proxy
-     *   configuration, which are the same for every row sharing it; confining sharing to one
-     *   capture keeps that state from reaching another capture, protocol, family, or lookup.
+     * - What is shared is immutable: the enriched identity (iphelper::owner_identity). The
+     *   routing state the packet handlers cache (exclusion and transport bypass flags, optional
+     *   proxy ports) lives on each row's own owner object (iphelper::network_process), which the
+     *   table build creates from the shared identity. A decision cached while routing one
+     *   connection therefore never applies to another connection of the same process, so a
+     *   runtime change to the proxy configuration (a new association or exclusion) takes effect
+     *   for every connection not yet routed, as it did before enrichment was memoized.
      *
-     * @tparam Process   Owner type (network_process), shared between the rows of one capture.
+     * @tparam Process   Memoized type (const owner_identity), shared between the rows of one capture.
      * @tparam Allocator Allocator of the memo's storage. The memo is built inside the table build's
      *                   exception boundary, so an allocation failure fails that build.
      */

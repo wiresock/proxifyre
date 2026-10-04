@@ -70,6 +70,29 @@ namespace proxy
     };
 
     /**
+     * @brief Records the association socks_local_router::associate_process_name_to_proxy makes:
+     *        @p proxy_id -> the upper-cased @p process_name pattern, appended after the patterns
+     *        already configured (select_proxy_port() takes the first match).
+     *
+     * The caller holds the router's configuration lock. The association applies to every owner
+     * routed afterwards; an owner object that already cached a bypass decision for a transport
+     * keeps it until the next capture replaces it (see route_owner()).
+     *
+     * @param proxy_count Number of configured proxies; an index at or beyond it is rejected.
+     * @return false when @p proxy_id is out of range (nothing is changed).
+     * @throws std::bad_alloc from the container insertion.
+     */
+    [[nodiscard]] inline bool associate_process_name_pattern(std::multimap<size_t, std::wstring>& proxy_to_names,
+        const size_t proxy_id, const size_t proxy_count, const std::wstring& process_name)
+    {
+        if (proxy_id >= proxy_count)
+            return false;
+
+        proxy_to_names.emplace(proxy_id, iphelper::network_process::to_upper(process_name));
+        return true;
+    }
+
+    /**
      * @brief Matches an application name pattern against the process details with exclusion support.
      *
      * Matching semantics:
@@ -194,9 +217,11 @@ namespace proxy
      * transport when one is set (the IPv6 handlers do not consult it), and @p select decides.
      * A selection of none marks the owner as bypassing this transport.
      *
-     * One owner object can serve every connection of its identity within one captured
-     * connection table, so this cached state applies to all of them. It is derived only from
-     * the owner's identity and the proxy configuration.
+     * Each published connection-table row has its own owner object, so the cached state is
+     * per connection: it is derived from the owner's identity and the proxy configuration at
+     * the time of the decision and stays with that connection until the next capture publishes
+     * a new owner object for it. Connections not yet routed are decided against the current
+     * configuration.
      *
      * @param select () -> proxy_port_result, the proxy selection for this transport and family.
      * @return none: pass the packet; proxy: redirect to port; block: drop the packet.

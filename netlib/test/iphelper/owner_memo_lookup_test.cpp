@@ -7,7 +7,9 @@
 //
 // There are six ingestion loops: the TCP and UDP primary loops of the IPv4 and IPv6 instances,
 // and the IPv4 instance's two supplementary AF_INET6 folds (IPv4-mapped TCP; IPv4-mapped and
-// unspecified UDP). Each captured table is enriched with its own memo.
+// unspecified UDP). Each captured table is enriched with its own memo. The rows of one identity
+// in a capture share its enrichment; each published row has its own owner object
+// (expect_same_identity).
 
 #include "pch.h"
 #include "fake_ownership_source.h"
@@ -16,135 +18,7 @@ namespace
 {
     using namespace netlib_test::ownership;
 
-    // ------------------------------------------------------------------------------------
-    // One ingestion loop: where its rows live, which capture and lookup instance serve them.
-    // ------------------------------------------------------------------------------------
-
-    enum class loop : uint8_t { tcp_v4, tcp_v6, udp_v4, udp_v6, tcp_v4_mapped, udp_v4_mapped };
-
-    std::string loop_name(const ::testing::TestParamInfo<loop>& info)
-    {
-        switch (info.param)
-        {
-        case loop::tcp_v4: return "TcpV4Primary";
-        case loop::tcp_v6: return "TcpV6Primary";
-        case loop::udp_v4: return "UdpV4Primary";
-        case loop::udp_v6: return "UdpV6Primary";
-        case loop::tcp_v4_mapped: return "TcpV4MappedSupplement";
-        case loop::udp_v4_mapped: return "UdpV4MappedSupplement";
-        }
-        return "Unknown";
-    }
-
-    class loop_harness
-    {
-    public:
-        explicit loop_harness(const loop l) : loop_(l) {}
-
-        [[nodiscard]] table_kind capture() const
-        {
-            switch (loop_)
-            {
-            case loop::tcp_v4: return table_kind::tcp_v4;
-            case loop::udp_v4: return table_kind::udp_v4;
-            case loop::tcp_v6:
-            case loop::tcp_v4_mapped: return table_kind::tcp_v6;
-            case loop::udp_v6:
-            case loop::udp_v4_mapped: return table_kind::udp_v6;
-            }
-            return table_kind::tcp_v4;
-        }
-
-        [[nodiscard]] bool tcp() const
-        {
-            return loop_ == loop::tcp_v4 || loop_ == loop::tcp_v6 || loop_ == loop::tcp_v4_mapped;
-        }
-
-        [[nodiscard]] bool served_by_v4() const
-        {
-            return loop_ != loop::tcp_v6 && loop_ != loop::udp_v6;
-        }
-
-        /// Adds the loop's row number @p i (a distinct tuple) owned by (@p pid, @p tag).
-        void add_row(const DWORD pid, const DWORD tag, const uint16_t i) const
-        {
-            auto& os = fake_os::instance();
-            const auto port = static_cast<uint16_t>(10000 + i);
-            switch (loop_)
-            {
-            case loop::tcp_v4: os.tcp4.push_back(tcp4_row(pid, tag, "10.0.0.1", port, "10.9.9.9", 443)); break;
-            case loop::tcp_v6: os.tcp6.push_back(tcp6_row(pid, tag, "2001:db8::1", port, "2001:db8::9", 443)); break;
-            case loop::udp_v4: os.udp4.push_back(udp4_row(pid, tag, "10.0.0.1", port)); break;
-            case loop::udp_v6: os.udp6.push_back(udp6_row(pid, tag, "2001:db8::1", port)); break;
-            case loop::tcp_v4_mapped:
-                os.tcp6.push_back(tcp6_row(pid, tag, "::ffff:10.0.0.1", port, "::ffff:10.9.9.9", 443));
-                break;
-            case loop::udp_v4_mapped: os.udp6.push_back(udp6_row(pid, tag, "::ffff:10.0.0.1", port)); break;
-            }
-        }
-
-        void clear_rows() const
-        {
-            auto& os = fake_os::instance();
-            os.tcp4.clear();
-            os.tcp6.clear();
-            os.udp4.clear();
-            os.udp6.clear();
-        }
-
-        /// Rebuilds the tables that contain this loop (one or two captures).
-        bool refresh()
-        {
-            return served_by_v4() ? v4_.actualize(tcp(), !tcp()) : v6_.actualize(tcp(), !tcp());
-        }
-
-        /// The published owner of row @p i, through the production lookup.
-        process_ptr owner(const uint16_t i)
-        {
-            const auto port = static_cast<uint16_t>(10000 + i);
-            switch (loop_)
-            {
-            case loop::tcp_v4:
-            case loop::tcp_v4_mapped:
-                return v4_.lookup_process_for_tcp<false>(session4("10.0.0.1", port, "10.9.9.9", 443));
-            case loop::tcp_v6:
-                return v6_.lookup_process_for_tcp<false>(session6("2001:db8::1", port, "2001:db8::9", 443));
-            case loop::udp_v4:
-            case loop::udp_v4_mapped:
-                return v4_.lookup_process_for_udp<false>(endpoint4("10.0.0.1", port));
-            case loop::udp_v6:
-                return v6_.lookup_process_for_udp<false>(endpoint6("2001:db8::1", port));
-            }
-            return nullptr;
-        }
-
-    private:
-        loop loop_;
-        // Constructed empty (each constructor builds its tables once).
-        lookup_v4 v4_;
-        lookup_v6 v6_;
-    };
-
-    class OwnerMemoLookupTest : public fake_os_fixture, public ::testing::WithParamInterface<loop>
-    {
-    protected:
-        void SetUp() override
-        {
-            fake_os_fixture::SetUp();
-            harness_.emplace(GetParam());
-        }
-
-        void TearDown() override
-        {
-            harness_.reset();
-            fake_os_fixture::TearDown();
-        }
-
-        loop_harness& h() { return *harness_; }
-
-    private:
-        std::optional<loop_harness> harness_;
-    };
+    using OwnerMemoLookupTest = loop_fixture;
 
     // ------------------------------------------------------------------------------------
     // One identity, many rows
@@ -170,8 +44,11 @@ namespace
         EXPECT_EQ(first->id, 1000u);
         EXPECT_TRUE(first->resolved);
         EXPECT_FALSE(first->device_path_name.empty());
-        for (uint16_t i = 0; i < 50; ++i)
-            EXPECT_EQ(h().owner(i), first) << "row " << i << " is published with the shared owner";
+        for (uint16_t i = 1; i < 50; ++i)
+        {
+            SCOPED_TRACE(i);
+            expect_same_identity(h().owner(i), first);
+        }
     }
 
     TEST_P(OwnerMemoLookupTest, DistinctServiceTagsStayDistinct)
@@ -193,8 +70,8 @@ namespace
         EXPECT_EQ(h().owner(2)->name, L"WINHTTPAUTOPROXYSVC");
         EXPECT_NE(h().owner(0), h().owner(1));
         EXPECT_NE(h().owner(1), h().owner(2));
-        EXPECT_EQ(h().owner(1), h().owner(28));
-        EXPECT_EQ(h().owner(0), h().owner(27));
+        expect_same_identity(h().owner(1), h().owner(28));
+        expect_same_identity(h().owner(0), h().owner(27));
     }
 
     TEST_P(OwnerMemoLookupTest, SystemPidRowsBypassEnrichmentAndAreNotPublished)
@@ -234,8 +111,8 @@ namespace
         EXPECT_EQ(h().owner(1), nullptr);
         ASSERT_TRUE(h().owner(2));
         EXPECT_EQ(h().owner(2)->name, L"APP.EXE");
-        for (uint16_t i = 2; i < 10; ++i)
-            EXPECT_EQ(h().owner(i), h().owner(2));
+        for (uint16_t i = 3; i < 10; ++i)
+            expect_same_identity(h().owner(i), h().owner(2));
     }
 
     TEST_P(OwnerMemoLookupTest, ServiceFallbackIsUsedForItsRowButTheServiceIsRetried)
@@ -265,8 +142,8 @@ namespace
         EXPECT_EQ(recovered->name, L"DNSCACHE");
         EXPECT_TRUE(recovered->resolved);
         EXPECT_NE(recovered, fallback);
-        for (uint16_t i = 1; i < 10; ++i)
-            EXPECT_EQ(h().owner(i), recovered);
+        for (uint16_t i = 2; i < 10; ++i)
+            expect_same_identity(h().owner(i), recovered);
     }
 
     TEST_P(OwnerMemoLookupTest, RepeatedServiceFallbackIsNeverMemoized)
@@ -287,7 +164,7 @@ namespace
             EXPECT_EQ(h().owner(i)->name, L"SVCHOST.EXE");
             EXPECT_TRUE(h().owner(i)->resolved);
         }
-        EXPECT_NE(h().owner(0), h().owner(1)) << "fallback owners are per row, not shared";
+        EXPECT_NE(h().owner(0), h().owner(1)) << "fallback owners are per row";
     }
 
     TEST_P(OwnerMemoLookupTest, IncompleteDevicePathIsRetriedAndTheLaterCompleteOwnerIsReused)
@@ -318,8 +195,8 @@ namespace
         ASSERT_TRUE(complete);
         EXPECT_FALSE(complete->device_path_name.empty());
         EXPECT_NE(complete, partial);
-        for (uint16_t i = 1; i < 10; ++i)
-            EXPECT_EQ(h().owner(i), complete);
+        for (uint16_t i = 2; i < 10; ++i)
+            expect_same_identity(h().owner(i), complete);
     }
 
     // ------------------------------------------------------------------------------------
@@ -488,7 +365,7 @@ namespace
         const auto wildcard = lookup.lookup_process_for_udp<false>(endpoint4("192.0.2.20", 5401));
         ASSERT_TRUE(wildcard);
         EXPECT_EQ(wildcard->name, L"NATIVE.EXE");
-        EXPECT_EQ(wildcard, exact) << "one capture's identity shares its owner";
+        expect_same_identity(wildcard, exact); // one capture's identity, enriched once
     }
 
     TEST_F(OwnerMemoMappedTest, UdpExactEndpointIsMatchedBeforeTheFoldedWildcard)
@@ -560,8 +437,9 @@ namespace
             EXPECT_NE(old_owner, new_owner);
             for (uint16_t i = 1; i < 5; ++i)
             {
-                EXPECT_EQ(owner_of(static_cast<uint16_t>(51000 + i)), old_owner);
-                EXPECT_EQ(owner_of(static_cast<uint16_t>(52000 + i)), new_owner);
+                SCOPED_TRACE(i);
+                expect_same_identity(owner_of(static_cast<uint16_t>(51000 + i)), old_owner);
+                expect_same_identity(owner_of(static_cast<uint16_t>(52000 + i)), new_owner);
             }
 
             EXPECT_EQ(os().capture_since(m, tcp ? table_kind::tcp_v4 : table_kind::udp_v4).owner_lookups, 1);

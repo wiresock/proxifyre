@@ -7,9 +7,10 @@
 // exclusions, family blocking, and limited-mode handling of unresolved owners. The fixture
 // supplies only configuration: application patterns, exclusions, and what each proxy offers.
 //
-// An owner is shared by every connection of its (PID, service tag) within one capture. Its
-// cached routing state must therefore follow the identity within that capture and never reach
-// another capture, protocol table, address family, or lookup instance.
+// The connections of one (PID, service tag) within one capture share one enrichment, but each
+// published connection has its own owner object. Cached routing state is therefore per
+// connection: it never reaches another connection of the same process, nor another capture,
+// protocol table, address family, or lookup instance.
 
 #include "pch.h"
 #include "../iphelper/fake_ownership_source.h"
@@ -132,13 +133,15 @@ namespace
 
     // ------------------------------------------------------------------------------------
 
-    TEST_F(OwnerRoutingPolicyTest, SharedOwnerCarriesOneDecisionForAllItsConnections)
+    TEST_F(OwnerRoutingPolicyTest, EachConnectionOfAnIdentityCarriesItsOwnDecision)
     {
         os().images[3000] = image(L"APP.EXE");
         os().images[3001] = image(L"OTHER.EXE");
         add_everywhere(3000, 1000, 20);
         add_everywhere(3001, 2000, 20);
+        const auto m = mark();
         lookup_v4 l4;
+        EXPECT_EQ(os().capture_since(m, table_kind::tcp_v4).owner_lookups, 2) << "one enrichment per identity";
 
         routing_config config;
         config.proxies.push_back({});
@@ -147,18 +150,24 @@ namespace
         const auto app = tcp4(l4, 1000);
         const auto other = tcp4(l4, 2000);
         ASSERT_TRUE(app && other);
-        for (uint16_t i = 0; i < 20; ++i)
+        for (uint16_t i = 1; i < 20; ++i)
         {
-            EXPECT_EQ(tcp4(l4, static_cast<uint16_t>(1000 + i)), app) << "connections of one identity share an owner";
-            EXPECT_EQ(tcp4(l4, static_cast<uint16_t>(2000 + i)), other);
+            SCOPED_TRACE(i);
+            expect_same_identity(tcp4(l4, static_cast<uint16_t>(1000 + i)), app);
+            expect_same_identity(tcp4(l4, static_cast<uint16_t>(2000 + i)), other);
+        }
+        for (uint16_t i = 0; i < 10; ++i)
+        {
             expect_route(config.route<tcp, ipv4>(tcp4(l4, static_cast<uint16_t>(1000 + i))), proxy_port_action::proxy, 40001);
             expect_route(config.route<tcp, ipv4>(tcp4(l4, static_cast<uint16_t>(2000 + i))), proxy_port_action::none);
         }
 
         EXPECT_FALSE(app->bypass_tcp);
-        EXPECT_TRUE(other->bypass_tcp) << "the unmatched identity bypasses TCP";
+        EXPECT_TRUE(other->bypass_tcp) << "the unmatched connection bypasses TCP";
         EXPECT_FALSE(other->bypass_udp) << "TCP bypass does not mark UDP";
         expect_untouched(udp4(l4, 2000));
+        for (uint16_t i = 10; i < 20; ++i)
+            expect_untouched(tcp4(l4, static_cast<uint16_t>(2000 + i))); // not yet routed: no decision cached
     }
 
     TEST_F(OwnerRoutingPolicyTest, ExclusionIsConfinedToTheExcludedIdentityInItsCapture)
@@ -261,7 +270,7 @@ namespace
             expect_untouched(owner);
     }
 
-    TEST_F(OwnerRoutingPolicyTest, OptionalProxyPortIsConfinedToItsOwnerObject)
+    TEST_F(OwnerRoutingPolicyTest, OptionalProxyPortIsConfinedToItsConnectionsOwnerObject)
     {
         os().images[3400] = image(L"APP.EXE");
         add_everywhere(3400, 1000);
@@ -273,13 +282,21 @@ namespace
         config.proxies.push_back({});
 
         // Production code does not assign the optional ports; a preassigned one is honored by
-        // the IPv4 handlers for the owner object that carries it.
+        // the IPv4 handlers for the connection whose owner object carries it, and for no other
+        // connection of the same process.
         const auto owner = tcp4(l4, 1000);
         owner->tcp_proxy_port = 41000;
 
-        for (uint16_t i = 0; i < 10; ++i)
-            expect_route(config.route<tcp, ipv4>(tcp4(l4, static_cast<uint16_t>(1000 + i))), proxy_port_action::proxy, 41000);
+        expect_route(config.route<tcp, ipv4>(owner), proxy_port_action::proxy, 41000);
+        expect_route(config.route<tcp, ipv4>(owner), proxy_port_action::proxy, 41000);
         EXPECT_FALSE(owner->bypass_tcp);
+        for (uint16_t i = 1; i < 10; ++i)
+        {
+            const auto sibling = tcp4(l4, static_cast<uint16_t>(1000 + i));
+            ASSERT_TRUE(sibling);
+            EXPECT_FALSE(sibling->tcp_proxy_port.has_value());
+            expect_route(config.route<tcp, ipv4>(sibling), proxy_port_action::none);
+        }
 
         const auto mapped = tcp4(l4, 3000);
         ASSERT_TRUE(mapped);
@@ -410,7 +427,7 @@ namespace
         }
     }
 
-    TEST_F(OwnerRoutingPolicyTest, ConcurrentRoutingOfSharedOwnersIsConsistent)
+    TEST_F(OwnerRoutingPolicyTest, ConcurrentRoutingOfConnectionsIsConsistent)
     {
         os().images[3800] = image(L"APP.EXE");
         os().images[3801] = image(L"OTHER.EXE");
@@ -467,5 +484,162 @@ namespace
         EXPECT_NE(after, before);
         expect_untouched(after);
         EXPECT_TRUE(before->bypass_tcp) << "an owner already handed out keeps its state";
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Runtime configuration changes
+    // ------------------------------------------------------------------------------------
+
+    /// Owners of every ingestion loop, routed by the packet handler of the loop's transport and
+    /// address family, while the configuration changes between two connections of one process.
+    class OwnerRoutingConfigurationChangeTest : public loop_fixture
+    {
+    protected:
+        /// The handler's owner decision for one packet of @p owner in this loop's transport and family.
+        proxy_port_result route(const routing_config& config, const process_ptr& owner)
+        {
+            switch (h().which())
+            {
+            case loop::tcp_v4:
+            case loop::tcp_v4_mapped: return config.route<tcp, ipv4>(owner);
+            case loop::udp_v4:
+            case loop::udp_v4_mapped: return config.route<udp, ipv4>(owner);
+            case loop::tcp_v6: return config.route<tcp, ipv6>(owner);
+            case loop::udp_v6: return config.route<udp, ipv6>(owner);
+            }
+            return {};
+        }
+
+        /// The listener @p offer provides to this loop's transport and family.
+        uint16_t listener_port(const proxy_offer& offer) const
+        {
+            switch (h().which())
+            {
+            case loop::tcp_v4:
+            case loop::tcp_v4_mapped: return offer.tcp4_port;
+            case loop::udp_v4:
+            case loop::udp_v4_mapped: return offer.udp4_port;
+            case loop::tcp_v6: return offer.tcp6_port;
+            case loop::udp_v6: return offer.udp6_port;
+            }
+            return 0;
+        }
+
+        bool bypassed(const process_ptr& owner) const
+        {
+            return h().tcp() ? owner->bypass_tcp.load() : owner->bypass_udp.load();
+        }
+    };
+
+    TEST_P(OwnerRoutingConfigurationChangeTest, AssociationAddedAfterOneRowWasRoutedAppliesToTheUntouchedRow)
+    {
+        // Two connections of one process are captured by the production ingestion (one
+        // enrichment for the identity).
+        os().images[3000] = image(L"APP.EXE");
+        h().add_row(3000, 0, 0);
+        h().add_row(3000, 0, 1);
+        const auto m = mark();
+        ASSERT_TRUE(h().refresh());
+        EXPECT_EQ(os().capture_since(m, h().capture()).owner_lookups, 1) << "the identity is enriched once";
+
+        routing_config config;
+        config.proxies.push_back({}); // a proxy is configured, but no application is associated yet
+
+        // The first connection's first packet: nothing matches, it passes, and its owner caches
+        // the transport bypass.
+        const auto first = h().owner(0);
+        const auto second = h().owner(1);
+        ASSERT_TRUE(first && second);
+        expect_route(route(config, first), proxy_port_action::none);
+        EXPECT_TRUE(bypassed(first));
+        expect_untouched(second);
+
+        // The runtime configuration change socks_local_router::associate_process_name_to_proxy makes.
+        ASSERT_TRUE(proxy::associate_process_name_pattern(config.proxy_to_names, 0, config.proxies.size(), L"app.exe"));
+
+        // The second connection's first packet, without any refresh of the ownership tables:
+        // it selects the new association, as an independently enriched owner did before the
+        // memo. A bypass cached while routing the first connection must not reach it.
+        expect_route(route(config, second), proxy_port_action::proxy, listener_port(config.proxies[0]));
+        EXPECT_FALSE(bypassed(second));
+        EXPECT_FALSE(second->excluded);
+
+        // The connection already routed keeps the decision cached on its own owner until the
+        // next capture publishes a new owner for it (the behavior before the memo).
+        expect_route(route(config, first), proxy_port_action::none);
+        EXPECT_TRUE(bypassed(first));
+
+        ASSERT_TRUE(h().refresh());
+        expect_route(route(config, h().owner(0)), proxy_port_action::proxy, listener_port(config.proxies[0]));
+        expect_route(route(config, h().owner(1)), proxy_port_action::proxy, listener_port(config.proxies[0]));
+    }
+
+    TEST_P(OwnerRoutingConfigurationChangeTest, LaterAssociationDoesNotOvertakeTheFirstMatch)
+    {
+        // The catch-all is associated first; a later, more specific association for the same
+        // process is appended after it and does not change which proxy the process selects.
+        os().images[3010] = image(L"APP.EXE");
+        h().add_row(3010, 0, 0);
+        h().add_row(3010, 0, 1);
+        ASSERT_TRUE(h().refresh());
+
+        routing_config config;
+        config.proxies.push_back({});
+        proxy_offer second_proxy;
+        second_proxy.tcp4_port = 42001;
+        second_proxy.udp4_port = 42002;
+        second_proxy.tcp6_port = 42003;
+        second_proxy.udp6_port = 42004;
+        config.proxies.push_back(second_proxy);
+        ASSERT_TRUE(proxy::associate_process_name_pattern(config.proxy_to_names, 0, config.proxies.size(), L""));
+
+        expect_route(route(config, h().owner(0)), proxy_port_action::proxy, listener_port(config.proxies[0]));
+
+        ASSERT_TRUE(proxy::associate_process_name_pattern(config.proxy_to_names, 1, config.proxies.size(), L"APP.EXE"));
+        expect_route(route(config, h().owner(1)), proxy_port_action::proxy, listener_port(config.proxies[0]));
+        expect_route(route(config, h().owner(0)), proxy_port_action::proxy, listener_port(config.proxies[0]));
+    }
+
+    TEST_P(OwnerRoutingConfigurationChangeTest, ExclusionAddedAfterOneRowWasRoutedAppliesToBothRows)
+    {
+        // A proxy decision is not cached, so an exclusion added at runtime is honored by the
+        // next packet of either connection.
+        os().images[3020] = image(L"BLOCKED.EXE");
+        h().add_row(3020, 0, 0);
+        h().add_row(3020, 0, 1);
+        ASSERT_TRUE(h().refresh());
+
+        routing_config config;
+        config.proxies.push_back({});
+        ASSERT_TRUE(proxy::associate_process_name_pattern(config.proxy_to_names, 0, config.proxies.size(), L""));
+
+        const auto first = h().owner(0);
+        const auto second = h().owner(1);
+        ASSERT_TRUE(first && second);
+        expect_route(route(config, first), proxy_port_action::proxy, listener_port(config.proxies[0]));
+        EXPECT_FALSE(first->excluded);
+
+        config.excluded.push_back(L"BLOCKED"); // exclude_process_name's upper-cased entry
+
+        expect_route(route(config, second), proxy_port_action::none);
+        EXPECT_TRUE(second->excluded);
+        expect_route(route(config, first), proxy_port_action::none);
+        EXPECT_TRUE(first->excluded);
+    }
+
+    INSTANTIATE_TEST_CASE_P(AllIngestionLoops, OwnerRoutingConfigurationChangeTest,
+        ::testing::ValuesIn(all_loops), loop_name);
+
+    TEST(OwnerRoutingAssociationTest, OutOfRangeProxyIndexIsRejectedAndChangesNothing)
+    {
+        std::multimap<size_t, std::wstring> proxy_to_names;
+        EXPECT_FALSE(proxy::associate_process_name_pattern(proxy_to_names, 1, 1, L"app.exe"));
+        EXPECT_FALSE(proxy::associate_process_name_pattern(proxy_to_names, 0, 0, L"app.exe"));
+        EXPECT_TRUE(proxy_to_names.empty());
+
+        ASSERT_TRUE(proxy::associate_process_name_pattern(proxy_to_names, 0, 1, L"app.exe"));
+        ASSERT_EQ(proxy_to_names.size(), 1u);
+        EXPECT_EQ(proxy_to_names.begin()->first, 0u);
+        EXPECT_EQ(proxy_to_names.begin()->second, L"APP.EXE") << "the pattern is upper-cased, as the router matches it";
     }
 }

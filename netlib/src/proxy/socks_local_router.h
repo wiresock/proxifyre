@@ -1587,18 +1587,16 @@ namespace proxy
             // ensuring it gets released even if an exception is thrown.
             std::scoped_lock lock(lock_);
 
-            // Check if the provided proxy ID is within the range of available proxies
-            if (proxy_id >= proxy_servers_.size())
-            {
-                NETLIB_LOG(log_level::error,
-                    "associate_process_name_to_proxy: proxy index is out of range!");
-                return false; // Return false since the proxy_id is out of range
-            }
-
             try
             {
-                // Associate the given process name to the specified proxy ID.
-                proxy_to_names_.emplace(proxy_id, to_upper(process_name));
+                // Associate the given process name to the specified proxy ID (rejected when the
+                // proxy ID is not within the range of available proxies).
+                if (!associate_process_name_pattern(proxy_to_names_, proxy_id, proxy_servers_.size(), process_name))
+                {
+                    NETLIB_LOG(log_level::error,
+                        "associate_process_name_to_proxy: proxy index is out of range!");
+                    return false; // Return false since the proxy_id is out of range
+                }
             }
             catch (const std::exception& e) {
                 NETLIB_LOG(log_level::error, "Exception associating process name to proxy: {}", e.what());
