@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <format>
 #include <fstream>
 #include <functional>
@@ -39,6 +40,7 @@
 #include <sstream>
 #include <string>
 #include <syncstream>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <variant>
@@ -54,5 +56,6 @@
 #include "../netlib/src/net/ip_address.h"
 #include "../netlib/src/net/ip_endpoint.h"
 #include "../netlib/src/iphelper/process_lookup.h"
+#include "../netlib/src/proxy/process_routing_policy.h"
 
 #endif // PCH_H

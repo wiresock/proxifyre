@@ -88,6 +88,7 @@
   <ItemGroup>
     <ClInclude Include="pch.h" />
     <ClInclude Include="test_support.h" />
+    <ClInclude Include="..\netlib\test\iphelper\fake_ownership_source.h" />
     <ClInclude Include="..\netlib\test\iphelper\os_tables.h" />
     <ClInclude Include="..\netlib\test\iphelper\process_lookup_cases.h" />
   </ItemGroup>
@@ -99,8 +100,11 @@
     <ClCompile Include="helper_lifecycle_test.cpp" />
     <ClCompile Include="helper_process_test.cpp" />
     <ClCompile Include="..\netlib\test\iphelper\os_tables_test.cpp" />
+    <ClCompile Include="..\netlib\test\iphelper\owner_memo_lookup_test.cpp" />
+    <ClCompile Include="..\netlib\test\iphelper\owner_memo_test.cpp" />
     <ClCompile Include="..\netlib\test\iphelper\process_lookup_failure_test.cpp" />
     <ClCompile Include="..\netlib\test\iphelper\process_lookup_test.cpp" />
+    <ClCompile Include="..\netlib\test\proxy\owner_routing_policy_test.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

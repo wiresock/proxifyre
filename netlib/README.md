@@ -61,3 +61,11 @@ as subprocesses by `ProcessLookupFailureProbeTest`, `ProcessLookupUnsupportedSta
 `DISABLED_HelperLifecycleProbe.HoldAtCreationBoundary` runs only as the parent subprocess of
 `HelperLifecycleTest`, which terminates it at the process-creation boundary and verifies that the
 still-suspended helper exits.
+
+The ownership memo, dual-stack fold, and routing tests (`*OwnerMemo*`, `OwnerRoutingPolicyTest.*`)
+are deterministic. They run `process_lookup`'s production table ingestion and row enrichment over
+scripted owner-module rows and owner resolution supplied through its `Source` template parameter
+(`netlib/test/iphelper/fake_ownership_source.h`), and the production routing decisions in
+`netlib/src/proxy/process_routing_policy.h`. They use no sockets, helper processes, or driver, and
+never report UNSUPPORTED. Parameterized cases are prefixed by their instantiation name, so filter
+them with `--gtest_filter=*OwnerMemo*:*OwnerRouting*`.
