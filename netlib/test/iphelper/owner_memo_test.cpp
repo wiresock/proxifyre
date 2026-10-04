@@ -337,22 +337,16 @@ TYPED_TEST(OwnerMemoTest, RepeatedPartialEnrichmentIsNeverMemoized)
     EXPECT_EQ(owners.size(), 0u);
 }
 
+/// Device-path conversions standing in for a failed and a successful QueryDosDeviceW.
+std::wstring failing_conversion(const std::wstring&) { return L""; }
+std::wstring volume_conversion(const std::wstring& path) { return L"\\Device\\Volume" + path.substr(2); }
+
 TYPED_TEST(OwnerMemoTest, IncompleteDevicePathIsRetriedWithoutDroppingItsRow)
 {
-    // Simulate the outputs of a failed, then successful, QueryDosDeviceW conversion. The two
-    // owners are built independently.
-    const auto make_owner = [](std::wstring device_path)
-    {
-        auto owner = std::make_shared<owner_identity>();
-        owner->id = 1503;
-        owner->name = L"APP.EXE";
-        owner->path_name = L"X:\\APP.EXE";
-        owner->device_path_name = std::move(device_path);
-        return owner;
-    };
+    // A failed, then a successful, device-path conversion of the same enrichment result.
     auto row = make_row<TypeParam>(1503, 0, 52003);
-    const auto partial = make_owner(L"");
-    const auto complete = make_owner(L"\\DEVICE\\VOLUME\\APP.EXE");
+    const auto partial = std::make_shared<const owner_identity>(1503, L"APP.EXE", L"X:\\APP.EXE", &failing_conversion);
+    const auto complete = std::make_shared<const owner_identity>(1503, L"APP.EXE", L"X:\\APP.EXE", &volume_conversion);
     owner_memo<const owner_identity> owners;
     int calls = 0;
     const auto enrich = [&](const TypeParam*) -> owner_enrichment<const owner_identity> {
@@ -381,24 +375,54 @@ TEST(OwnerMemoMetadataTest, NonDrivePathsNeedNoDeviceConversion)
 
 TEST(OwnerMemoMetadataTest, DrivePathIsCompleteOnlyWithItsDevicePath)
 {
-    owner_identity partial;
-    partial.path_name = L"X:\\APP.EXE";
+    const owner_identity partial(1503, L"APP.EXE", L"X:\\APP.EXE", &failing_conversion);
+    EXPECT_EQ(partial.path_name, L"X:\\APP.EXE");
+    EXPECT_TRUE(partial.device_path_name.empty());
     EXPECT_FALSE(partial.has_complete_device_path());
-    partial.device_path_name = L"\\DEVICE\\HARDDISKVOLUME9\\APP.EXE";
-    EXPECT_TRUE(partial.has_complete_device_path());
+
+    const owner_identity complete(1503, L"APP.EXE", L"x:\\app.exe", &volume_conversion);
+    EXPECT_EQ(complete.path_name, L"X:\\APP.EXE");
+    EXPECT_EQ(complete.device_path_name, L"\\DEVICE\\VOLUME\\APP.EXE") << "converted from the path as given, then upper-cased";
+    EXPECT_TRUE(complete.has_complete_device_path());
+
+    const owner_identity service(1504, L"SERVICE", L"SERVICE", &failing_conversion);
+    EXPECT_TRUE(service.has_complete_device_path()) << "a service name needs no conversion";
 }
 
 TEST(OwnerMemoMetadataTest, CompletenessDoesNotChangeTheResolvedState)
 {
     // Memoization completeness and ownership resolution are separate properties: an owner with
     // an incomplete device path is still a resolved owner.
-    owner_identity partial(1505, L"APP.EXE", L"X:\\APP.EXE");
-    partial.device_path_name.clear();
+    const owner_identity partial(1505, L"APP.EXE", L"X:\\APP.EXE", &failing_conversion);
     EXPECT_FALSE(partial.has_complete_device_path());
     EXPECT_TRUE(partial.resolved);
     const owner_identity unresolved(0, L"SYSTEM", L"SYSTEM", false);
     EXPECT_TRUE(unresolved.has_complete_device_path());
     EXPECT_FALSE(unresolved.resolved);
+}
+
+TEST(OwnerMemoMetadataTest, ProductionSourceConvertsThroughTheWindowsDevicePath)
+{
+    // The production source and the plain constructors keep the Windows conversion
+    // (QueryDosDeviceW). The system drive always exists, so its conversion succeeds.
+    wchar_t windows[MAX_PATH]{};
+    const auto n = ::GetSystemWindowsDirectoryW(windows, MAX_PATH);
+    ASSERT_TRUE(n >= 2 && windows[1] == L':') << "no drive-letter system directory";
+    const std::wstring path = std::wstring{ windows[0], L':', L'\\' } + L"Apps\\APP.EXE";
+
+    const auto expected = owner_identity::convert_to_device_path(path);
+    ASSERT_FALSE(expected.empty());
+    EXPECT_EQ(expected.find(L"\\Device\\"), 0u);
+    EXPECT_EQ(system_ownership_source::convert_to_device_path(path), expected);
+
+    const owner_identity by_source(1506, L"APP.EXE", path, &system_ownership_source::convert_to_device_path);
+    const owner_identity by_default(1506, L"APP.EXE", path);
+    const network_process as_process(1506, L"APP.EXE", path);
+    for (const owner_identity* owner : { &by_source, &by_default, static_cast<const owner_identity*>(&as_process) })
+    {
+        EXPECT_EQ(owner->device_path_name, owner_identity::to_upper(expected));
+        EXPECT_TRUE(owner->has_complete_device_path());
+    }
 }
 
 // ---------------------------------------------------------------- lifetime and PID reuse

@@ -17,6 +17,9 @@ namespace iphelper
      */
     struct owner_identity
     {
+        /// Converts a DOS drive path to its device path; empty when it cannot be converted.
+        using device_path_converter = std::wstring (*)(const std::wstring& path);
+
         /**
          * @brief Default constructor.
          */
@@ -31,13 +34,26 @@ namespace iphelper
          * @param resolved Whether the process owner was resolved from the system connection table
          *
          * @note All string parameters are automatically converted to uppercase and the
-         *       device path is computed from the provided path.
+         *       device path is computed from the provided path with convert_to_device_path().
          */
         owner_identity(const unsigned long id, std::wstring name, std::wstring path,
             const bool resolved = true)
+            : owner_identity(id, std::move(name), std::move(path), &convert_to_device_path, resolved)
+        {
+        }
+
+        /**
+         * @brief Constructs an owner_identity whose device path is computed by @p convert.
+         *
+         * process_lookup passes its Source's conversion (the Windows one for the production
+         * source), so that the completeness of the device path, and with it whether the identity
+         * is memoizable (has_complete_device_path()), is decided by this type for any conversion.
+         */
+        owner_identity(const unsigned long id, std::wstring name, std::wstring path,
+            const device_path_converter convert, const bool resolved = true)
             : name(std::move(name)),
             path_name(std::move(path)),
-            device_path_name(convert_to_device_path(path_name)),
+            device_path_name(convert(path_name)),
             id(id),
             resolved(resolved)
         {
@@ -176,8 +192,9 @@ namespace iphelper
      * @brief The operating-system services process_lookup builds its tables from.
      *
      * process_lookup takes this as a defaulted template argument so that the native tests can
-     * substitute deterministic connection tables and owner resolution while the production table
-     * ingestion and enrichment code runs unchanged. Production code always uses this type.
+     * substitute deterministic connection tables, owner resolution, and device-path conversion
+     * while the production table ingestion and enrichment code runs unchanged. Production code
+     * always uses this type.
      */
     struct system_ownership_source
     {
@@ -205,6 +222,14 @@ namespace iphelper
             return owner_module_resolver::resolve_from_pid_and_tag(pid, service_tag, out);
         }
 
+        /// The device path of an owner's DOS drive path (owner_identity::convert_to_device_path,
+        /// i.e. QueryDosDeviceW); empty when the conversion fails, which keeps the owner usable
+        /// for its row but not memoizable.
+        static std::wstring convert_to_device_path(const std::wstring& path)
+        {
+            return owner_identity::convert_to_device_path(path);
+        }
+
         /// Identities enriched while ingesting one captured table (see owner_memo).
         template <class Process>
         using owner_memo_type = owner_memo<Process>;
@@ -227,8 +252,8 @@ namespace iphelper
      * - Fallback mechanisms for service tag resolution
      *
      * @tparam T IP address type (net::ip_address_v4 or net::ip_address_v6)
-     * @tparam Source Connection tables and owner resolution (system_ownership_source; tests only
-     *         substitute a deterministic source)
+     * @tparam Source Connection tables, owner resolution, and device-path conversion
+     *         (system_ownership_source; tests only substitute a deterministic source)
      *
      * @note Designed as a non-copyable, non-movable class to ensure singleton-like behavior
      */
@@ -623,7 +648,8 @@ namespace iphelper
                 auto owner = std::make_shared<const owner_identity>(
                     pid,
                     std::wstring{ ext.data.base_name },
-                    std::wstring{ ext.data.full_path }
+                    std::wstring{ ext.data.full_path },
+                    &Source::convert_to_device_path
                 );
                 return { owner, owner->has_complete_device_path() };
             }
@@ -640,7 +666,8 @@ namespace iphelper
                     return { std::make_shared<const owner_identity>(
                         pid,
                         std::move(img.base_name),
-                        std::move(img.full_path)
+                        std::move(img.full_path),
+                        &Source::convert_to_device_path
                     ), false }; // keep this row's fallback, but retry the service on its next row
                 }
             }
@@ -694,7 +721,8 @@ namespace iphelper
                 auto owner = std::make_shared<const owner_identity>(
                     pid,
                     std::wstring{ ext.data.base_name },
-                    std::wstring{ ext.data.full_path }
+                    std::wstring{ ext.data.full_path },
+                    &Source::convert_to_device_path
                 );
                 return { owner, owner->has_complete_device_path() };
             }
@@ -711,7 +739,8 @@ namespace iphelper
                     return { std::make_shared<const owner_identity>(
                         pid,
                         std::move(img.base_name),
-                        std::move(img.full_path)
+                        std::move(img.full_path),
+                        &Source::convert_to_device_path
                     ), false }; // keep this row's fallback, but retry the service on its next row
                 }
             }
@@ -765,7 +794,8 @@ namespace iphelper
                 auto owner = std::make_shared<const owner_identity>(
                     pid,
                     std::wstring{ ext.data.base_name },
-                    std::wstring{ ext.data.full_path }
+                    std::wstring{ ext.data.full_path },
+                    &Source::convert_to_device_path
                 );
                 return { owner, owner->has_complete_device_path() };
             }
@@ -782,7 +812,8 @@ namespace iphelper
                     return { std::make_shared<const owner_identity>(
                         pid,
                         std::move(img.base_name),
-                        std::move(img.full_path)
+                        std::move(img.full_path),
+                        &Source::convert_to_device_path
                     ), false }; // keep this row's fallback, but retry the service on its next row
                 }
             }
@@ -836,7 +867,8 @@ namespace iphelper
                 auto owner = std::make_shared<const owner_identity>(
                     pid,
                     std::wstring{ ext.data.base_name },
-                    std::wstring{ ext.data.full_path }
+                    std::wstring{ ext.data.full_path },
+                    &Source::convert_to_device_path
                 );
                 return { owner, owner->has_complete_device_path() };
             }
@@ -853,7 +885,8 @@ namespace iphelper
                     return { std::make_shared<const owner_identity>(
                         pid,
                         std::move(img.base_name),
-                        std::move(img.full_path)
+                        std::move(img.full_path),
+                        &Source::convert_to_device_path
                     ), false }; // keep this row's fallback, but retry the service on its next row
                 }
             }

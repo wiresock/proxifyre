@@ -37,6 +37,7 @@ namespace
         const auto c = os().capture_since(m, h().capture());
         EXPECT_EQ(c.rows, 50u);
         EXPECT_EQ(c.owner_lookups, 1) << "one enrichment for the identity in this capture";
+        EXPECT_EQ(c.device_path_conversions, 1) << "one device-path conversion for the identity in this capture";
         EXPECT_GT(c.memo_allocations, 0) << "this capture's rows go through an owner memo";
 
         const auto first = h().owner(0);
@@ -44,7 +45,9 @@ namespace
         EXPECT_EQ(first->name, L"APP.EXE");
         EXPECT_EQ(first->id, 1000u);
         EXPECT_TRUE(first->resolved);
-        EXPECT_FALSE(first->device_path_name.empty());
+        EXPECT_EQ(first->path_name, iphelper::owner_identity::to_upper(image_path(L"APP.EXE")));
+        EXPECT_EQ(first->device_path_name, fake_device_path(image_path(L"APP.EXE")));
+        EXPECT_TRUE(first->has_complete_device_path());
         for (uint16_t i = 1; i < 50; ++i)
         {
             SCOPED_TRACE(i);
@@ -170,34 +173,85 @@ namespace
 
     TEST_P(OwnerMemoLookupTest, IncompleteDevicePathIsRetriedAndTheLaterCompleteOwnerIsReused)
     {
-        // The first enrichment reports a drive that QueryDosDeviceW cannot convert (as when the
-        // conversion fails); the production completeness check keeps that owner for its row only.
-        const auto undefined = undefined_drive_letter();
-        ASSERT_TRUE(undefined.has_value()) << "every drive letter is defined on this host";
-        const std::wstring unconvertible = std::wstring{ *undefined, L':', L'\\' } + L"APP.EXE";
-
+        // The device-path conversion of the first enrichment fails (as QueryDosDeviceW can); the
+        // production completeness check keeps that owner for its row only. The next row's
+        // conversion succeeds and that identity is reused by the rest.
         os().images[1503] = image(L"APP.EXE");
-        os().scripts[{ 1503, 0 }] = { scripted_response::success(L"APP.EXE", unconvertible) };
+        os().fail_device_path_conversions = 1;
         for (uint16_t i = 0; i < 10; ++i)
             h().add_row(1503, 0, i);
 
         const auto m = mark();
         ASSERT_TRUE(h().refresh());
 
-        EXPECT_EQ(os().capture_since(m, h().capture()).owner_lookups, 2);
+        const auto c = os().capture_since(m, h().capture());
+        EXPECT_EQ(c.owner_lookups, 2) << "the incomplete owner is not memoized; the complete one is";
+        EXPECT_EQ(c.device_path_conversions, 2) << "one failed conversion, then one that succeeded";
+        EXPECT_EQ(os().fail_device_path_conversions, 0);
 
         const auto partial = h().owner(0);
         ASSERT_TRUE(partial) << "the incomplete owner is still published for its row";
         EXPECT_EQ(partial->name, L"APP.EXE");
+        EXPECT_EQ(partial->path_name, iphelper::owner_identity::to_upper(image_path(L"APP.EXE")));
         EXPECT_TRUE(partial->device_path_name.empty());
-        EXPECT_TRUE(partial->resolved);
+        EXPECT_FALSE(partial->has_complete_device_path());
+        EXPECT_TRUE(partial->resolved) << "a usable owner with an incomplete device path remains resolved";
 
         const auto complete = h().owner(1);
         ASSERT_TRUE(complete);
-        EXPECT_FALSE(complete->device_path_name.empty());
+        EXPECT_EQ(complete->device_path_name, fake_device_path(image_path(L"APP.EXE")));
+        EXPECT_TRUE(complete->has_complete_device_path());
         EXPECT_NE(complete, partial);
         for (uint16_t i = 2; i < 10; ++i)
+        {
+            SCOPED_TRACE(i);
             expect_same_identity(h().owner(i), complete);
+        }
+    }
+
+    TEST_P(OwnerMemoLookupTest, IncompleteDevicePathIsNeverMemoizedWhileConversionKeepsFailing)
+    {
+        os().images[1504] = image(L"APP.EXE");
+        os().fail_device_path_conversions = 10;
+        for (uint16_t i = 0; i < 10; ++i)
+            h().add_row(1504, 0, i);
+
+        const auto m = mark();
+        ASSERT_TRUE(h().refresh());
+
+        const auto c = os().capture_since(m, h().capture());
+        EXPECT_EQ(c.owner_lookups, 10) << "every row retries the enrichment";
+        EXPECT_EQ(c.device_path_conversions, 10);
+        for (uint16_t i = 0; i < 10; ++i)
+        {
+            const auto owner = h().owner(i);
+            ASSERT_TRUE(owner) << "each row keeps its usable owner";
+            EXPECT_EQ(owner->name, L"APP.EXE");
+            EXPECT_TRUE(owner->device_path_name.empty());
+            EXPECT_FALSE(owner->has_complete_device_path());
+            EXPECT_TRUE(owner->resolved);
+        }
+
+        // Service identities and UNC paths need no conversion and are memoized as complete.
+        os().services[{ 1504, 7 }] = service(L"DNSCACHE");
+        os().images[1505] = { L"APP.EXE", L"\\\\SERVER\\SHARE\\APP.EXE" };
+        h().clear_rows();
+        for (uint16_t i = 0; i < 5; ++i)
+        {
+            h().add_row(1504, 7, i);
+            h().add_row(1505, 0, static_cast<uint16_t>(10 + i));
+        }
+        os().fail_device_path_conversions = 10;
+        const auto m2 = mark();
+        ASSERT_TRUE(h().refresh());
+        const auto c2 = os().capture_since(m2, h().capture());
+        EXPECT_EQ(c2.owner_lookups, 2);
+        EXPECT_EQ(c2.device_path_conversions, 0);
+        ASSERT_TRUE(h().owner(0) && h().owner(10));
+        EXPECT_TRUE(h().owner(0)->has_complete_device_path());
+        EXPECT_TRUE(h().owner(10)->has_complete_device_path());
+        EXPECT_EQ(h().owner(10)->path_name, L"\\\\SERVER\\SHARE\\APP.EXE");
+        EXPECT_TRUE(h().owner(10)->device_path_name.empty());
     }
 
     // ------------------------------------------------------------------------------------

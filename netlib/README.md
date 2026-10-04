@@ -78,3 +78,10 @@ as subprocesses of `OwnerMemoAllocationProbeTest` and `OwnerMemoDefaultAllocator
 the child's exit code and output: an allocation failure that reached a `noexcept` function would
 terminate the child instead of failing a test. The global `operator new` replacement is a
 pass-through to `malloc` unless a probe arms it for its own thread.
+
+Device-path conversion (`QueryDosDeviceW` in production) also goes through the `Source`
+(`convert_to_device_path`): the fake source converts `X:\...` deterministically to
+`\Device\FakeVolumeX\...` and can be told to fail the next conversions, while the production
+completeness rule (`owner_identity::has_complete_device_path`) still decides what is memoized. No
+test depends on which drive letters exist on the host; `OwnerMemoMetadataTest` checks that the
+production source keeps the Windows conversion.

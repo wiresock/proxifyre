@@ -11,6 +11,10 @@
 //     capture;
 //   * owner resolution (owner_module_resolver::resolve_from_pid_and_tag[_extended]) returns
 //     scripted results, so success, failure, service fallback, and PID reuse are exact;
+//   * device-path conversion (QueryDosDeviceW in production) maps "X:\..." deterministically to
+//     "\Device\FakeVolumeX\..." and can be told to fail the next conversions, so no test depends
+//     on which drive letters exist on the host; the production completeness rule
+//     (owner_identity::has_complete_device_path) still decides what is memoizable;
 //   * the per-capture owner memo allocates through an allocator that counts its allocations
 //     per capture and can be armed to throw std::bad_alloc while a chosen capture is ingested:
 //     at every allocation, or only at a chosen ordinal.
@@ -51,6 +55,7 @@ namespace netlib_test::ownership
         int owner_lookups{};    ///< resolve_from_pid_and_tag_extended calls (one per enrichment)
         int image_lookups{};    ///< resolve_from_pid_and_tag(pid, 0) calls (service fallback)
         int memo_allocations{}; ///< allocations made by owner memos while ingesting this capture
+        int device_path_conversions{}; ///< convert_to_device_path calls for drive paths (one per enrichment of a drive path)
     };
 
     /// A scripted owner resolution response for one (PID, service tag).
@@ -65,6 +70,9 @@ namespace netlib_test::ownership
             return { kind::resolved, { std::move(name), std::move(path) } };
         }
     };
+
+    /// Device prefix of the fake conversion: "X:\dir\app.exe" -> "\Device\FakeVolumeX\dir\app.exe".
+    inline constexpr const wchar_t* fake_device_prefix = L"\\Device\\FakeVolume";
 
     class fake_os
     {
@@ -96,6 +104,9 @@ namespace netlib_test::ownership
         /// Runs as a capture of @p kind is taken, before its rows are returned: models changes
         /// (for example PID reuse) that happened after the previous capture.
         std::function<void(table_kind)> on_capture;
+
+        /// The next N device-path conversions of a drive path fail (return an empty device path).
+        int fail_device_path_conversions{ 0 };
 
         /// Memo allocations during the ingestion of a capture of this kind throw std::bad_alloc:
         /// every one of them, or only the fail_memo_allocation_ordinal-th (1-based) one.
@@ -231,6 +242,20 @@ namespace netlib_test::ownership
             return false;
         }
 
+        /// The deterministic stand-in for QueryDosDeviceW (see the file comment).
+        std::wstring convert_device_path(const std::wstring& path)
+        {
+            if (path.size() < 2 || path[1] != L':')
+                return L""; // not a drive path: the production conversion has nothing to convert either
+            count(&capture_record::device_path_conversions);
+            if (fail_device_path_conversions > 0)
+            {
+                --fail_device_path_conversions;
+                return L"";
+            }
+            return std::wstring{ fake_device_prefix } + path[0] + path.substr(2);
+        }
+
         void memo_allocation()
         {
             if (captures.empty())
@@ -299,6 +324,11 @@ namespace netlib_test::ownership
         static bool resolve_from_pid_and_tag(const DWORD pid, const DWORD tag, resolver::result& out)
         {
             return fake_os::instance().resolve(pid, tag, out);
+        }
+
+        static std::wstring convert_to_device_path(const std::wstring& path)
+        {
+            return fake_os::instance().convert_device_path(path);
         }
 
         template <class Process>
@@ -421,35 +451,22 @@ namespace netlib_test::ownership
     // Owner images
     // ------------------------------------------------------------------------------------
 
-    /// "<system drive>:\<relative>": QueryDosDeviceW converts it, so its owner is complete.
-    inline std::wstring system_drive_path(const std::wstring& relative)
+    /// The drive path of a process image; the fake conversion makes its owner complete.
+    inline std::wstring image_path(const std::wstring& name)
     {
-        wchar_t windows[MAX_PATH]{};
-        const auto n = ::GetSystemWindowsDirectoryW(windows, MAX_PATH);
-        EXPECT_TRUE(n >= 2 && windows[1] == L':') << "no drive-letter system directory";
-        return std::wstring{ windows[0], L':', L'\\' } + relative;
+        return L"C:\\Apps\\" + name;
     }
 
-    /// A drive letter that is not defined for this process (QueryDosDeviceW fails for it), or
-    /// nullopt when every letter is defined.
-    inline std::optional<wchar_t> undefined_drive_letter()
+    /// What owner_identity records as the device path of @p dos_path under the fake conversion.
+    inline std::wstring fake_device_path(const std::wstring& dos_path)
     {
-        const DWORD defined = ::GetLogicalDrives();
-        for (wchar_t letter = L'Z'; letter >= L'D'; --letter)
-        {
-            if (defined & (1u << (letter - L'A')))
-                continue;
-            const wchar_t drive[3] = { letter, L':', L'\0' };
-            wchar_t target[512];
-            if (::QueryDosDeviceW(drive, target, 512) == 0)
-                return letter;
-        }
-        return std::nullopt;
+        return iphelper::owner_identity::to_upper(
+            std::wstring{ fake_device_prefix } + dos_path[0] + dos_path.substr(2));
     }
 
     inline resolver::result image(const std::wstring& name)
     {
-        return { name, system_drive_path(L"Apps\\" + name) };
+        return { name, image_path(name) };
     }
 
     inline resolver::result service(const std::wstring& name)
