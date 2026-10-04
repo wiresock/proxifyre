@@ -12,7 +12,8 @@
 //   * owner resolution (owner_module_resolver::resolve_from_pid_and_tag[_extended]) returns
 //     scripted results, so success, failure, service fallback, and PID reuse are exact;
 //   * the per-capture owner memo allocates through an allocator that counts its allocations
-//     per capture and can be armed to throw std::bad_alloc while a chosen capture is ingested.
+//     per capture and can be armed to throw std::bad_alloc while a chosen capture is ingested:
+//     at every allocation, or only at a chosen ordinal.
 //
 // Every owner lookup, image (fallback) lookup, and memo allocation is attributed to the capture
 // being ingested: process_lookup enriches a capture's rows after querying it and before the
@@ -96,8 +97,10 @@ namespace netlib_test::ownership
         /// (for example PID reuse) that happened after the previous capture.
         std::function<void(table_kind)> on_capture;
 
-        /// Memo allocations during the ingestion of a capture of this kind throw std::bad_alloc.
+        /// Memo allocations during the ingestion of a capture of this kind throw std::bad_alloc:
+        /// every one of them, or only the fail_memo_allocation_ordinal-th (1-based) one.
         std::optional<table_kind> fail_memo_allocations_in;
+        int fail_memo_allocation_ordinal{ 0 };
 
         // ---------------------------------------------------------------- observations
 
@@ -235,8 +238,9 @@ namespace netlib_test::ownership
                 ADD_FAILURE() << "owner memo allocated outside a capture";
                 return;
             }
-            ++captures.back().memo_allocations;
-            if (fail_memo_allocations_in == captures.back().kind)
+            const int ordinal = ++captures.back().memo_allocations;
+            if (fail_memo_allocations_in == captures.back().kind &&
+                (fail_memo_allocation_ordinal == 0 || fail_memo_allocation_ordinal == ordinal))
                 throw std::bad_alloc();
         }
 

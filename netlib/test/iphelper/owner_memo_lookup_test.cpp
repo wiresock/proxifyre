@@ -12,6 +12,7 @@
 // (expect_same_identity).
 
 #include "pch.h"
+#include "test_support.h"
 #include "fake_ownership_source.h"
 
 namespace
@@ -260,10 +261,160 @@ namespace
         EXPECT_EQ(h().owner(1)->name, L"NEW.EXE");
     }
 
-    INSTANTIATE_TEST_CASE_P(AllIngestionLoops, OwnerMemoLookupTest,
-        ::testing::Values(loop::tcp_v4, loop::tcp_v6, loop::udp_v4, loop::udp_v6,
-            loop::tcp_v4_mapped, loop::udp_v4_mapped),
-        loop_name);
+    INSTANTIATE_TEST_CASE_P(AllIngestionLoops, OwnerMemoLookupTest, ::testing::ValuesIn(all_loops), loop_name);
+
+    // ------------------------------------------------------------------------------------
+    // Memo allocation failure at every allocation of every loop
+    // ------------------------------------------------------------------------------------
+
+    // Run only as a subprocess, by OwnerMemoAllocationProbeTest: an allocation failure that
+    // reached a noexcept function would terminate the process instead of failing a test.
+    using DISABLED_OwnerMemoAllocationProbe = loop_fixture;
+
+    /// Allocations the memo makes to memoize @p identities: its first slot array, then one per
+    /// doubling (the load factor stays at or below 1/2).
+    int expected_memo_allocations(const size_t identities)
+    {
+        size_t capacity = iphelper::owner_memo<const iphelper::owner_identity>::initial_capacity;
+        int allocations = 1;
+        while (identities * 2 > capacity)
+        {
+            capacity *= 2;
+            ++allocations;
+        }
+        return allocations;
+    }
+
+    void exit_on_terminate()
+    {
+        std::set_terminate([]
+        {
+            std::fputs("TERMINATE: std::terminate was called while a memo allocation failure unwound\n", stderr);
+            std::fflush(stderr);
+            std::_Exit(86);
+        });
+    }
+
+    TEST_P(DISABLED_OwnerMemoAllocationProbe, EveryAllocationFailureKeepsThePublishedTableAndRecovers)
+    {
+        exit_on_terminate();
+        constexpr uint16_t identities = 40;
+
+        // The table published before each failing build: one row of the loop and, for a
+        // supplementary loop, one primary row of the same transport.
+        os().images[900] = image(L"OLD.EXE");
+        os().images[901] = image(L"OLDPRIMARY.EXE");
+        const auto publish_old = [&]
+        {
+            h().clear_rows();
+            h().add_row(900, 0, 0);
+            if (h().supplement())
+                h().add_primary_row(901, 0, 1);
+            return h().refresh();
+        };
+
+        // The candidate build: 40 distinct identities (later ones are memoized after earlier
+        // ones and make the memo grow) and, for a supplementary loop, a primary row that is
+        // ingested before the supplement.
+        for (uint16_t i = 0; i < identities; ++i)
+            os().images[1000 + i] = image(L"NEW.EXE");
+        os().images[2000] = image(L"NEWPRIMARY.EXE");
+        const auto stage_new = [&]
+        {
+            h().clear_rows();
+            for (uint16_t i = 0; i < identities; ++i)
+                h().add_row(1000 + i, 0, static_cast<uint16_t>(10 + i));
+            if (h().supplement())
+                h().add_primary_row(2000, 0, 2);
+        };
+
+        // Dry run: the allocations the memo makes while this capture is ingested.
+        ASSERT_TRUE(publish_old());
+        stage_new();
+        auto m = mark();
+        ASSERT_TRUE(h().refresh());
+        const int sites = os().capture_since(m, h().capture()).memo_allocations;
+        std::cout << "memo allocations while ingesting " << to_string(h().capture()) << " with "
+            << identities << " identities: " << sites << std::endl;
+        EXPECT_EQ(sites, expected_memo_allocations(identities)) << "the first slot array and one allocation per doubling";
+        ASSERT_GE(sites, 2) << "the memo must grow after earlier identities were memoized";
+
+        for (int fail = 1; fail <= sites; ++fail)
+        {
+            SCOPED_TRACE(::testing::Message() << "failing memo allocation " << fail << " of " << sites);
+            ASSERT_TRUE(publish_old());
+            const auto old = h().owner(0);
+            ASSERT_TRUE(old);
+            const auto old_primary = h().supplement() ? h().primary_owner(1) : process_ptr{};
+            if (h().supplement())
+                ASSERT_TRUE(old_primary);
+
+            stage_new();
+            os().fail_memo_allocations_in = h().capture();
+            os().fail_memo_allocation_ordinal = fail;
+            m = mark();
+            EXPECT_FALSE(h().refresh()) << "a memo allocation failure fails the table build";
+            os().fail_memo_allocations_in.reset();
+            os().fail_memo_allocation_ordinal = 0;
+
+            const auto c = os().capture_since(m, h().capture());
+            EXPECT_EQ(c.memo_allocations, fail) << "the build stopped at the injected failure";
+            if (fail > 1)
+                EXPECT_GT(c.owner_lookups, 1) << "identities had been memoized when the growth failed";
+            if (h().supplement())
+                EXPECT_GT(os().capture_since(m, h().primary_capture()).owner_lookups, 0)
+                    << "the primary rows were ingested before the supplement failed";
+
+            EXPECT_EQ(h().owner(0), old) << "the previously published table remains";
+            EXPECT_EQ(h().owner(10), nullptr) << "nothing of the failed build is published";
+            EXPECT_EQ(h().owner(static_cast<uint16_t>(10 + identities - 1)), nullptr);
+            if (h().supplement())
+            {
+                EXPECT_EQ(h().primary_owner(1), old_primary) << "the previously published primary rows remain";
+                EXPECT_EQ(h().primary_owner(2), nullptr) << "primary rows of the failed candidate are not published";
+            }
+
+            ASSERT_TRUE(h().refresh()) << "the next build recovers";
+            EXPECT_EQ(h().owner(0), nullptr);
+            EXPECT_TRUE(h().owner(10));
+            EXPECT_TRUE(h().owner(static_cast<uint16_t>(10 + identities - 1)));
+            if (h().supplement())
+            {
+                EXPECT_EQ(h().primary_owner(1), nullptr);
+                EXPECT_TRUE(h().primary_owner(2));
+            }
+        }
+    }
+
+    INSTANTIATE_TEST_CASE_P(AllIngestionLoops, DISABLED_OwnerMemoAllocationProbe,
+        ::testing::ValuesIn(all_loops), loop_name);
+
+    bool contains(const std::string& text, const std::string& what) { return text.find(what) != std::string::npos; }
+
+    class OwnerMemoAllocationProbeTest : public ::testing::TestWithParam<loop>
+    {
+    };
+
+    // Each loop's probe must run to completion in a subprocess of this executable: exit code 0,
+    // its one test verified, and no std::terminate. (With the node-based storage the memo had
+    // before, the MSVC Debug STL allocated its iterator-debugging proxy inside a noexcept
+    // constructor; the third memo allocation of a capture then terminated the process.)
+    TEST_P(OwnerMemoAllocationProbeTest, EveryAllocationFailureUnwindsInASubprocess)
+    {
+        const std::string filter =
+            std::string{ "AllIngestionLoops/DISABLED_OwnerMemoAllocationProbe.*/" } + loop_label(GetParam());
+        const auto run = netlib_test::run_self(
+            { "--gtest_filter=" + filter, "--gtest_also_run_disabled_tests" }, std::chrono::seconds{ 120 });
+        ASSERT_FALSE(run.failure) << run.failure->describe();
+        EXPECT_EQ(run.exit_code, 0u) << run.output;
+        EXPECT_TRUE(contains(run.output, "[  PASSED  ] 1 test")) << run.output;
+        EXPECT_TRUE(contains(run.output, "netlib-tests summary: 1 run: 1 verified, 0 unsupported, 0 failed.")) << run.output;
+        EXPECT_FALSE(contains(run.output, "TERMINATE")) << run.output;
+        EXPECT_EQ(run.surviving_processes, 0u);
+    }
+
+    INSTANTIATE_TEST_CASE_P(AllIngestionLoops, OwnerMemoAllocationProbeTest,
+        ::testing::ValuesIn(all_loops), loop_name);
 
     // ------------------------------------------------------------------------------------
     // IPv4 builds: primary capture plus AF_INET6 supplement

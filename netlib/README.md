@@ -69,3 +69,12 @@ scripted owner-module rows and owner resolution supplied through its `Source` te
 `netlib/src/proxy/process_routing_policy.h`. They use no sockets, helper processes, or driver, and
 never report UNSUPPORTED. Parameterized cases are prefixed by their instantiation name, so filter
 them with `--gtest_filter=*OwnerMemo*:*OwnerRouting*`.
+
+Memo allocation failures are covered at every allocation of every ingestion loop and of the
+production memo type with its default allocator. `DISABLED_OwnerMemoAllocationProbe` (one case per
+loop, through the fake source's counting allocator) and `DISABLED_OwnerMemoDefaultAllocatorProbe`
+(through the test host's armed global `operator new`, `netlib-tests/allocation_fault.cpp`) run only
+as subprocesses of `OwnerMemoAllocationProbeTest` and `OwnerMemoDefaultAllocatorTest`, which check
+the child's exit code and output: an allocation failure that reached a `noexcept` function would
+terminate the child instead of failing a test. The global `operator new` replacement is a
+pass-through to `malloc` unless a probe arms it for its own thread.

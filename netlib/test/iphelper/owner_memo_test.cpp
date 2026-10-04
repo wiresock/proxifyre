@@ -1,4 +1,6 @@
 #include "pch.h"
+#include "test_support.h"
+#include "allocation_fault.h"
 
 #include <random>
 
@@ -451,41 +453,150 @@ TYPED_TEST(OwnerMemoTest, EveryBuildEnrichesAfresh)
 
 // ---------------------------------------------------------------- allocation failure
 
-/// Allocator whose allocations throw once armed.
+/// Allocator that counts its allocations and fails a chosen one (state shared across rebinds).
 template <class T>
-struct failing_allocator
+struct counting_allocator
 {
     using value_type = T;
-    static inline bool armed = false;
+    static inline int allocations = 0;   // read through counting_allocator<char>
+    static inline int fail_at = 0;       // 1-based ordinal that throws; 0: never
 
-    failing_allocator() noexcept = default;
+    counting_allocator() noexcept = default;
     template <class U>
-    failing_allocator(const failing_allocator<U>&) noexcept {}
+    counting_allocator(const counting_allocator<U>&) noexcept {}
 
     T* allocate(const size_t n)
     {
-        if (failing_allocator<char>::armed)
+        if (++counting_allocator<char>::allocations == counting_allocator<char>::fail_at)
             throw std::bad_alloc();
         return std::allocator<T>{}.allocate(n);
     }
     void deallocate(T* p, const size_t n) noexcept { std::allocator<T>{}.deallocate(p, n); }
     template <class U>
-    bool operator==(const failing_allocator<U>&) const noexcept { return true; }
+    bool operator==(const counting_allocator<U>&) const noexcept { return true; }
 };
+
+using counted_memo = owner_memo<const owner_identity, counting_allocator<std::pair<const std::uint64_t, identity_ptr>>>;
+
+void reset_counting(const int fail_at = 0)
+{
+    counting_allocator<char>::allocations = 0;
+    counting_allocator<char>::fail_at = fail_at;
+}
+
+/// Allocations the memo makes to memoize @p identities: its first slot array, then one per
+/// doubling (the load factor stays at or below 1/2).
+int expected_memo_allocations(const size_t identities)
+{
+    size_t capacity = owner_memo<const owner_identity>::initial_capacity;
+    int allocations = 1;
+    while (identities * 2 > capacity)
+    {
+        capacity *= 2;
+        ++allocations;
+    }
+    return allocations;
+}
+
+TYPED_TEST(OwnerMemoTest, ConstructionAllocatesNothing)
+{
+    // The memo is built inside each table build; its construction must not be able to fail.
+    reset_counting(1); // any allocation would throw
+    counted_memo owners;
+    EXPECT_EQ(counting_allocator<char>::allocations, 0);
+    EXPECT_EQ(owners.size(), 0u);
+    EXPECT_EQ(owners.capacity(), 0u);
+
+    reset_counting();
+    const auto row = make_row<TypeParam>(1700, 0, 54000);
+    fake_enricher enrich;
+    EXPECT_TRUE(memoized_owner(owners, &row, [&](const auto* r) { return enrich(r); }));
+    EXPECT_EQ(owners.size(), 1u);
+    EXPECT_EQ(owners.capacity(), counted_memo::initial_capacity);
+    EXPECT_EQ(counting_allocator<char>::allocations, 1) << "the first memoization allocates the slots";
+    EXPECT_TRUE(memoized_owner(owners, &row, [&](const auto* r) { return enrich(r); }));
+    EXPECT_EQ(counting_allocator<char>::allocations, 1) << "a hit allocates nothing";
+    EXPECT_EQ(enrich.user_calls, 1);
+    reset_counting();
+}
 
 TYPED_TEST(OwnerMemoTest, MemoizingFailureThrowsAndMemoizesNothing)
 {
-    using memo_t = owner_memo<const owner_identity, failing_allocator<std::pair<const std::uint64_t, identity_ptr>>>;
-    memo_t owners;
-    const auto row = make_row<TypeParam>(1700, 0, 54000);
+    counted_memo owners;
+    const auto row = make_row<TypeParam>(1701, 0, 54001);
     fake_enricher enrich;
-    failing_allocator<char>::armed = true;
+    reset_counting(1);
     EXPECT_THROW(memoized_owner(owners, &row, [&](const auto* r) { return enrich(r); }), std::bad_alloc);
-    failing_allocator<char>::armed = false;
+    reset_counting();
     EXPECT_EQ(owners.size(), 0u);
+    EXPECT_EQ(owners.capacity(), 0u) << "a failed first growth leaves the memo without storage";
     EXPECT_EQ(enrich.user_calls, 1);
     EXPECT_TRUE(memoized_owner(owners, &row, [&](const auto* r) { return enrich(r); }));
     EXPECT_EQ(owners.size(), 1u);
+    EXPECT_EQ(enrich.user_calls, 2) << "the identity is enriched again on its next row";
+}
+
+TYPED_TEST(OwnerMemoTest, GrowthFailureKeepsEarlierIdentitiesAndRetriesTheRest)
+{
+    // Every allocation after the first is a growth of a memo that already holds identities.
+    constexpr DWORD identities = 40;
+    std::vector<TypeParam> rows;
+    for (DWORD i = 0; i < identities; ++i)
+        rows.push_back(make_row<TypeParam>(2000 + i, 0, 55000 + i));
+
+    const int sites = expected_memo_allocations(identities);
+    {
+        reset_counting();
+        counted_memo owners;
+        fake_enricher enrich;
+        for (const auto& row : rows)
+            memoized_owner(owners, &row, [&](const auto* r) { return enrich(r); });
+        EXPECT_EQ(counting_allocator<char>::allocations, sites);
+        EXPECT_EQ(owners.size(), static_cast<size_t>(identities));
+    }
+    ASSERT_GE(sites, 2);
+
+    for (int fail = 2; fail <= sites; ++fail)
+    {
+        SCOPED_TRACE(::testing::Message() << "failing memo allocation " << fail << " of " << sites);
+        reset_counting(fail);
+        counted_memo owners;
+        fake_enricher enrich;
+        size_t failed_at = rows.size();
+        for (size_t i = 0; i < rows.size(); ++i)
+        {
+            try
+            {
+                memoized_owner(owners, &rows[i], [&](const auto* r) { return enrich(r); });
+            }
+            catch (const std::bad_alloc&)
+            {
+                failed_at = i;
+                break;
+            }
+        }
+        reset_counting();
+        ASSERT_LT(failed_at, rows.size()) << "the growth did not fail";
+        EXPECT_EQ(owners.size(), failed_at)
+            << "identities memoized before the failed growth stay; the one being memoized is not";
+        EXPECT_GT(owners.size(), 0u);
+        EXPECT_LE(owners.size() * 2, owners.capacity()) << "the storage that failed to grow is intact";
+
+        // The memoized identities are served without enrichment.
+        const int before = enrich.user_calls;
+        for (size_t i = 0; i < failed_at; ++i)
+            EXPECT_EQ(memoized_owner(owners, &rows[i], [&](const auto* r) { return enrich(r); })->id, rows[i].dwOwningPid);
+        EXPECT_EQ(enrich.user_calls, before);
+
+        // The identity whose memoization failed and the rest are enriched once the growth succeeds.
+        for (size_t i = failed_at; i < rows.size(); ++i)
+            memoized_owner(owners, &rows[i], [&](const auto* r) { return enrich(r); });
+        EXPECT_EQ(enrich.user_calls, before + static_cast<int>(rows.size() - failed_at));
+        EXPECT_EQ(owners.size(), rows.size());
+        for (const auto& row : rows)
+            EXPECT_EQ(memoized_owner(owners, &row, [&](const auto* r) { return enrich(r); })->id, row.dwOwningPid);
+        EXPECT_EQ(enrich.user_calls, before + static_cast<int>(rows.size() - failed_at)) << "every identity is a hit now";
+    }
 }
 
 // ---------------------------------------------------------------- equivalence on random tables
@@ -534,6 +645,122 @@ TYPED_TEST(OwnerMemoTest, PublishesWhatPerRowEnrichmentPublishes)
             << "one enrichment per resolvable identity, plus a retry for every row of a failing one";
         EXPECT_EQ(memoized.memoized, identities.size());
     }
+}
+
+// ---------------------------------------------------------------- the production allocator
+
+// Run only as a subprocess, by OwnerMemoDefaultAllocatorTest: an allocation failure that reached
+// a noexcept function would terminate the process instead of failing a test.
+TEST(DISABLED_OwnerMemoDefaultAllocatorProbe, EveryAllocationFailureIsRecoverable)
+{
+    std::set_terminate([]
+    {
+        std::fputs("TERMINATE: std::terminate was called while a memo allocation failure unwound\n", stderr);
+        std::fflush(stderr);
+        std::_Exit(86);
+    });
+
+    // The memo process_lookup<T, system_ownership_source> builds: std::allocator, i.e. the global
+    // operator new, which allocation_fault arms for the calling thread.
+    using memo_t = owner_memo<const owner_identity>;
+    static_assert(std::is_same_v<memo_t, system_ownership_source::owner_memo_type<const owner_identity>>);
+    namespace fault = netlib_test::allocation_fault;
+
+    constexpr int identities = 40;
+    std::vector<identity_ptr> ids;
+    for (int i = 0; i < identities; ++i)   // built before arming: only the memo allocates while armed
+        ids.push_back(std::make_shared<const owner_identity>(2000 + i, L"APP.EXE", L"APP.EXE"));
+    int enriched = 0;
+    const auto resolve = [&](memo_t& memo, const int i)
+    {
+        return memo.resolve(static_cast<std::uint32_t>(2000 + i), 0, [&]
+        {
+            ++enriched;
+            return owner_enrichment<const owner_identity>{ ids[i], true };
+        });
+    };
+
+    // Construction and destruction under an armed fault: nothing is allocated, so nothing can
+    // fail (or, inside a noexcept constructor, terminate).
+    fault::arm(1);
+    {
+        memo_t memo;
+        EXPECT_EQ(memo.size(), 0u);
+    }
+    EXPECT_EQ(fault::count(), 0) << "constructing the memo allocated";
+    EXPECT_FALSE(fault::triggered());
+    fault::disarm();
+
+    // The memo's allocations for 40 identities: the only allocations in the armed window.
+    int sites = 0;
+    {
+        memo_t memo;
+        fault::arm(0);
+        for (int i = 0; i < identities; ++i)
+            resolve(memo, i);
+        sites = fault::count();
+        fault::disarm();
+        EXPECT_EQ(memo.size(), static_cast<size_t>(identities));
+    }
+    std::cout << "production memo: " << sites << " allocations for " << identities
+        << " identities (_ITERATOR_DEBUG_LEVEL " << _ITERATOR_DEBUG_LEVEL << ")" << std::endl;
+    EXPECT_EQ(sites, expected_memo_allocations(identities)) << "the first slot array and one allocation per doubling";
+    {
+        // The same sequence through the counting allocator: the global operator new saw exactly
+        // the memo's allocations, nothing else.
+        reset_counting();
+        counted_memo memo;
+        for (int i = 0; i < identities; ++i)
+            memo.resolve(static_cast<std::uint32_t>(2000 + i), 0, [&] { return owner_enrichment<const owner_identity>{ ids[i], true }; });
+        EXPECT_EQ(counting_allocator<char>::allocations, sites);
+    }
+    ASSERT_GE(sites, 2) << "the memo must grow after earlier identities were memoized";
+
+    for (int fail = 1; fail <= sites; ++fail)
+    {
+        SCOPED_TRACE(::testing::Message() << "failing memo allocation " << fail << " of " << sites);
+        memo_t memo;
+        enriched = 0;
+        int failed_at = -1;
+        fault::arm(fail);
+        for (int i = 0; i < identities; ++i)
+        {
+            try
+            {
+                resolve(memo, i);
+            }
+            catch (const std::bad_alloc&)
+            {
+                failed_at = i;
+                break;
+            }
+        }
+        fault::disarm();
+        ASSERT_NE(failed_at, -1) << "the fault was not reached";
+        EXPECT_TRUE(fault::triggered());
+        EXPECT_EQ(memo.size(), static_cast<size_t>(failed_at))
+            << "the identities memoized before the failure stay; the one whose memoization failed is not memoized";
+        EXPECT_EQ(enriched, failed_at + 1);
+
+        // Recovery: memoized identities are served without enrichment, the rest memoize.
+        for (int i = 0; i < identities; ++i)
+            resolve(memo, i);
+        EXPECT_EQ(memo.size(), static_cast<size_t>(identities));
+        EXPECT_EQ(enriched, identities + 1) << "only the identity whose memoization failed was enriched again";
+    }
+}
+
+TEST(OwnerMemoDefaultAllocatorTest, ProbeRunsToCompletionInASubprocess)
+{
+    const auto run = netlib_test::run_self(
+        { "--gtest_filter=DISABLED_OwnerMemoDefaultAllocatorProbe.*", "--gtest_also_run_disabled_tests" },
+        std::chrono::seconds{ 120 });
+    ASSERT_FALSE(run.failure) << run.failure->describe();
+    EXPECT_EQ(run.exit_code, 0u) << run.output;
+    EXPECT_NE(run.output.find("[  PASSED  ] 1 test"), std::string::npos) << run.output;
+    EXPECT_NE(run.output.find("netlib-tests summary: 1 run: 1 verified, 0 unsupported, 0 failed."), std::string::npos) << run.output;
+    EXPECT_EQ(run.output.find("TERMINATE"), std::string::npos) << run.output;
+    EXPECT_EQ(run.surviving_processes, 0u);
 }
 
 } // namespace

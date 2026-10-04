@@ -88,6 +88,7 @@
   <ItemGroup>
     <ClInclude Include="pch.h" />
     <ClInclude Include="test_support.h" />
+    <ClInclude Include="allocation_fault.h" />
     <ClInclude Include="..\netlib\test\iphelper\fake_ownership_source.h" />
     <ClInclude Include="..\netlib\test\iphelper\os_tables.h" />
     <ClInclude Include="..\netlib\test\iphelper\process_lookup_cases.h" />
@@ -97,6 +98,7 @@
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="allocation_fault.cpp" />
     <ClCompile Include="helper_lifecycle_test.cpp" />
     <ClCompile Include="helper_process_test.cpp" />
     <ClCompile Include="..\netlib\test\iphelper\os_tables_test.cpp" />
