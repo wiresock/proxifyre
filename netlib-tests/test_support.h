@@ -299,6 +299,13 @@ namespace netlib_test
     // Processes
     // ------------------------------------------------------------------------------------
 
+    // Helper children are placed in their kill-on-close job by CreateProcessW itself. This is a
+    // requirement of the test host only (Windows 10 / Windows Server 2016 or newer); the product's
+    // platform requirements are unchanged.
+#ifndef PROC_THREAD_ATTRIBUTE_JOB_LIST
+#error "netlib-tests requires PROC_THREAD_ATTRIBUTE_JOB_LIST (Windows 10 SDK, _WIN32_WINNT >= 0x0A00)"
+#endif
+
     class unique_handle
     {
     public:
@@ -346,11 +353,25 @@ namespace netlib_test
         }
     };
 
+    // Test instrumentation for launched_process::launch(): called with the new child's PID the
+    // moment CreateProcessW has returned successfully, before any further setup and before
+    // ResumeThread. Empty in ordinary runs. The lifecycle regression installs a hook that
+    // reports the PID and blocks, so the parent can be terminated at exactly that boundary.
+    inline std::function<void(DWORD)>& after_child_created_hook()
+    {
+        static std::function<void(DWORD)> hook;
+        return hook;
+    }
+
     // A process launched with stdin/stdout pipes (stderr merged into stdout) inside a job object
-    // configured with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE. The child inherits only its two pipe
-    // ends (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), so it cannot capture this process's sockets.
-    // Destruction closes stdin, waits briefly for a voluntary exit, then terminates the job; the
-    // job handle also kills the child if this process dies first.
+    // configured with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE. The job is fully configured before the
+    // child exists, and the child is made a member of it by CreateProcessW itself through
+    // PROC_THREAD_ATTRIBUTE_JOB_LIST (Windows 10 / Windows Server 2016 and newer); there is no
+    // window in which the child exists outside the job, so a parent that dies at any point after
+    // CreateProcessW returns takes the child with it. The child inherits only its two pipe ends
+    // (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), so it cannot capture this process's sockets and never
+    // holds a handle to its own job (which would keep the job alive after the parent's death).
+    // Destruction closes stdin, waits briefly for a voluntary exit, then terminates the job.
     class launched_process
     {
     public:
@@ -363,6 +384,9 @@ namespace netlib_test
 
         std::optional<infra_failure> launch(const std::wstring& executable, const std::vector<std::string>& args)
         {
+            // The job is configured completely, kill-on-close included, before the child exists.
+            // CreateJobObjectW with null security attributes yields a non-inheritable handle; the
+            // explicit flag below keeps that true even if the creation code changes.
             job_.reset(::CreateJobObjectW(nullptr, nullptr));
             if (!job_)
                 return infra_failure{ "CreateJobObjectW", ::GetLastError(), {} };
@@ -371,6 +395,8 @@ namespace netlib_test
             limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
             if (!::SetInformationJobObject(job_.get(), JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
                 return infra_failure{ "SetInformationJobObject", ::GetLastError(), {} };
+            if (!::SetHandleInformation(job_.get(), HANDLE_FLAG_INHERIT, 0))
+                return infra_failure{ "SetHandleInformation(job)", ::GetLastError(), {} };
 
             SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
             HANDLE raw_out_read = nullptr, raw_out_write = nullptr, raw_in_read = nullptr, raw_in_write = nullptr;
@@ -386,17 +412,29 @@ namespace netlib_test
                 !::SetHandleInformation(stdin_write_.get(), HANDLE_FLAG_INHERIT, 0))
                 return infra_failure{ "SetHandleInformation", ::GetLastError(), {} };
 
+            // Two attributes: the restricted inheritance list and the job list. The attribute
+            // list stores pointers to `inherited` and `jobs`, so both arrays (and the handles they
+            // name) stay alive in this scope until CreateProcessW has returned; the list itself
+            // is deleted by attribute_guard afterwards.
             SIZE_T attribute_size = 0;
-            ::InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_size);
+            ::InitializeProcThreadAttributeList(nullptr, 2, 0, &attribute_size);
             std::vector<std::byte> attribute_storage(attribute_size);
             auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attribute_storage.data());
-            if (!::InitializeProcThreadAttributeList(attributes, 1, 0, &attribute_size))
+            if (!::InitializeProcThreadAttributeList(attributes, 2, 0, &attribute_size))
                 return infra_failure{ "InitializeProcThreadAttributeList", ::GetLastError(), {} };
             const auto attribute_guard = gsl::finally([attributes] { ::DeleteProcThreadAttributeList(attributes); });
             HANDLE inherited[2] = { child_stdin.get(), child_stdout.get() };
             if (!::UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
                     inherited, sizeof(inherited), nullptr, nullptr))
-                return infra_failure{ "UpdateProcThreadAttribute", ::GetLastError(), {} };
+                return infra_failure{ "UpdateProcThreadAttribute(PROC_THREAD_ATTRIBUTE_HANDLE_LIST)", ::GetLastError(), {} };
+            // If the host does not support the job list (Windows 8.1 and older), this or
+            // CreateProcessW fails and no child is ever created: there is no fallback to
+            // assigning the child after creation, because that reopens the orphan window.
+            HANDLE jobs[1] = { job_.get() };
+            if (!::UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                    jobs, sizeof(jobs), nullptr, nullptr))
+                return infra_failure{ "UpdateProcThreadAttribute(PROC_THREAD_ATTRIBUTE_JOB_LIST)", ::GetLastError(),
+                    "the test host must run Windows 10 / Windows Server 2016 or newer; no helper was started" };
 
             std::wstring command_line = quote(executable);
             for (const auto& arg : args)
@@ -410,6 +448,8 @@ namespace netlib_test
             si.StartupInfo.hStdError = child_stdout.get();
             si.lpAttributeList = attributes;
 
+            // From the moment this call succeeds the (still suspended) child is a member of job_;
+            // the parent dying anywhere below closes job_'s only handle and kills the child.
             PROCESS_INFORMATION pi{};
             if (!::CreateProcessW(executable.c_str(), command_line.data(), nullptr, nullptr, TRUE,
                     CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
@@ -419,12 +459,17 @@ namespace netlib_test
             unique_handle thread{ pi.hThread };
             pid_ = pi.dwProcessId;
 
-            if (!::AssignProcessToJobObject(job_.get(), process_.get()))
+            if (const auto& hook = after_child_created_hook())
+                hook(pid_);
+
+            // Membership is established by CreateProcessW; this only guards against a platform
+            // that accepted the attribute without honouring it. Such a child is killed directly.
+            BOOL in_job = FALSE;
+            if (!::IsProcessInJob(process_.get(), job_.get(), &in_job) || !in_job)
             {
-                const auto error = ::GetLastError();
-                ::TerminateProcess(process_.get(), 1);
-                ::WaitForSingleObject(process_.get(), 5000);
-                return infra_failure{ "AssignProcessToJobObject", error, {} };
+                const auto error = in_job ? ERROR_SUCCESS : ::GetLastError();
+                terminate();
+                return infra_failure{ "IsProcessInJob", error, "the new child is not a member of its kill-on-close job" };
             }
             if (::ResumeThread(thread.get()) == static_cast<DWORD>(-1))
             {
@@ -493,13 +538,17 @@ namespace netlib_test
             return code;
         }
 
-        // Kills every process in the job and waits for the direct child to exit.
+        // Kills every process in the job (and the direct child itself, should it ever not be a
+        // job member) and waits for the direct child to exit.
         void terminate() noexcept
         {
             if (job_)
                 ::TerminateJobObject(job_.get(), 1);
             if (process_)
+            {
+                ::TerminateProcess(process_.get(), 1);
                 ::WaitForSingleObject(process_.get(), 5000);
+            }
         }
 
         // Number of live processes in the job (0 once the child and any descendants are gone).

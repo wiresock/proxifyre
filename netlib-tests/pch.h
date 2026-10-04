@@ -13,6 +13,7 @@
 #include <ws2ipdef.h>
 #include <IPHlpApi.h>
 #include <Mstcpip.h>
+#include <winternl.h>
 
 #include <algorithm>
 #include <array>
