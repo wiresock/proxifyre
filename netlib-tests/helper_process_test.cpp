@@ -149,6 +149,206 @@ namespace
         expect_helper_gone(child);
     }
 
+    // ------------------------------------------------------------------------------------
+    // Status line framing: the pure framing step (deterministic, no process)
+    // ------------------------------------------------------------------------------------
+
+    constexpr size_t limit = helper_status_max_payload;   // 256
+
+    struct framed
+    {
+        frame_status status{};
+        std::string line;
+        std::string detail;
+    };
+
+    framed frame(std::string& pending)
+    {
+        framed f;
+        f.status = frame_line(pending, limit, f.line, f.detail);
+        return f;
+    }
+
+    TEST(StatusLineFramingTest, PayloadAtLimitWithLfOrCrLfIsCompleteAndConsumed)
+    {
+        for (const char* terminator : { "\n", "\r\n" })
+        {
+            std::string pending = std::string(limit, 'A') + terminator + "NEXT";
+            const auto f = frame(pending);
+            EXPECT_EQ(f.status, frame_status::complete);
+            EXPECT_EQ(f.line, std::string(limit, 'A'));   // terminator (and its CR) not in the payload
+            EXPECT_EQ(pending, "NEXT");
+        }
+    }
+
+    TEST(StatusLineFramingTest, PayloadOnePastLimitIsOversizedNotTruncated)
+    {
+        for (const char* terminator : { "\n", "\r\n" })
+        {
+            std::string pending = std::string(limit + 1, 'A') + terminator;
+            const auto f = frame(pending);
+            EXPECT_EQ(f.status, frame_status::oversized) << f.detail;
+            EXPECT_TRUE(f.line.empty());
+            EXPECT_NE(f.detail.find("257 payload bytes before the line terminator exceed the 256-byte limit"), std::string::npos) << f.detail;
+        }
+    }
+
+    TEST(StatusLineFramingTest, UnterminatedPrefixIsIncompleteUntilItCannotBeAValidFrame)
+    {
+        std::string pending(limit, 'A');                       // 256 bytes, no LF: more may come
+        EXPECT_EQ(frame(pending).status, frame_status::incomplete);
+        pending += '\r';                                       // 257: could still be "256 + CR" + LF
+        EXPECT_EQ(frame(pending).status, frame_status::incomplete);
+        pending += '\n';
+        EXPECT_EQ(frame(pending).status, frame_status::complete);
+
+        std::string not_cr = std::string(limit, 'A') + 'A';    // 257 payload bytes, no LF
+        const auto f = frame(not_cr);
+        EXPECT_EQ(f.status, frame_status::oversized);
+        EXPECT_NE(f.detail.find("257 bytes without a line terminator exceed the 256-byte limit"), std::string::npos) << f.detail;
+
+        std::string cr_then_more = std::string(limit, 'A') + "\rA";   // 258, no LF
+        EXPECT_EQ(frame(cr_then_more).status, frame_status::oversized);
+    }
+
+    TEST(StatusLineFramingTest, OversizedInputArrivingInSeveralReadsIsRejectedOnceItExceedsTheLimit)
+    {
+        std::string pending(200, 'A');
+        EXPECT_EQ(frame(pending).status, frame_status::incomplete);
+        pending += std::string(50, 'A');                        // 250
+        EXPECT_EQ(frame(pending).status, frame_status::incomplete);
+        pending += std::string(10, 'A');                        // 260, still no LF: rejected now
+        EXPECT_EQ(frame(pending).status, frame_status::oversized);
+
+        std::string late_lf(200, 'A');
+        EXPECT_EQ(frame(late_lf).status, frame_status::incomplete);
+        late_lf += std::string(60, 'A') + '\n';                 // LF after 260 payload bytes
+        const auto f = frame(late_lf);
+        EXPECT_EQ(f.status, frame_status::oversized);
+        EXPECT_NE(f.detail.find("260 payload bytes"), std::string::npos) << f.detail;
+    }
+
+    TEST(StatusLineFramingTest, OnlyTheCrImmediatelyBeforeLfIsFraming)
+    {
+        std::string embedded = "READY\r 80\r\n";
+        auto f = frame(embedded);
+        EXPECT_EQ(f.status, frame_status::complete);
+        EXPECT_EQ(f.line, "READY\r 80");          // kept: it is not removed to make the line parse
+
+        std::string doubled = "READY 80\r\r\n";
+        f = frame(doubled);
+        EXPECT_EQ(f.status, frame_status::complete);
+        EXPECT_EQ(f.line, "READY 80\r");
+
+        std::string prefix = "READY 80";          // no LF: never a line, whatever follows (EOF/timeout)
+        EXPECT_EQ(frame(prefix).status, frame_status::incomplete);
+        EXPECT_EQ(prefix, "READY 80");
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Status line framing through a real helper child
+    // ------------------------------------------------------------------------------------
+
+    helper_options write_bytes(const std::string& spec, const std::chrono::milliseconds timeout = helper_ready_timeout)
+    {
+        return with_command({ std::string{ child_write_bytes }, spec }, timeout);
+    }
+
+    TEST(HelperStatusFramingTest, ReadyPayloadAtLimitIsAcceptedWithLfCrLfAndRuntimeTranslation)
+    {
+        const auto payload = zero_padded_status("READY ", "80", limit);
+        for (const char* terminator : { "\\n", "\\r\\n" })
+        {
+            helper_child child;
+            const auto result = child.start(write_bytes(payload + terminator), "::ffff:127.0.0.1");
+            EXPECT_EQ(result.outcome, helper_outcome::ready) << terminator << ": " << result.diagnostic;
+            EXPECT_EQ(result.port, 80);
+        }
+        // print-line goes through std::cout, i.e. the C runtime's text-mode CRLF translation,
+        // which is how real helpers report READY/ERROR.
+        helper_child child;
+        const auto result = child.start(with_command({ std::string{ child_print_line }, payload }), "::ffff:127.0.0.1");
+        EXPECT_EQ(result.outcome, helper_outcome::ready) << result.diagnostic;
+        EXPECT_EQ(result.port, 80);
+    }
+
+    TEST(HelperStatusFramingTest, ReadyPayloadOnePastLimitIsFailure)
+    {
+        const auto payload = zero_padded_status("READY ", "80", limit + 1);
+        for (const char* terminator : { "\\n", "\\r\\n" })
+        {
+            helper_child child;
+            const auto result = child.start(write_bytes(payload + terminator), "::ffff:127.0.0.1");
+            EXPECT_EQ(result.outcome, helper_outcome::failure) << terminator;
+            EXPECT_NE(result.diagnostic.find("oversized helper status line: 257 payload bytes"), std::string::npos) << result.diagnostic;
+            expect_helper_gone(child);
+        }
+    }
+
+    TEST(HelperStatusFramingTest, PaddedErrorPrefixWithTrailingJunkIsFailureNotLimitation)
+    {
+        // The first 256 bytes parse as "ERROR 1 10047" (IPv6 not installed); the old reader
+        // returned exactly that prefix and reported UNSUPPORTED.
+        helper_child child;
+        const auto result = child.start(write_bytes(zero_padded_status("ERROR 1 ", "10047", limit) + "JUNK\\n"), "::");
+        EXPECT_EQ(result.outcome, helper_outcome::failure);
+        EXPECT_NE(result.diagnostic.find("oversized helper status line: 260 payload bytes"), std::string::npos) << result.diagnostic;
+        EXPECT_EQ(result.diagnostic.find("IPv6 is not installed"), std::string::npos) << result.diagnostic;
+        expect_helper_gone(child);
+    }
+
+    TEST(HelperStatusFramingTest, PaddedReadyPrefixWithTrailingJunkIsFailureNotReady)
+    {
+        helper_child child;
+        const auto result = child.start(write_bytes(zero_padded_status("READY ", "80", limit) + "JUNK\\r\\n"), "::ffff:127.0.0.1");
+        EXPECT_EQ(result.outcome, helper_outcome::failure);
+        EXPECT_EQ(result.port, 0);
+        EXPECT_NE(result.diagnostic.find("oversized helper status line: 260 payload bytes"), std::string::npos) << result.diagnostic;
+        expect_helper_gone(child);
+    }
+
+    TEST(HelperStatusFramingTest, UnterminatedPaddedReadyPrefixIsATimeoutNotReady)
+    {
+        helper_child child;
+        const auto result = child.start(write_bytes(zero_padded_status("READY ", "80", limit), std::chrono::milliseconds{ 500 }),
+            "::ffff:127.0.0.1");
+        EXPECT_EQ(result.outcome, helper_outcome::failure);
+        EXPECT_NE(result.diagnostic.find("did not report status within 500 ms; 256 byte(s) of unterminated output: \"READY 000"),
+            std::string::npos) << result.diagnostic;
+        expect_helper_gone(child);
+    }
+
+    TEST(HelperStatusFramingTest, OversizedInputInSeveralReadsIsFailure)
+    {
+        // Two chunks 100 ms apart; the line terminator arrives only with the second one.
+        helper_child child;
+        const auto result = child.start(write_bytes(std::string(200, 'A') + "|" + std::string(100, 'A') + "\\n"), "::ffff:127.0.0.1");
+        EXPECT_EQ(result.outcome, helper_outcome::failure);
+        EXPECT_NE(result.diagnostic.find("oversized helper status line: 300 payload bytes"), std::string::npos) << result.diagnostic;
+        expect_helper_gone(child);
+
+        // Without any terminator the rejection happens as soon as the limit is exceeded, well
+        // before the readiness deadline.
+        helper_child unterminated;
+        const auto started = std::chrono::steady_clock::now();
+        const auto r2 = unterminated.start(write_bytes(std::string(200, 'A') + "|" + std::string(100, 'A'), std::chrono::seconds{ 10 }),
+            "::ffff:127.0.0.1");
+        EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds{ 5 });
+        EXPECT_EQ(r2.outcome, helper_outcome::failure);
+        EXPECT_NE(r2.diagnostic.find("oversized helper status line: 300 bytes without a line terminator"), std::string::npos) << r2.diagnostic;
+        expect_helper_gone(unterminated);
+    }
+
+    TEST(HelperStatusFramingTest, PartialLineBeforeExitIsFailureWithExitCodeAndTheUnterminatedBytes)
+    {
+        helper_child child;
+        const auto result = child.start(with_command({ std::string{ child_write_bytes }, "READY 80", "7" }), "::ffff:127.0.0.1");
+        EXPECT_EQ(result.outcome, helper_outcome::failure);
+        EXPECT_NE(result.diagnostic.find("exited before reporting status (exit code 7); 8 byte(s) of unterminated output: \"READY 80\""),
+            std::string::npos) << result.diagnostic;
+        expect_helper_gone(child);
+    }
+
     TEST(SocketLimitationTest, OnlyDocumentedConditionsAreLimitations)
     {
         EXPECT_TRUE(environment_limitation({ socket_op::create, AF_INET6, {}, WSAEAFNOSUPPORT }));

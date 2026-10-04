@@ -118,6 +118,32 @@ namespace
         precedence_exact(*this, helper_command({ std::string{ child_print_line }, "ERROR 1 10047" }));
     }
 
+    // Status-line framing: oversized or incomplete status output must be a failure even when its
+    // first 256 bytes look like a recognized limitation or like readiness.
+    TEST_F(DISABLED_NetlibFailureProbe, HelperOversizedErrorStatus)
+    {
+        precedence_exact(*this, helper_command({ std::string{ child_write_bytes },
+            zero_padded_status("ERROR 1 ", "10047", helper_status_max_payload) + "JUNK\\n" }));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, HelperOversizedReadyStatus)
+    {
+        precedence_exact(*this, helper_command({ std::string{ child_write_bytes },
+            zero_padded_status("READY ", "80", helper_status_max_payload) + "JUNK\\r\\n" }));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, HelperUnterminatedReadyStatus)
+    {
+        precedence_exact(*this, helper_command({ std::string{ child_write_bytes },
+            zero_padded_status("READY ", "80", helper_status_max_payload) }, std::chrono::milliseconds{ 500 }));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, HelperOversizedStatusInSeveralReads)
+    {
+        precedence_exact(*this, helper_command({ std::string{ child_write_bytes },
+            std::string(200, 'A') + "|" + std::string(100, 'A') + "\\n" }));
+    }
+
     TEST_F(DISABLED_NetlibFailureProbe, Ipv4TcpQueryFailure)
     {
         dual_stack_mapped_tcp_case(*this, failing_tcp(AF_INET));
@@ -256,6 +282,10 @@ namespace
         failure_expectation{ "Ipv4UdpQueryFailure", "UDP AF_INET table query (GetExtendedUdpTable) failed with error 50" },
         failure_expectation{ "Ipv6UdpQueryFailure", "UDP AF_INET6 table query (GetExtendedUdpTable) failed with error 50" },
         failure_expectation{ "PrecedenceIpv6UdpQueryFailure", "UDP AF_INET6 table query (GetExtendedUdpTable) failed with error 50" },
+        failure_expectation{ "HelperOversizedErrorStatus", "oversized helper status line: 260 payload bytes before the line terminator exceed the 256-byte limit (input starts \"ERROR 1 000" },
+        failure_expectation{ "HelperOversizedReadyStatus", "oversized helper status line: 260 payload bytes before the line terminator exceed the 256-byte limit (input starts \"READY 000" },
+        failure_expectation{ "HelperUnterminatedReadyStatus", "helper did not report status within 500 ms; 256 byte(s) of unterminated output: \"READY 000" },
+        failure_expectation{ "HelperOversizedStatusInSeveralReads", "oversized helper status line: 300 payload bytes before the line terminator exceed the 256-byte limit" },
         failure_expectation{ "AssertionFailure", "deliberate probe failure" }));
 
     TEST(ProcessLookupProbeExitTest, RecognizedLimitationAloneIsUnsupportedNotFailure)

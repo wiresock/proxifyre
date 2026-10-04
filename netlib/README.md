@@ -39,8 +39,11 @@ The ownership tests use real loopback sockets and, for some cases, a helper chil
 from the same executable. Helpers run in a kill-on-close job object that they join during
 `CreateProcessW` itself (`PROC_THREAD_ATTRIBUTE_JOB_LIST`), so a test process that dies at any
 point after creating a helper, even before resuming it, takes the helper down with it. Helpers
-inherit only their own pipe handles and must report readiness within 10 seconds. The tests do not
-open the packet-filter driver or change routing.
+inherit only their own pipe handles and must report readiness within 10 seconds. A helper status
+line is complete only when terminated by LF (one immediately preceding CR is accepted as part of
+the terminator) and carries at most 256 payload bytes; longer input, an unterminated prefix, or
+output that ends or times out before a terminator is a test failure and is never parsed. The tests
+do not open the packet-filter driver or change routing.
 
 Running the tests requires Windows 10 / Windows Server 2016 or newer (for the job-list process
 attribute; on an older host the helper launch fails before any process is created). This is a
