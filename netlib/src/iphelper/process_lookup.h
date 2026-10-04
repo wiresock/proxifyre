@@ -118,7 +118,7 @@ namespace iphelper
         bool resolved{ true };              ///< True when the owning process was resolved successfully
         std::optional<uint16_t> tcp_proxy_port = std::nullopt; // Optional TCP proxy port if the process is associated with a proxy
         std::optional<uint16_t> udp_proxy_port = std::nullopt; // Optional UDP proxy port if the process is associated with a proxy
-        // These cache flags can be set from match_app_name()/packet handlers running on
+        // These cache flags can be set from match_owner_to_app()/route_owner() running on
         // multiple threads for the same process, so they are atomic to avoid a data race
         // (the writes are idempotent 'true' stores; relaxed ordering would suffice).
         std::atomic<bool> excluded{ false };    ///< Whether the process is excluded from proxying

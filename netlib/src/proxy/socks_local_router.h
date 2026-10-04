@@ -75,19 +75,6 @@ namespace proxy
         };
 
     private:
-        enum class proxy_port_action : uint8_t
-        {
-            none,
-            proxy,
-            block
-        };
-
-        struct proxy_port_result
-        {
-            proxy_port_action action{ proxy_port_action::none };
-            uint16_t port{};  // NOLINT(clang-diagnostic-padded)
-        };
-
         static bool protocol_supports_tcp(const supported_protocols protocols) noexcept
         {
             return protocols == supported_protocols::both || protocols == supported_protocols::tcp;
@@ -1770,170 +1757,77 @@ namespace proxy
         }
 
         /**
-         * @brief Matches an application name pattern against the process details with exclusion support.
-         *
-         * This function performs a two-stage matching process:
-         * 1. First, it checks if the process should be excluded based on the exclusion list
-         * 2. Then, it performs pattern matching if the process is not excluded
-         *
-         * For both exclusion checking and pattern matching, the function uses intelligent field selection:
-         * - If the pattern/exclusion entry contains path separators ("/" or "\\"), it matches against the process's full path_name
-         * - If the pattern/exclusion entry contains no path separators, it matches against the process's name only
-         *
-         * Matching semantics:
-         *   - A NAME entry (no path separator) matches the process's bare name ANCHORED to the
-         *     whole filename: an exact match, or the entry as the filename stem immediately followed
-         *     by '.' (so a short pattern like "NOTE" does not match "EVILNOTE.EXE").
-         *   - A PATH entry (contains '/' or '\\') matches as a SUBSTRING against the full path.
-         *   - An EMPTY entry ("") is the CATCH-ALL: it matches ANY process not in the exclusion list.
-         * Comparisons are effectively case-insensitive because inputs are already upper-cased by the
-         * caller. The function automatically excludes the current process (by PID) to prevent self-matching.
-         *
-         * @param app The application name or pattern to check against the process details.
-         *            Can be either a simple process name (e.g., "notepad.exe") or a path-based pattern (e.g., "C:\\Windows\\System32\\notepad.exe").
-         * @param process The process details to check against the application pattern.
-         *                Must contain valid name and path_name fields for comparison.
-         * @return true if the process details match the application pattern and are not in the exclusion list,
-         *              and are not the current process; false otherwise.
-         *
-         * @note This function does not perform caching. Caching is handled at a higher level by the
-         *       get_proxy_port_tcp() and get_proxy_port_udp() functions using process_to_proxy_cache_.
-         *
-         * @note The function performs direct string matching without regex support. All comparisons
-         *       are case-sensitive as input is already converted to uppercase by calling functions.
+         * @brief The router's matching configuration for the owner routing helpers in
+         *        process_routing_policy.h. The caller holds lock_.
          */
-        bool match_app_name(const std::wstring& app, const std::shared_ptr<iphelper::network_process>& process) const
+        owner_match_rules match_rules() const noexcept
         {
-            if (!process) return false;
+            return { proxy_to_names_, excluded_list_, bypass_unresolved_processes_, ::GetCurrentProcessId() };
+        }
 
-            // In explicitly enabled limited/unelevated mode, process attribution is
-            // best-effort. Never let an unresolved synthetic owner match either a named
-            // application or the empty catch-all pattern; its traffic must remain direct.
-            // The flag defaults to false, preserving the existing elevated/service behavior.
-            if (should_bypass_unresolved_process(bypass_unresolved_processes_, process->resolved))
-                return false;
+        /**
+         * @brief What proxy @p proxy_id offers to @p Transport traffic of @p Family. The caller
+         *        holds lock_. proxy_servers_v6_ is kept index-aligned with proxy_servers_, so the
+         *        same proxy_to_names_ mapping selects the matching IPv6 proxy.
+         */
+        template <owner_transport Transport, owner_family Family>
+        proxy_route_target route_target(const size_t proxy_id) const
+        {
+            proxy_route_target target;
 
-            // Exclude the current process by process ID (not cached since it's a quick check)
-            if (process->id == ::GetCurrentProcessId())
-                return false;
+            target.transport_supported = proxy_id < proxy_protocols_.size() &&
+                (Transport == owner_transport::tcp
+                    ? protocol_supports_tcp(proxy_protocols_[proxy_id])
+                    : protocol_supports_udp(proxy_protocols_[proxy_id]));
 
-            // Matches a configured executable name (one without a path separator) against the
-            // process's bare name. Anchored to the whole filename -- an exact match, or the
-            // entry as the filename stem immediately followed by an extension -- so a short
-            // pattern can't match an unrelated process (e.g. "NOTE" matching "EVILNOTE.EXE").
-            // Inputs are already uppercased by the caller. Path-form entries (containing a
-            // separator) still use substring matching against the full path.
-            const auto name_matches = [](const std::wstring& name, const std::wstring& entry)
+            target.family_supported = proxy_id >= proxy_address_families_.size() ||
+                (Family == owner_family::ipv4
+                    ? family_supports_ipv4(proxy_address_families_[proxy_id])
+                    : family_supports_ipv6(proxy_address_families_[proxy_id]));
+
+            const auto listener_port = [proxy_id](const auto& servers) -> std::optional<uint16_t>
             {
-                if (entry.empty())
-                    return false;
-                if (name == entry)
-                    return true;
-                return name.size() > entry.size()
-                    && name.compare(0, entry.size(), entry) == 0
-                    && name[entry.size()] == L'.';
+                if (proxy_id >= servers.size())
+                    return std::nullopt;
+
+                if constexpr (Transport == owner_transport::tcp)
+                {
+                    if (servers[proxy_id].first)
+                        return servers[proxy_id].first->proxy_port();
+                }
+                else
+                {
+                    if (servers[proxy_id].second)
+                        return servers[proxy_id].second->proxy_port();
+                }
+
+                return std::nullopt;
             };
 
-            // Check exclusion list. Excludes use SUBSTRING matching for BOTH name and path forms.
-            // An exclusion is a safety / bypass rule ("keep this app OUT of the proxy"), so it must
-            // be permissive -- matching more processes rather than fewer -- to avoid accidentally
-            // routing traffic the user meant to keep direct (a real risk when combined with a ""
-            // catch-all proxy). This preserves the pre-v2.3.0 behavior; appName matching above stays
-            // anchored (where being precise is the safe direction). An empty entry is ignored so it
-            // cannot match every process.
-            for (const auto& excluded_entry : excluded_list_) {
-                if (!excluded_entry.empty() &&
-                    ((excluded_entry.find_first_of(L"\\/") != std::wstring::npos)
-                        ? (process->path_name.find(excluded_entry) != std::wstring::npos)
-                        : (process->name.find(excluded_entry) != std::wstring::npos))
-                    ) {
-                    process->excluded = true;
-                    return false; // Excluded
-                }
-            }
+            if constexpr (Family == owner_family::ipv4)
+                target.listener_port = listener_port(proxy_servers_);
+            else
+                target.listener_port = listener_port(proxy_servers_v6_);
 
-            // An empty app pattern is the catch-all: match ANY process not excluded above. This
-            // restores the long-standing behavior (before matching was anchored) where a substring
-            // find("") matched every process, letting an appNames entry of "" act as a default /
-            // fallback proxy for all remaining traffic. Non-empty names keep the anchored matching
-            // above (so a short pattern still can't match an unrelated process).
-            if (app.empty())
-                return true;
-
-            return (app.find(L'\\') != std::wstring::npos || app.find(L'/') != std::wstring::npos)
-                    ? (process->path_name.find(app) != std::wstring::npos)
-                    : name_matches(process->name, app);
+            return target;
         }
 
         /**
-         * Retrieves the TCP proxy port number associated with a given process name.
-         * @param process The pointer to network_process.
-         * @return A std::optional containing the TCP port number if the process name is found,
-         *         or an empty std::optional otherwise.
+         * @brief Selects the proxy for @p process's @p Transport traffic of @p Family.
+         *
+         * The first configured application pattern that matches the process decides (see
+         * match_owner_to_app() for the matching and exclusion semantics); see
+         * select_proxy_port() for the outcomes.
          */
-        proxy_port_result get_proxy_port_tcp(const std::shared_ptr<iphelper::network_process>& process)
+        template <owner_transport Transport, owner_family Family>
+        proxy_port_result get_proxy_port(const std::shared_ptr<iphelper::network_process>& process)
         {
             if (!process) return {};
 
             std::shared_lock lock(lock_);
 
-            for (const auto& [proxy_id, process_pattern] : proxy_to_names_)
-            {
-                if (match_app_name(process_pattern, process))
-                {
-                    if (proxy_id >= proxy_protocols_.size() || !protocol_supports_tcp(proxy_protocols_[proxy_id]))
-                        return {};
-
-                    if (proxy_id < proxy_address_families_.size() &&
-                        !family_supports_ipv4(proxy_address_families_[proxy_id]))
-                    {
-                        return { proxy_port_action::block, 0 };
-                    }
-
-                    if (proxy_id < proxy_servers_.size() && proxy_servers_[proxy_id].first)
-                        return { proxy_port_action::proxy, proxy_servers_[proxy_id].first->proxy_port() };
-
-                    return { proxy_port_action::block, 0 };
-                }
-            }
-
-            return {};
-        }
-
-        /**
-         * Retrieves the UDP proxy port number associated with a given process name.
-         * @param process The pointer to network_process.
-         * @return A std::optional containing the UDP port number if the process name is found,
-         *         or an empty std::optional otherwise.
-         */
-        proxy_port_result get_proxy_port_udp(const std::shared_ptr<iphelper::network_process>& process)
-        {
-            if (!process) return {};
-
-            std::shared_lock lock(lock_);
-
-            // Search for a matching process pattern
-            for (const auto& [proxy_id, process_pattern] : proxy_to_names_)
-            {
-                if (match_app_name(process_pattern, process))
-                {
-                    if (proxy_id >= proxy_protocols_.size() || !protocol_supports_udp(proxy_protocols_[proxy_id]))
-                        return {};
-
-                    if (proxy_id < proxy_address_families_.size() &&
-                        !family_supports_ipv4(proxy_address_families_[proxy_id]))
-                    {
-                        return { proxy_port_action::block, 0 };
-                    }
-
-                    if (proxy_id < proxy_servers_.size() && proxy_servers_[proxy_id].second)
-                        return { proxy_port_action::proxy, proxy_servers_[proxy_id].second->proxy_port() };
-
-                    return { proxy_port_action::block, 0 };
-                }
-            }
-
-            return {};
+            return select_proxy_port(match_rules(), *process,
+                [this](const size_t proxy_id) { return route_target<Transport, Family>(proxy_id); });
         }
 
         /**
@@ -1976,71 +1870,6 @@ namespace proxy
             });
         }
 
-        /**
-         * IPv6 counterpart of get_proxy_port_tcp(). Indexes proxy_servers_v6_, which is
-         * kept index-aligned with proxy_servers_, so the same proxy_to_names_ mapping
-         * selects the matching IPv6 proxy.
-         */
-        proxy_port_result get_proxy_port_tcp_v6(const std::shared_ptr<iphelper::network_process>& process)
-        {
-            if (!process) return {};
-
-            std::shared_lock lock(lock_);
-
-            for (const auto& [proxy_id, process_pattern] : proxy_to_names_)
-            {
-                if (match_app_name(process_pattern, process))
-                {
-                    if (proxy_id >= proxy_protocols_.size() || !protocol_supports_tcp(proxy_protocols_[proxy_id]))
-                        return {};
-
-                    if (proxy_id < proxy_address_families_.size() &&
-                        !family_supports_ipv6(proxy_address_families_[proxy_id]))
-                    {
-                        return { proxy_port_action::block, 0 };
-                    }
-
-                    if (proxy_id < proxy_servers_v6_.size() && proxy_servers_v6_[proxy_id].first)
-                        return { proxy_port_action::proxy, proxy_servers_v6_[proxy_id].first->proxy_port() };
-
-                    return { proxy_port_action::block, 0 };
-                }
-            }
-
-            return {};
-        }
-
-        /**
-         * IPv6 counterpart of get_proxy_port_udp(). See get_proxy_port_tcp_v6().
-         */
-        proxy_port_result get_proxy_port_udp_v6(const std::shared_ptr<iphelper::network_process>& process)
-        {
-            if (!process) return {};
-
-            std::shared_lock lock(lock_);
-
-            for (const auto& [proxy_id, process_pattern] : proxy_to_names_)
-            {
-                if (match_app_name(process_pattern, process))
-                {
-                    if (proxy_id >= proxy_protocols_.size() || !protocol_supports_udp(proxy_protocols_[proxy_id]))
-                        return {};
-
-                    if (proxy_id < proxy_address_families_.size() &&
-                        !family_supports_ipv6(proxy_address_families_[proxy_id]))
-                    {
-                        return { proxy_port_action::block, 0 };
-                    }
-
-                    if (proxy_id < proxy_servers_v6_.size() && proxy_servers_v6_[proxy_id].second)
-                        return { proxy_port_action::proxy, proxy_servers_v6_[proxy_id].second->proxy_port() };
-
-                    return { proxy_port_action::block, 0 };
-                }
-            }
-
-            return {};
-        }
 
         /**
          * IPv6 counterpart of is_tcp_proxy_port(): checks the IPv6 TCP proxy listeners.
@@ -2138,12 +1967,9 @@ namespace proxy
                 }
             }
 
-            if (process->excluded || process->bypass_udp)
-                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
-
-            const auto proxy_lookup = process->udp_proxy_port
-                ? proxy_port_result{ proxy_port_action::proxy, process->udp_proxy_port.value() }
-                : get_proxy_port_udp(process);
+            // Excluded or bypassing owners pass; a selection of none marks the owner as bypassing.
+            const auto proxy_lookup = route_owner<owner_transport::udp, owner_family::ipv4>(*process,
+                [&] { return get_proxy_port<owner_transport::udp, owner_family::ipv4>(process); });
 
             if (proxy_lookup.action == proxy_port_action::proxy)
             {
@@ -2178,10 +2004,6 @@ namespace proxy
             else if (proxy_lookup.action == proxy_port_action::block)
             {
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
-            }
-            else
-            {
-                process->bypass_udp = true;
             }
 
             return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
@@ -2249,12 +2071,9 @@ namespace proxy
                 }
             }
 
-            if (process->excluded || process->bypass_tcp)
-                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
-
-            const auto proxy_lookup = process->tcp_proxy_port
-                ? proxy_port_result{ proxy_port_action::proxy, process->tcp_proxy_port.value() }
-                : get_proxy_port_tcp(process);
+            // Excluded or bypassing owners pass; a selection of none marks the owner as bypassing.
+            const auto proxy_lookup = route_owner<owner_transport::tcp, owner_family::ipv4>(*process,
+                [&] { return get_proxy_port<owner_transport::tcp, owner_family::ipv4>(process); });
 
             if (proxy_lookup.action == proxy_port_action::proxy)
             {
@@ -2284,10 +2103,6 @@ namespace proxy
             else if (proxy_lookup.action == proxy_port_action::block)
             {
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
-            }
-            else
-            {
-                process->bypass_tcp = true;
             }
 
             // Otherwise, pass the packet through
@@ -2423,10 +2238,9 @@ namespace proxy
                 }
             }
 
-            if (process->excluded || process->bypass_udp)
-                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
-
-            const auto proxy_lookup = get_proxy_port_udp_v6(process);
+            // Excluded or bypassing owners pass; a selection of none marks the owner as bypassing.
+            const auto proxy_lookup = route_owner<owner_transport::udp, owner_family::ipv6>(*process,
+                [&] { return get_proxy_port<owner_transport::udp, owner_family::ipv6>(process); });
 
             if (proxy_lookup.action == proxy_port_action::proxy)
             {
@@ -2464,10 +2278,6 @@ namespace proxy
                 }
 
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
-            }
-            else
-            {
-                process->bypass_udp = true;
             }
 
             return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
@@ -2528,10 +2338,9 @@ namespace proxy
                 }
             }
 
-            if (process->excluded || process->bypass_tcp)
-                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
-
-            const auto proxy_lookup = get_proxy_port_tcp_v6(process);
+            // Excluded or bypassing owners pass; a selection of none marks the owner as bypassing.
+            const auto proxy_lookup = route_owner<owner_transport::tcp, owner_family::ipv6>(*process,
+                [&] { return get_proxy_port<owner_transport::tcp, owner_family::ipv6>(process); });
 
             if (proxy_lookup.action == proxy_port_action::proxy)
             {
@@ -2569,10 +2378,6 @@ namespace proxy
                 }
 
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
-            }
-            else
-            {
-                process->bypass_tcp = true;
             }
 
             return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
