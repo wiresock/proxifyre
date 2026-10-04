@@ -38,6 +38,11 @@ namespace netlib_test::process_lookup_cases
     class process_lookup_fixture : public ::testing::Test
     {
     public:
+        process_lookup_fixture() = default;
+        // Test-infrastructure override of the expected owner PID (failure probes only): runs a
+        // case against an owner it cannot match, so its ownership assertions fail.
+        explicit process_lookup_fixture(const DWORD expected_pid) : self_pid_(expected_pid) {}
+
         const DWORD self_pid_{ ::GetCurrentProcessId() };
         const std::wstring self_path_{ upper(module_path_of_current_process()) };
         const std::wstring self_name_{ base_name(self_path_) };
@@ -91,12 +96,13 @@ namespace netlib_test::process_lookup_cases
     // been asserted when the isolation precondition stopped the case, so the UNSUPPORTED reason
     // (console line and XML property alike) never overstates the executed coverage.
     //
-    // Folding cases: the lookup of this process's own dual-stack socket was already asserted,
-    // but a native row for the same endpoint means that result need not have come from the fold.
+    // Folding cases: the end-to-end ownership check of this process's own dual-stack socket has
+    // run by the time isolation is evaluated, but its assertions may have failed (they are
+    // recorded and reported separately), so the wording states that it ran, not that it passed.
     inline constexpr const char* folding_not_isolated_stage =
-        "the end-to-end IPv4 lookup of the dual-stack socket owned by this process was verified, "
-        "but the supplementary fold was not isolated, so that result may also hold through a "
-        "native AF_INET row";
+        "the end-to-end IPv4 ownership check of the dual-stack socket owned by this process ran "
+        "and its assertion results are reported separately; the supplementary fold was not "
+        "isolated, so this case does not establish mapped-fold coverage";
     // Precedence cases: isolation is checked before any lookup, so nothing was asserted.
     inline constexpr const char* precedence_not_isolated_stage =
         "the dual-stack binding held by the helper was not isolated in the OS tables, so no "

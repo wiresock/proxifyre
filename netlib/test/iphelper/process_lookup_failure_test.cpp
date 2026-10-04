@@ -183,6 +183,21 @@ namespace
         precedence_exact(*this, empty_udp_v6());
     }
 
+    TEST_F(DISABLED_NetlibFailureProbe, FoldingOwnershipMismatch)
+    {
+        // The shared mapped-UDP case run against an expected owner PID that cannot match (0 is
+        // never a socket owner): the ownership assertions fail, the case continues, and the empty
+        // AF_INET6 table then produces the not-isolated UNSUPPORTED reason. That reason must not
+        // claim the ownership check passed.
+        struct mismatched_owner_fixture final : process_lookup_fixture
+        {
+            mismatched_owner_fixture() : process_lookup_fixture(0) {}
+            void TestBody() override {}
+        };
+        const mismatched_owner_fixture mismatched;
+        mapped_v6_udp_exact_case(mismatched, empty_udp_v6());
+    }
+
     TEST_F(DISABLED_NetlibFailureProbe, Ipv4TcpQueryFailure)
     {
         dual_stack_mapped_tcp_case(*this, failing_tcp(AF_INET));
@@ -348,6 +363,7 @@ namespace
         const std::string filter = std::string{ "DISABLED_NetlibFailureProbe." } + expectation.probe;
         const std::string reason_prefix = std::string{ expectation.stage } + ": ";
         constexpr const char* old_message = "the end-to-end IPv4 lookup was asserted";
+        constexpr const char* passed_claim = "was verified";   // no stage may claim a passed check
 
         const auto strict = run_probe(filter, false);
         ASSERT_FALSE(strict.run.failure) << strict.run.failure->describe();
@@ -356,6 +372,7 @@ namespace
         EXPECT_TRUE(contains(out, "[ UNSUPPORTED ] " + filter + ": " + reason_prefix)) << out;
         EXPECT_FALSE(contains(out, expectation.must_not_claim)) << out;
         EXPECT_FALSE(contains(out, old_message)) << out;
+        EXPECT_FALSE(contains(out, passed_claim)) << out;
         EXPECT_FALSE(contains(out, "[  FAILED  ]")) << out;
         EXPECT_TRUE(contains(out, "netlib-tests summary: 1 run: 0 verified, 1 unsupported, 0 failed.")) << out;
         ASSERT_TRUE(strict.xml_written);
@@ -374,7 +391,44 @@ namespace
 
     INSTANTIATE_TEST_CASE_P(Stages, ProcessLookupUnsupportedStageTest, ::testing::Values(
         stage_expectation{ "FoldingNotIsolated", folding_not_isolated_stage, "no ownership or precedence assertion was run" },
-        stage_expectation{ "PrecedenceNotIsolated", precedence_not_isolated_stage, "was verified" }));
+        stage_expectation{ "PrecedenceNotIsolated", precedence_not_isolated_stage, "ownership check of the dual-stack socket owned by this process ran" }));
+
+    // Failed ownership assertions followed by a not-isolated outcome, through the shared
+    // mapped-UDP case: the run fails (exit 1) in both modes, the mismatch stays visible on the
+    // console and in the XML, the case is counted failed rather than verified, and the
+    // UNSUPPORTED reason that is still emitted claims nothing about the check having passed.
+    TEST(ProcessLookupProbeExitTest, FailedOwnershipWithNonIsolationIsFailureAndClaimsNoVerification)
+    {
+        const std::string filter = "DISABLED_NetlibFailureProbe.FoldingOwnershipMismatch";
+        const std::string reason_prefix = std::string{ folding_not_isolated_stage } + ": ";
+
+        for (const bool allow : { false, true })
+        {
+            SCOPED_TRACE(allow ? "--netlib_allow_unsupported" : "strict");
+            const auto probe = run_probe(filter, allow);
+            ASSERT_FALSE(probe.run.failure) << probe.run.failure->describe();
+            const auto& out = probe.run.output;
+
+            EXPECT_EQ(probe.run.exit_code, 1u) << out;
+            EXPECT_TRUE(contains(out, "[  FAILED  ] " + filter)) << out;
+            // The mismatch itself: the owner's PID compared with the expected PID 0.
+            EXPECT_TRUE(contains(out, "owner->id")) << out;
+            EXPECT_TRUE(contains(out, "Which is: 0")) << out;
+            // The not-isolated reason was reached and emitted, in neutral wording only.
+            EXPECT_TRUE(contains(out, "[ UNSUPPORTED ] " + filter + ": " + reason_prefix)) << out;
+            EXPECT_FALSE(contains(out, "was verified")) << out;
+            EXPECT_FALSE(contains(out, "the end-to-end IPv4 lookup was asserted")) << out;
+            EXPECT_TRUE(contains(out, "netlib-tests summary: 1 run: 0 verified, 0 unsupported, 1 failed.")) << out;
+
+            ASSERT_TRUE(probe.xml_written);
+            EXPECT_TRUE(contains(probe.xml, "<testsuites tests=\"1\" failures=\"1\"")) << probe.xml;
+            EXPECT_TRUE(contains(probe.xml, "<failure message=")) << probe.xml;
+            EXPECT_TRUE(contains(probe.xml, "owner-&gt;id")) << probe.xml;
+            EXPECT_TRUE(contains(probe.xml, "<property name=\"unsupported\" value=\"" + reason_prefix)) << probe.xml;
+            EXPECT_FALSE(contains(probe.xml, "was verified")) << probe.xml;
+            EXPECT_EQ(probe.run.surviving_processes, 0u);
+        }
+    }
 
     TEST(ProcessLookupProbeExitTest, RecognizedLimitationAloneIsUnsupportedNotFailure)
     {
