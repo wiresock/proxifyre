@@ -235,6 +235,10 @@ namespace iphelper
         using owner_memo_type = owner_memo<Process>;
     };
 
+    /// Declared only so process_lookup can befriend it: the native tests define it to observe
+    /// how published tables are replaced and retired. Production code never defines or uses it.
+    struct process_lookup_test_access;
+
     /**
      * @brief Maps TCP/UDP network connections to their owning processes using IP Helper API.
      *
@@ -277,6 +281,13 @@ namespace iphelper
         using tcp_protected_t = std::unordered_map<net::ip_session<T>, std::chrono::time_point<std::chrono::steady_clock>>;
         /// Protected UDP sessions cache (endpoints that couldn't be resolved)
         using udp_protected_t = std::unordered_map<net::ip_endpoint<T>, std::chrono::time_point<std::chrono::steady_clock>>;
+
+        // A completed table is published by swapping it with the current one under the table's
+        // reader lock (initialize_tcp_table/initialize_udp_table); that swap must not throw.
+        static_assert(std::is_nothrow_swappable_v<tcp_hashtable_t>);
+        static_assert(std::is_nothrow_swappable_v<udp_hashtable_t>);
+
+        friend struct process_lookup_test_access;
 
     public:
         /**
@@ -1036,6 +1047,7 @@ namespace iphelper
          * @note Uses automatic buffer growth for large connection tables
          * @note Thread-safe buffer management with mutex protection
          * @note Replaces the entire hash table atomically
+         * @note Destroys the replaced table after releasing the reader lock
          */
         bool initialize_tcp_table()
         {
@@ -1102,8 +1114,13 @@ namespace iphelper
                     }
                 }
 
-                std::unique_lock lock(tcp_to_app_mutex_);
-                tcp_to_app_ = std::move(tcp_to_app);
+                // Publish with a non-throwing swap under the reader lock. tcp_to_app then holds the
+                // replaced table, which is destroyed (with the owners only it still references)
+                // when it leaves this scope, after the lock has been released.
+                {
+                    std::unique_lock lock(tcp_to_app_mutex_);
+                    tcp_to_app_.swap(tcp_to_app);
+                }
             }
             catch (...) {
                 return false;
@@ -1124,6 +1141,7 @@ namespace iphelper
          * @note Uses automatic buffer growth for large endpoint tables
          * @note Thread-safe buffer management with mutex protection
          * @note Replaces the entire hash table atomically
+         * @note Destroys the replaced table after releasing the reader lock
          */
         bool initialize_udp_table()
         {
@@ -1185,8 +1203,12 @@ namespace iphelper
                     }
                 }
 
-                std::unique_lock lock(udp_to_app_mutex_);
-                udp_to_app_ = std::move(udp_to_app);
+                // Publish and retire as in initialize_tcp_table: the replaced table is destroyed
+                // after the lock has been released.
+                {
+                    std::unique_lock lock(udp_to_app_mutex_);
+                    udp_to_app_.swap(udp_to_app);
+                }
             }
             catch (...) {
                 return false;
