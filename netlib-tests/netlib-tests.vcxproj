@@ -105,6 +105,7 @@
     <ClCompile Include="..\netlib\test\iphelper\owner_memo_lookup_test.cpp" />
     <ClCompile Include="..\netlib\test\iphelper\owner_memo_test.cpp" />
     <ClCompile Include="..\netlib\test\iphelper\process_lookup_failure_test.cpp" />
+    <ClCompile Include="..\netlib\test\iphelper\process_lookup_publication_test.cpp" />
     <ClCompile Include="..\netlib\test\iphelper\process_lookup_test.cpp" />
     <ClCompile Include="..\netlib\test\proxy\owner_routing_policy_test.cpp" />
   </ItemGroup>

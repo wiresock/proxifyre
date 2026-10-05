@@ -22,8 +22,57 @@
 // Every owner lookup, image (fallback) lookup, and memo allocation is attributed to the capture
 // being ingested: process_lookup enriches a capture's rows after querying it and before the
 // next query.
+//
+// The publication tests also use iphelper::process_lookup_test_access (defined here) to reach
+// a published table's reader lock and to replace a published row's owner with an observable one.
 
 #include "../../src/iphelper/owner_memo.h"
+
+namespace iphelper
+{
+    /// Test-only access to process_lookup's published tables (declared in process_lookup.h).
+    struct process_lookup_test_access
+    {
+        template <class T, class Source>
+        static std::shared_mutex& tcp_table_mutex(process_lookup<T, Source>& lookup) noexcept
+        {
+            return lookup.tcp_to_app_mutex_;
+        }
+
+        template <class T, class Source>
+        static std::shared_mutex& udp_table_mutex(process_lookup<T, Source>& lookup) noexcept
+        {
+            return lookup.udp_to_app_mutex_;
+        }
+
+        /// Makes @p owner the published owner of @p session, under the table's writer lock; false
+        /// when @p session is not published. The replaced owner is released after the lock.
+        template <class T, class Source>
+        static bool replace_tcp_owner(process_lookup<T, Source>& lookup, const net::ip_session<T>& session,
+            std::shared_ptr<network_process> owner)
+        {
+            std::unique_lock lock(lookup.tcp_to_app_mutex_);
+            const auto it = lookup.tcp_to_app_.find(session);
+            if (it == lookup.tcp_to_app_.end())
+                return false;
+            it->second.swap(owner);
+            return true;
+        }
+
+        /// See replace_tcp_owner.
+        template <class T, class Source>
+        static bool replace_udp_owner(process_lookup<T, Source>& lookup, const net::ip_endpoint<T>& endpoint,
+            std::shared_ptr<network_process> owner)
+        {
+            std::unique_lock lock(lookup.udp_to_app_mutex_);
+            const auto it = lookup.udp_to_app_.find(endpoint);
+            if (it == lookup.udp_to_app_.end())
+                return false;
+            it->second.swap(owner);
+            return true;
+        }
+    };
+}
 
 namespace netlib_test::ownership
 {
@@ -104,6 +153,10 @@ namespace netlib_test::ownership
         /// Runs as a capture of @p kind is taken, before its rows are returned: models changes
         /// (for example PID reuse) that happened after the previous capture.
         std::function<void(table_kind)> on_capture;
+
+        /// Runs at each owner lookup (resolve_from_pid_and_tag_extended) before it is answered:
+        /// lets a test pause a table build while one of its rows is being enriched.
+        std::function<void(DWORD pid, DWORD tag)> on_owner_lookup;
 
         /// The next N device-path conversions of a drive path fail (return an empty device path).
         int fail_device_path_conversions{ 0 };
@@ -190,6 +243,8 @@ namespace netlib_test::ownership
         resolver::extended_result resolve_extended(const DWORD pid, const DWORD tag)
         {
             count(&capture_record::owner_lookups);
+            if (on_owner_lookup)
+                on_owner_lookup(pid, tag);
 
             resolver::extended_result ext{};
             const auto fail = [&]
@@ -657,6 +712,37 @@ namespace netlib_test::ownership
             return tcp()
                 ? v4_.lookup_process_for_tcp<false>(session4("10.0.0.2", port, "10.9.9.9", 443))
                 : v4_.lookup_process_for_udp<false>(endpoint4("10.0.0.2", port));
+        }
+
+        /// Makes @p replacement the published owner of row @p i (process_lookup_test_access), so a
+        /// test can observe when the published tables release it; false if row @p i is not published.
+        bool replace_owner(const uint16_t i, process_ptr replacement)
+        {
+            using access = iphelper::process_lookup_test_access;
+            const auto port = static_cast<uint16_t>(10000 + i);
+            switch (loop_)
+            {
+            case loop::tcp_v4:
+            case loop::tcp_v4_mapped:
+                return access::replace_tcp_owner(v4_, session4("10.0.0.1", port, "10.9.9.9", 443), std::move(replacement));
+            case loop::tcp_v6:
+                return access::replace_tcp_owner(v6_, session6("2001:db8::1", port, "2001:db8::9", 443), std::move(replacement));
+            case loop::udp_v4:
+            case loop::udp_v4_mapped:
+                return access::replace_udp_owner(v4_, endpoint4("10.0.0.1", port), std::move(replacement));
+            case loop::udp_v6:
+                return access::replace_udp_owner(v6_, endpoint6("2001:db8::1", port), std::move(replacement));
+            }
+            return false;
+        }
+
+        /// The reader lock of the published table that serves this loop's rows.
+        std::shared_mutex& table_mutex()
+        {
+            using access = iphelper::process_lookup_test_access;
+            if (served_by_v4())
+                return tcp() ? access::tcp_table_mutex(v4_) : access::udp_table_mutex(v4_);
+            return tcp() ? access::tcp_table_mutex(v6_) : access::udp_table_mutex(v6_);
         }
 
     private:
