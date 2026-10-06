@@ -54,7 +54,8 @@ jobs:
           @(
             'ProxiFyre.Configuration\packages.config',
             'ProxiFyre\packages.config',
-            'ProxiFyre.Tests\packages.config'
+            'ProxiFyre.Tests\packages.config',
+            'netlib-tests\packages.config'
           ) | ForEach-Object {
             nuget restore $_ -PackagesDirectory packages -NonInteractive
             if ($LASTEXITCODE -ne 0) {

@@ -1,0 +1,471 @@
+// Failure-path regression tests for the process_lookup characterization cases.
+//
+// DISABLED_NetlibFailureProbe tests run the real case bodies from process_lookup_cases.h with a
+// single injected fault (helper launch/protocol/timeout/socket failure, or a failed OS table
+// query). They are disabled so ordinary runs never execute them in-process; instead
+// ProcessLookupFailureProbeTest runs each one in a subprocess of this executable and asserts
+// the observable outcome: exit code, console output, XML results, and that no process launched
+// on the probe's behalf (helpers included) survives it.
+//
+// Infrastructure and query failures must fail the probe even with --netlib_allow_unsupported.
+// Only the documented environmental limitation may produce UNSUPPORTED.
+
+#include "pch.h"
+#include "test_support.h"
+#include "process_lookup_cases.h"
+
+namespace
+{
+    using namespace netlib_test;
+    using namespace netlib_test::process_lookup_cases;
+
+    // ------------------------------------------------------------------------------------
+    // Injected table-query failures (one address family fails, the other is real)
+    // ------------------------------------------------------------------------------------
+
+    constexpr DWORD injected_query_error = ERROR_NOT_SUPPORTED;   // 50
+
+    template <ULONG FailingFamily>
+    DWORD WINAPI tcp_query_failing(const PVOID buffer, const PDWORD size, const BOOL order, const ULONG family,
+        const TCP_TABLE_CLASS table_class, const ULONG reserved)
+    {
+        if (family == FailingFamily)
+            return injected_query_error;
+        return ::GetExtendedTcpTable(buffer, size, order, family, table_class, reserved);
+    }
+
+    template <ULONG FailingFamily>
+    DWORD WINAPI udp_query_failing(const PVOID buffer, const PDWORD size, const BOOL order, const ULONG family,
+        const UDP_TABLE_CLASS table_class, const ULONG reserved)
+    {
+        if (family == FailingFamily)
+            return injected_query_error;
+        return ::GetExtendedUdpTable(buffer, size, order, family, table_class, reserved);
+    }
+
+    case_options failing_tcp(const ULONG family)
+    {
+        case_options options;
+        options.tables.get_tcp = family == AF_INET ? &tcp_query_failing<AF_INET> : &tcp_query_failing<AF_INET6>;
+        return options;
+    }
+
+    case_options failing_udp(const ULONG family)
+    {
+        case_options options;
+        options.tables.get_udp = family == AF_INET ? &udp_query_failing<AF_INET> : &udp_query_failing<AF_INET6>;
+        return options;
+    }
+
+    // A successful UDP query of one family that lists no rows at all (the other family is real):
+    // the dual-stack binding under test is then provably not isolated, whatever the host does.
+    template <ULONG EmptyFamily>
+    DWORD WINAPI udp_query_empty(const PVOID buffer, const PDWORD size, const BOOL order, const ULONG family,
+        const UDP_TABLE_CLASS table_class, const ULONG reserved)
+    {
+        if (family != EmptyFamily)
+            return ::GetExtendedUdpTable(buffer, size, order, family, table_class, reserved);
+        const DWORD needed = EmptyFamily == AF_INET ? sizeof(MIB_UDPTABLE_OWNER_PID) : sizeof(MIB_UDP6TABLE_OWNER_PID);
+        if (buffer == nullptr || *size < needed)
+        {
+            *size = needed;
+            return ERROR_INSUFFICIENT_BUFFER;
+        }
+        std::memset(buffer, 0, needed);   // dwNumEntries = 0
+        return NO_ERROR;
+    }
+
+    case_options empty_udp_v6()
+    {
+        case_options options;
+        options.tables.get_udp = &udp_query_empty<AF_INET6>;
+        return options;
+    }
+
+    case_options helper_command(std::vector<std::string> command,
+        const std::chrono::milliseconds timeout = helper_ready_timeout)
+    {
+        case_options options;
+        options.helper.command = std::move(command);
+        options.helper.ready_timeout = timeout;
+        return options;
+    }
+
+    std::wstring missing_executable()
+    {
+        auto path = module_path_of_current_process();
+        path.resize(path.find_last_of(L"\\/") + 1);
+        return path + L"netlib-tests-missing-helper.exe";
+    }
+
+    void precedence_exact(const process_lookup_fixture& test, const case_options& options)
+    {
+        native_v4_udp_precedence_case(test, "::ffff:127.0.0.1", "127.0.0.1", os_tables::v4_mapped_loopback, options);
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Probes (run only in a subprocess by ProcessLookupFailureProbeTest)
+    // ------------------------------------------------------------------------------------
+
+    class DISABLED_NetlibFailureProbe : public process_lookup_fixture
+    {
+    };
+
+    TEST_F(DISABLED_NetlibFailureProbe, HelperLaunchFailure)
+    {
+        case_options options;
+        options.helper.executable = missing_executable();
+        precedence_exact(*this, options);
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, HelperMalformedStatus)
+    {
+        precedence_exact(*this, helper_command({ std::string{ child_print_line }, "BOGUS" }));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, HelperPrematureExit)
+    {
+        precedence_exact(*this, helper_command({ std::string{ child_exit_now }, "7" }));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, HelperNeverReady)
+    {
+        precedence_exact(*this, helper_command({ std::string{ child_never_ready } }, std::chrono::milliseconds{ 500 }));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, HelperUnrecognizedSocketError)
+    {
+        precedence_exact(*this, helper_command({ std::string{ child_print_line }, "ERROR 4 10048" }));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, HelperRecognizedLimitation)
+    {
+        precedence_exact(*this, helper_command({ std::string{ child_print_line }, "ERROR 1 10047" }));
+    }
+
+    // Status-line framing: oversized or incomplete status output must be a failure even when its
+    // first 256 bytes look like a recognized limitation or like readiness.
+    TEST_F(DISABLED_NetlibFailureProbe, HelperOversizedErrorStatus)
+    {
+        precedence_exact(*this, helper_command({ std::string{ child_write_bytes },
+            zero_padded_status("ERROR 1 ", "10047", helper_status_max_payload) + "JUNK\\n" }));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, HelperOversizedReadyStatus)
+    {
+        precedence_exact(*this, helper_command({ std::string{ child_write_bytes },
+            zero_padded_status("READY ", "80", helper_status_max_payload) + "JUNK\\r\\n" }));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, HelperUnterminatedReadyStatus)
+    {
+        precedence_exact(*this, helper_command({ std::string{ child_write_bytes },
+            zero_padded_status("READY ", "80", helper_status_max_payload) }, std::chrono::milliseconds{ 500 }));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, HelperOversizedStatusInSeveralReads)
+    {
+        precedence_exact(*this, helper_command({ std::string{ child_write_bytes },
+            std::string(200, 'A') + "|" + std::string(100, 'A') + "\\n" }));
+    }
+
+    // Not-isolated outcomes: UNSUPPORTED, with a reason that names the stage actually reached.
+    TEST_F(DISABLED_NetlibFailureProbe, FoldingNotIsolated)
+    {
+        // The end-to-end lookup assertions run first; the empty AF_INET6 table then shows the
+        // mapped binding is not isolated.
+        mapped_v6_udp_exact_case(*this, empty_udp_v6());
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, PrecedenceNotIsolated)
+    {
+        // The real helper starts; the empty AF_INET6 table stops the case before any lookup.
+        precedence_exact(*this, empty_udp_v6());
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, FoldingOwnershipMismatch)
+    {
+        // The shared mapped-UDP case run against an expected owner PID that cannot match (0 is
+        // never a socket owner): the ownership assertions fail, the case continues, and the empty
+        // AF_INET6 table then produces the not-isolated UNSUPPORTED reason. That reason must not
+        // claim the ownership check passed.
+        struct mismatched_owner_fixture final : process_lookup_fixture
+        {
+            mismatched_owner_fixture() : process_lookup_fixture(0) {}
+            void TestBody() override {}
+        };
+        const mismatched_owner_fixture mismatched;
+        mapped_v6_udp_exact_case(mismatched, empty_udp_v6());
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, Ipv4TcpQueryFailure)
+    {
+        dual_stack_mapped_tcp_case(*this, failing_tcp(AF_INET));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, Ipv6TcpQueryFailure)
+    {
+        dual_stack_mapped_tcp_case(*this, failing_tcp(AF_INET6));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, Ipv4UdpQueryFailure)
+    {
+        unspecified_v6_udp_case(*this, failing_udp(AF_INET));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, Ipv6UdpQueryFailure)
+    {
+        mapped_v6_udp_exact_case(*this, failing_udp(AF_INET6));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, PrecedenceIpv6UdpQueryFailure)
+    {
+        // The real helper starts; its isolation check then hits the failed AF_INET6 capture.
+        precedence_exact(*this, failing_udp(AF_INET6));
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, AssertionFailure)
+    {
+        FAIL() << "deliberate probe failure";
+    }
+
+    TEST_F(DISABLED_NetlibFailureProbe, Crash)
+    {
+        // Start a live helper, then terminate abnormally with an access-violation status (without
+        // a WER dialog). The helper's kill-on-close job must not let it outlive this process.
+        helper_child child;
+        const auto started = child.start({}, "::ffff:127.0.0.1");
+        ASSERT_EQ(started.outcome, helper_outcome::ready) << started.diagnostic;
+        std::cout << "probe helper pid " << child.pid() << std::endl;
+        ::TerminateProcess(::GetCurrentProcess(), static_cast<UINT>(0xC0000005));
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Subprocess runner
+    // ------------------------------------------------------------------------------------
+
+    struct probe_run
+    {
+        self_run run;
+        std::string xml;
+        bool xml_written{ false };
+    };
+
+    std::string temp_xml_path(const std::string& name)
+    {
+        char dir[MAX_PATH + 1]{};
+        ::GetTempPathA(MAX_PATH, dir);
+        std::string safe = name;
+        std::ranges::replace_if(safe, [](const char ch) { return !std::isalnum(static_cast<unsigned char>(ch)); }, '_');
+        return std::format("{}netlib-tests-probe-{}-{}.xml", dir, ::GetCurrentProcessId(), safe);
+    }
+
+    probe_run run_probe(const std::string& filter, const bool allow_unsupported, const bool also_disabled = true)
+    {
+        probe_run result;
+        const auto xml_path = temp_xml_path(filter.substr(filter.find('.') + 1));
+        std::remove(xml_path.c_str());
+
+        std::vector<std::string> args{ "--gtest_filter=" + filter, "--gtest_output=xml:" + xml_path };
+        if (also_disabled)
+            args.emplace_back("--gtest_also_run_disabled_tests");
+        if (allow_unsupported)
+            args.emplace_back("--netlib_allow_unsupported");
+
+        result.run = run_self(args, std::chrono::seconds{ 120 });
+
+        if (std::ifstream in{ xml_path, std::ios::binary })
+        {
+            result.xml.assign(std::istreambuf_iterator<char>(in), {});
+            result.xml_written = true;
+        }
+        std::remove(xml_path.c_str());
+        return result;
+    }
+
+    bool contains(const std::string& text, const std::string& what) { return text.find(what) != std::string::npos; }
+
+    struct failure_expectation
+    {
+        const char* probe;
+        const char* diagnostic;   // operation and error expected in the failure output
+    };
+
+    std::ostream& operator<<(std::ostream& os, const failure_expectation& e) { return os << e.probe; }
+
+    class ProcessLookupFailureProbeTest : public ::testing::TestWithParam<failure_expectation>
+    {
+    };
+
+    // Each infrastructure or query fault must be a real failure in both modes: exit code 1,
+    // a FAILED line naming the probe, the preserved diagnostic, no UNSUPPORTED record, a
+    // failure in the XML, and no surviving process.
+    TEST_P(ProcessLookupFailureProbeTest, FaultFailsEvenWhenUnsupportedIsAllowed)
+    {
+        const auto& expectation = GetParam();
+        const std::string filter = std::string{ "DISABLED_NetlibFailureProbe." } + expectation.probe;
+
+        for (const bool allow : { true, false })
+        {
+            SCOPED_TRACE(allow ? "--netlib_allow_unsupported" : "strict");
+            const auto probe = run_probe(filter, allow);
+            ASSERT_FALSE(probe.run.failure) << probe.run.failure->describe();
+            const auto& out = probe.run.output;
+
+            EXPECT_EQ(probe.run.exit_code, 1u) << out;
+            EXPECT_TRUE(contains(out, "[  FAILED  ] " + filter)) << out;
+            EXPECT_TRUE(contains(out, expectation.diagnostic)) << out;
+            EXPECT_FALSE(contains(out, "[ UNSUPPORTED ]")) << out;
+            EXPECT_TRUE(contains(out, "netlib-tests summary: 1 run: 0 verified, 0 unsupported, 1 failed.")) << out;
+            ASSERT_TRUE(probe.xml_written);
+            EXPECT_TRUE(contains(probe.xml, "<testsuites tests=\"1\" failures=\"1\"")) << probe.xml;
+            EXPECT_TRUE(contains(probe.xml, "<failure message=")) << probe.xml;
+            EXPECT_FALSE(contains(probe.xml, "name=\"unsupported\"")) << probe.xml;
+            EXPECT_EQ(probe.run.surviving_processes, 0u);
+        }
+    }
+
+    INSTANTIATE_TEST_CASE_P(Faults, ProcessLookupFailureProbeTest, ::testing::Values(
+        failure_expectation{ "HelperLaunchFailure", "helper launch: CreateProcessW failed (code 2)" },
+        failure_expectation{ "HelperMalformedStatus", "malformed helper status line: \"BOGUS\"" },
+        failure_expectation{ "HelperPrematureExit", "helper exited before reporting status (exit code 7)" },
+        failure_expectation{ "HelperNeverReady", "helper did not report status within 500 ms" },
+        failure_expectation{ "HelperUnrecognizedSocketError", "bind(AF_INET6, ::ffff:127.0.0.1) failed with WSA error 10048" },
+        failure_expectation{ "Ipv4TcpQueryFailure", "TCP AF_INET table query (GetExtendedTcpTable) failed with error 50" },
+        failure_expectation{ "Ipv6TcpQueryFailure", "TCP AF_INET6 table query (GetExtendedTcpTable) failed with error 50" },
+        failure_expectation{ "Ipv4UdpQueryFailure", "UDP AF_INET table query (GetExtendedUdpTable) failed with error 50" },
+        failure_expectation{ "Ipv6UdpQueryFailure", "UDP AF_INET6 table query (GetExtendedUdpTable) failed with error 50" },
+        failure_expectation{ "PrecedenceIpv6UdpQueryFailure", "UDP AF_INET6 table query (GetExtendedUdpTable) failed with error 50" },
+        failure_expectation{ "HelperOversizedErrorStatus", "oversized helper status line: 260 payload bytes before the line terminator exceed the 256-byte limit (input starts \"ERROR 1 000" },
+        failure_expectation{ "HelperOversizedReadyStatus", "oversized helper status line: 260 payload bytes before the line terminator exceed the 256-byte limit (input starts \"READY 000" },
+        failure_expectation{ "HelperUnterminatedReadyStatus", "helper did not report status within 500 ms; 256 byte(s) of unterminated output: \"READY 000" },
+        failure_expectation{ "HelperOversizedStatusInSeveralReads", "oversized helper status line: 300 payload bytes before the line terminator exceed the 256-byte limit" },
+        failure_expectation{ "AssertionFailure", "deliberate probe failure" }));
+
+    struct stage_expectation
+    {
+        const char* probe;
+        const char* stage;            // the reason must start with this
+        const char* must_not_claim;   // a claim belonging to the other stage
+    };
+
+    std::ostream& operator<<(std::ostream& os, const stage_expectation& e) { return os << e.probe; }
+
+    class ProcessLookupUnsupportedStageTest : public ::testing::TestWithParam<stage_expectation>
+    {
+    };
+
+    // A not-isolated outcome is UNSUPPORTED (exit 5 strict, 0 allowed) and its reason, on the
+    // console and in the XML property alike, states the stage that was reached and nothing more.
+    TEST_P(ProcessLookupUnsupportedStageTest, NotIsolatedReasonNamesTheReachedStage)
+    {
+        const auto& expectation = GetParam();
+        const std::string filter = std::string{ "DISABLED_NetlibFailureProbe." } + expectation.probe;
+        const std::string reason_prefix = std::string{ expectation.stage } + ": ";
+        constexpr const char* old_message = "the end-to-end IPv4 lookup was asserted";
+        constexpr const char* passed_claim = "was verified";   // no stage may claim a passed check
+
+        const auto strict = run_probe(filter, false);
+        ASSERT_FALSE(strict.run.failure) << strict.run.failure->describe();
+        const auto& out = strict.run.output;
+        EXPECT_EQ(strict.run.exit_code, 5u) << out;
+        EXPECT_TRUE(contains(out, "[ UNSUPPORTED ] " + filter + ": " + reason_prefix)) << out;
+        EXPECT_FALSE(contains(out, expectation.must_not_claim)) << out;
+        EXPECT_FALSE(contains(out, old_message)) << out;
+        EXPECT_FALSE(contains(out, passed_claim)) << out;
+        EXPECT_FALSE(contains(out, "[  FAILED  ]")) << out;
+        EXPECT_TRUE(contains(out, "netlib-tests summary: 1 run: 0 verified, 1 unsupported, 0 failed.")) << out;
+        ASSERT_TRUE(strict.xml_written);
+        EXPECT_TRUE(contains(strict.xml, "failures=\"0\"")) << strict.xml;
+        EXPECT_TRUE(contains(strict.xml, "<property name=\"unsupported\" value=\"" + reason_prefix)) << strict.xml;
+        EXPECT_FALSE(contains(strict.xml, expectation.must_not_claim)) << strict.xml;
+        EXPECT_FALSE(contains(strict.xml, old_message)) << strict.xml;
+        EXPECT_EQ(strict.run.surviving_processes, 0u);
+
+        const auto allowed = run_probe(filter, true);
+        ASSERT_FALSE(allowed.run.failure) << allowed.run.failure->describe();
+        EXPECT_EQ(allowed.run.exit_code, 0u) << allowed.run.output;
+        EXPECT_TRUE(contains(allowed.run.output, "[ UNSUPPORTED ] " + filter + ": " + reason_prefix)) << allowed.run.output;
+        EXPECT_EQ(allowed.run.surviving_processes, 0u);
+    }
+
+    INSTANTIATE_TEST_CASE_P(Stages, ProcessLookupUnsupportedStageTest, ::testing::Values(
+        stage_expectation{ "FoldingNotIsolated", folding_not_isolated_stage, "no ownership or precedence assertion was run" },
+        stage_expectation{ "PrecedenceNotIsolated", precedence_not_isolated_stage, "ownership check of the dual-stack socket owned by this process ran" }));
+
+    // Failed ownership assertions followed by a not-isolated outcome, through the shared
+    // mapped-UDP case: the run fails (exit 1) in both modes, the mismatch stays visible on the
+    // console and in the XML, the case is counted failed rather than verified, and the
+    // UNSUPPORTED reason that is still emitted claims nothing about the check having passed.
+    TEST(ProcessLookupProbeExitTest, FailedOwnershipWithNonIsolationIsFailureAndClaimsNoVerification)
+    {
+        const std::string filter = "DISABLED_NetlibFailureProbe.FoldingOwnershipMismatch";
+        const std::string reason_prefix = std::string{ folding_not_isolated_stage } + ": ";
+
+        for (const bool allow : { false, true })
+        {
+            SCOPED_TRACE(allow ? "--netlib_allow_unsupported" : "strict");
+            const auto probe = run_probe(filter, allow);
+            ASSERT_FALSE(probe.run.failure) << probe.run.failure->describe();
+            const auto& out = probe.run.output;
+
+            EXPECT_EQ(probe.run.exit_code, 1u) << out;
+            EXPECT_TRUE(contains(out, "[  FAILED  ] " + filter)) << out;
+            // The mismatch itself: the owner's PID compared with the expected PID 0.
+            EXPECT_TRUE(contains(out, "owner->id")) << out;
+            EXPECT_TRUE(contains(out, "Which is: 0")) << out;
+            // The not-isolated reason was reached and emitted, in neutral wording only.
+            EXPECT_TRUE(contains(out, "[ UNSUPPORTED ] " + filter + ": " + reason_prefix)) << out;
+            EXPECT_FALSE(contains(out, "was verified")) << out;
+            EXPECT_FALSE(contains(out, "the end-to-end IPv4 lookup was asserted")) << out;
+            EXPECT_TRUE(contains(out, "netlib-tests summary: 1 run: 0 verified, 0 unsupported, 1 failed.")) << out;
+
+            ASSERT_TRUE(probe.xml_written);
+            EXPECT_TRUE(contains(probe.xml, "<testsuites tests=\"1\" failures=\"1\"")) << probe.xml;
+            EXPECT_TRUE(contains(probe.xml, "<failure message=")) << probe.xml;
+            EXPECT_TRUE(contains(probe.xml, "owner-&gt;id")) << probe.xml;
+            EXPECT_TRUE(contains(probe.xml, "<property name=\"unsupported\" value=\"" + reason_prefix)) << probe.xml;
+            EXPECT_FALSE(contains(probe.xml, "was verified")) << probe.xml;
+            EXPECT_EQ(probe.run.surviving_processes, 0u);
+        }
+    }
+
+    TEST(ProcessLookupProbeExitTest, RecognizedLimitationAloneIsUnsupportedNotFailure)
+    {
+        const std::string filter = "DISABLED_NetlibFailureProbe.HelperRecognizedLimitation";
+
+        const auto strict = run_probe(filter, false);
+        ASSERT_FALSE(strict.run.failure) << strict.run.failure->describe();
+        EXPECT_EQ(strict.run.exit_code, 5u) << strict.run.output;
+        EXPECT_TRUE(contains(strict.run.output, "[ UNSUPPORTED ] " + filter + ": helper: IPv6 is not installed")) << strict.run.output;
+        EXPECT_TRUE(contains(strict.run.output, "netlib-tests summary: 1 run: 0 verified, 1 unsupported, 0 failed.")) << strict.run.output;
+        EXPECT_TRUE(contains(strict.xml, "failures=\"0\"")) << strict.xml;
+        EXPECT_TRUE(contains(strict.xml, "<property name=\"unsupported\" value=\"helper: IPv6 is not installed")) << strict.xml;
+
+        EXPECT_EQ(strict.run.surviving_processes, 0u);
+
+        const auto allowed = run_probe(filter, true);
+        ASSERT_FALSE(allowed.run.failure) << allowed.run.failure->describe();
+        EXPECT_EQ(allowed.run.exit_code, 0u) << allowed.run.output;
+        EXPECT_EQ(allowed.run.surviving_processes, 0u);
+    }
+
+    TEST(ProcessLookupProbeExitTest, CrashIsNonZeroWithoutSummary)
+    {
+        const auto probe = run_probe("DISABLED_NetlibFailureProbe.Crash", true);
+        ASSERT_FALSE(probe.run.failure) << probe.run.failure->describe();
+        EXPECT_EQ(probe.run.exit_code, 0xC0000005u) << probe.run.output;
+        EXPECT_TRUE(contains(probe.run.output, "probe helper pid ")) << probe.run.output;
+        EXPECT_FALSE(contains(probe.run.output, "netlib-tests summary:")) << probe.run.output;
+        EXPECT_FALSE(probe.xml_written);
+        EXPECT_EQ(probe.run.surviving_processes, 0u);
+    }
+
+    TEST(ProcessLookupProbeExitTest, UnmatchedFilterExitsFour)
+    {
+        const auto probe = run_probe("NoSuchTestCase.*", true, false);
+        ASSERT_FALSE(probe.run.failure) << probe.run.failure->describe();
+        EXPECT_EQ(probe.run.exit_code, 4u) << probe.run.output;
+        EXPECT_TRUE(contains(probe.run.output, "netlib-tests: no tests were run.")) << probe.run.output;
+    }
+}
