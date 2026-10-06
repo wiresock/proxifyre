@@ -116,12 +116,46 @@ foreach ($assertion in @(
     Assert-ContainsOrdinal $routingPolicySource $assertion 'The native routing-policy truth table'
 }
 
-$unresolvedGuard =
-    'should_bypass_unresolved_process(bypass_unresolved_processes_, process->resolved)'
-$guardOffset = $routerSource.IndexOf($unresolvedGuard, [StringComparison]::Ordinal)
-$catchAllOffset = $routerSource.IndexOf('if (app.empty())', [StringComparison]::Ordinal)
-if ($guardOffset -lt 0 -or $catchAllOffset -lt 0 -or $guardOffset -ge $catchAllOffset) {
+# Application matching lives in match_owner_to_app (process_routing_policy.h). Within that
+# function, the unresolved-owner guard must return before the empty catch-all pattern matches.
+$matchFunctionMatch = [regex]::Match($routingPolicySource,
+    '\[\[nodiscard\]\]\s+inline\s+bool\s+match_owner_to_app\(.*?^    \}',
+    [Text.RegularExpressions.RegexOptions]::Singleline -bor
+        [Text.RegularExpressions.RegexOptions]::Multiline)
+if (-not $matchFunctionMatch.Success) {
+    throw 'The native application matching function match_owner_to_app was not found.'
+}
+$matchFunction = $matchFunctionMatch.Value
+$guardMatch = [regex]::Match($matchFunction,
+    'if\s*\(\s*should_bypass_unresolved_process\(\s*rules\.bypass_unresolved_processes,\s*' +
+    'process\.resolved\s*\)\s*\)\s*return\s+false;')
+$catchAllOffset = $matchFunction.IndexOf('if (app.empty())', [StringComparison]::Ordinal)
+if (-not $guardMatch.Success -or $catchAllOffset -lt 0 -or $guardMatch.Index -ge $catchAllOffset) {
     throw 'The unresolved-owner fail-direct guard must run before catch-all application matching.'
+}
+
+# Proxy selection matches through that function, and the router routes through the selection
+# with its own limited-mode flag in the rules (third member of owner_match_rules).
+Assert-ContainsOrdinal $routingPolicySource `
+    'if (match_owner_to_app(process_pattern, process, rules))' `
+    'The native proxy selection'
+if (-not [regex]::IsMatch($routingPolicySource,
+        'struct\s+owner_match_rules\s*\{\s*' +
+        'const\s+std::multimap<size_t,\s*std::wstring>&\s+proxy_to_names;[^\n]*\n\s*' +
+        'const\s+std::vector<std::wstring>&\s+excluded_list;[^\n]*\n\s*' +
+        'bool\s+bypass_unresolved_processes;')) {
+    throw 'owner_match_rules must carry the limited-mode flag after the name and exclusion lists.'
+}
+if (-not [regex]::IsMatch($routerSource,
+        'owner_match_rules\s+match_rules\(\)\s+const\s+noexcept\s*\{\s*' +
+        'return\s*\{\s*proxy_to_names_,\s*excluded_list_,\s*bypass_unresolved_processes_,')) {
+    throw 'The router must propagate its limited-mode flag into the application matching rules.'
+}
+Assert-ContainsOrdinal $routerSource `
+    'select_proxy_port(match_rules(), *process,' `
+    'The router proxy selection'
+if ($routerSource.Contains('if (app.empty())', [StringComparison]::Ordinal)) {
+    throw 'The router must not keep catch-all application matching outside match_owner_to_app.'
 }
 
 $enginePath = Join-Path $repositoryRoot "bin\exe\$Platform\Release\ProxiFyre.exe"
