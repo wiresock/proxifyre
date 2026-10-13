@@ -245,3 +245,7 @@ finally {
         Remove-Item -LiteralPath $resolved -Recurse -Force
     }
 }
+
+# Expected negative cases leave a nonzero native exit code. Report success only
+# after all assertions and cleanup finish; GitHub Actions propagates this code.
+exit 0
