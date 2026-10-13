@@ -54,7 +54,9 @@ $badDestinationName = "ProxiFyre-BadZipTest-$testId"
 $badDestination = Join-Path $programFiles $badDestinationName
 $duplicateDestinationName = "ProxiFyre-DuplicateZipTest-$testId"
 $duplicateDestination = Join-Path $programFiles $duplicateDestinationName
-$cleanupPaths = @($destination, $badDestination, $duplicateDestination, $testRoot)
+$raceDestinationName = "ProxiFyre-RaceTest-$testId"
+$raceDestination = Join-Path $programFiles $raceDestinationName
+$cleanupPaths = @($destination, $badDestination, $duplicateDestination, $raceDestination, $testRoot)
 foreach ($path in $cleanupPaths) {
     if (Test-Path -LiteralPath $path) { throw "Test path already exists: $path" }
 }
@@ -110,13 +112,13 @@ try {
     $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
 
     function Invoke-Recipe([string]$ArchivePath, [string]$ExpectedHash,
-            [string]$Name, [string]$ExpectedFailure = '') {
+            [string]$Name, [string]$ExpectedFailure = '', [string]$ScriptPath = $recipe) {
         # Each execution starts with fresh assembly/type state, including failures.
         $savedPreference = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
             $output = & "$PSHOME\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-                -File $recipe -ZipPath $ArchivePath -ExpectedSha256 $ExpectedHash -DestinationName $Name 2>&1
+                -File $ScriptPath -ZipPath $ArchivePath -ExpectedSha256 $ExpectedHash -DestinationName $Name 2>&1
             $exitCode = $LASTEXITCODE
         }
         finally { $ErrorActionPreference = $savedPreference }
@@ -126,13 +128,14 @@ try {
             }
         }
         elseif ($exitCode -ne 0) { throw "Recipe failed with exit ${exitCode}: $output" }
+        return ($output | Out-String)
     }
-    Invoke-Recipe $zip ('0' * 64) $badDestinationName 'SHA-256 mismatch'
+    Invoke-Recipe $zip ('0' * 64) $badDestinationName 'SHA-256 mismatch' | Out-Null
     if (Test-Path -LiteralPath $badDestination) {
         throw 'A checksum mismatch must fail before creating the destination.'
     }
 
-    Invoke-Recipe $zip $hash $destinationName
+    Invoke-Recipe $zip $hash $destinationName | Out-Null
     Add-Type -Path (Join-Path $PSScriptRoot 'ZipStagingOwnerProbe.cs')
     [ZipStagingOwnerProbe]::AssertProtected($destination)
     Write-Output 'PASS: same-user unprivileged file/directory mutations denied before owner normalization.'
@@ -210,7 +213,7 @@ if ($Rejection -eq 'Location') {
 
     $marker = Join-Path $destination 'existing-installation.txt'
     [IO.File]::WriteAllText($marker, 'do not replace')
-    Invoke-Recipe $zip $hash $destinationName 'Destination already exists'
+    Invoke-Recipe $zip $hash $destinationName 'Destination already exists' | Out-Null
     if ([IO.File]::ReadAllText($marker) -ne 'do not replace') {
         throw 'An existing destination must be refused without overwriting it.'
     }
@@ -222,10 +225,59 @@ if ($Rejection -eq 'Location') {
         $duplicateArchive.CreateEntry('duplicate.txt') | Out-Null
     }
     finally { $duplicateArchive.Dispose() }
-    Invoke-Recipe $duplicateZip (Get-FileHash -LiteralPath $duplicateZip).Hash $duplicateDestinationName 'already exists'
+    $duplicateOutput = Invoke-Recipe $duplicateZip (Get-FileHash -LiteralPath $duplicateZip).Hash `
+        $duplicateDestinationName 'already exists'
+    if ($duplicateOutput -notlike '*ExtractToDirectory*' -or
+        $duplicateOutput -like '*Destination already exists*') {
+        throw 'Duplicate entries must fail during extraction, not the destination preflight.'
+    }
     if (Test-Path -LiteralPath $duplicateDestination) {
         throw 'Failed extraction must remove the partial destination.'
     }
+
+    # Deterministically let another elevated run create the destination after
+    # the existence check. Matching ACLs must not make its files ours to delete.
+    $raceWrapper = Join-Path $testRoot 'Race-StageProxiFyreZip.ps1'
+    [IO.File]::WriteAllText($raceWrapper, @'
+param([string]$ZipPath, [string]$ExpectedSha256, [string]$DestinationName)
+$ErrorActionPreference = 'Stop'
+# Process-scoped state stays visible when the recipe invokes our hook from
+# its own script scope. This wrapper always runs in an isolated child process.
+$global:ProxiFyreRacePath = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) $DestinationName
+$global:ProxiFyreRaceInjected = $false
+function Test-Path([string]$LiteralPath) {
+    $exists = Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath
+    if ($LiteralPath -eq $global:ProxiFyreRacePath -and -not $global:ProxiFyreRaceInjected) {
+        if ($exists) { throw 'Race fixture must initially be absent.' }
+        $security = [Security.AccessControl.DirectorySecurity]::new()
+        $security.SetSecurityDescriptorSddlForm(
+            'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)(A;OICI;RC;;;OW)')
+        [IO.Directory]::CreateDirectory($LiteralPath, $security) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $LiteralPath 'other-run.txt'), 'preserve other run')
+        $global:ProxiFyreRaceInjected = $true
+    }
+    return $exists
+}
+try {
+    & (Join-Path $PSScriptRoot 'Stage-ProxiFyreZip.ps1') -ZipPath $ZipPath `
+        -ExpectedSha256 $ExpectedSha256 -DestinationName $DestinationName
+}
+finally {
+    if (-not $global:ProxiFyreRaceInjected) { throw 'The concurrent-creation hook did not run.' }
+}
+'@)
+    $raceOutput = Invoke-Recipe $duplicateZip (Get-FileHash -LiteralPath $duplicateZip).Hash `
+        $raceDestinationName 'already exists' $raceWrapper
+    $raceMarker = Join-Path $raceDestination 'other-run.txt'
+    if (-not (Test-Path -LiteralPath $raceMarker)) {
+        throw 'A destination created by another run must survive failed staging.'
+    }
+    if ($raceOutput -notlike '*Destination already exists*' -or
+        [IO.File]::ReadAllText($raceMarker) -ne 'preserve other run' -or
+        @(Get-ChildItem -LiteralPath $raceDestination -Force).Count -ne 1) {
+        throw 'A concurrent destination must be refused before extracting or changing its files.'
+    }
+    Write-Output 'PASS: concurrent destination with identical ACLs preserved without extraction.'
     Write-Output 'PASS: documented ZIP staging, recursive ownership, payload policies, checksum and overwrite rejection.'
 }
 catch {
@@ -238,7 +290,7 @@ finally {
         if (-not (Test-Path -LiteralPath $path)) { continue }
         $resolved = (Resolve-Path -LiteralPath $path).Path
         if ((Split-Path -Parent $resolved) -ne $programFiles -or
-            (Split-Path -Leaf $resolved) -notmatch ('^ProxiFyre-(ZipTest|StagingTest|BadZipTest|DuplicateZipTest)-' + $testId + '$') -or
+            (Split-Path -Leaf $resolved) -notmatch ('^ProxiFyre-(ZipTest|StagingTest|BadZipTest|DuplicateZipTest|RaceTest)-' + $testId + '$') -or
             ((Get-Item -LiteralPath $resolved).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw "Refusing to remove unexpected test path: $resolved"
         }

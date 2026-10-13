@@ -93,16 +93,12 @@ public static class ZipStagingOwnerProbe
                         }
                         if (File.ReadAllBytes(file)[0] != 42)
                             throw new InvalidOperationException("Owner probe must retain read access.");
-                        Denied("file DACL", delegate {
-                            var acl = File.GetAccessControl(file);
-                            acl.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.Write, AccessControlType.Allow));
-                            File.SetAccessControl(file, acl);
-                        });
-                        Denied("directory DACL", delegate {
-                            var acl = Directory.GetAccessControl(directory);
-                            acl.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.Write, AccessControlType.Allow));
-                            Directory.SetAccessControl(directory, acl);
-                        });
+                        var fileAcl = File.GetAccessControl(file);
+                        fileAcl.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.Write, AccessControlType.Allow));
+                        Denied("file DACL", delegate { File.SetAccessControl(file, fileAcl); });
+                        var directoryAcl = Directory.GetAccessControl(directory);
+                        directoryAcl.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.Write, AccessControlType.Allow));
+                        Denied("directory DACL", delegate { Directory.SetAccessControl(directory, directoryAcl); });
                         Denied("file contents", delegate { File.WriteAllText(file, "changed"); });
                         Denied("child creation", delegate { File.WriteAllText(Path.Combine(directory, "injected.txt"), "changed"); });
                     }

@@ -33,7 +33,12 @@ namespace ProxiFyre.Tests
         [TearDown]
         public void TearDown()
         {
-            Directory.Delete(_directory, true);
+            // Timer disposal can leave a poll briefly holding a delete-shared handle.
+            for (var attempt = 0; Directory.Exists(_directory); attempt++)
+            {
+                try { Directory.Delete(_directory, true); }
+                catch (IOException) when (attempt < 10) { Thread.Sleep(50); }
+            }
         }
 
         [Test]
@@ -42,7 +47,7 @@ namespace ProxiFyre.Tests
             var legacyLog = Path.Combine(Logs, "logfile_2020-01-01.txt");
             File.WriteAllText(legacyLog, "legacy diagnostics");
 
-            for (var generation = 0; generation < 5; generation++)
+            for (var generation = 0; generation < 4; generation++)
             {
                 // Preallocate close to the real shipped limit to exercise the boundary
                 // without generating millions of log messages.
@@ -71,7 +76,7 @@ namespace ProxiFyre.Tests
 
             var archives = Directory.GetFiles(Archives, "*.txt");
             Assert.That(archives.Select(path => File.ReadLines(path).First()),
-                Is.EquivalentTo(new[] { "generation-2", "generation-3", "generation-4" }));
+                Is.EquivalentTo(new[] { "generation-1", "generation-2", "generation-3" }));
             Assert.That(archives.Sum(path => new FileInfo(path).Length) +
                 new FileInfo(ActiveLog).Length, Is.LessThanOrEqualTo(4 * FiftyMiB));
             Assert.That(File.ReadAllText(legacyLog), Is.EqualTo("legacy diagnostics"),

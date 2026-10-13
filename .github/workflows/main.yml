@@ -147,11 +147,6 @@ jobs:
             throw "Managed tests failed with exit code $LASTEXITCODE."
           }
 
-      - name: Verify documented ZIP staging
-        if: matrix.platform == 'x64'
-        shell: powershell
-        run: ./scripts/Test-ZipStaging.ps1
-
       - name: Verify release payload
         shell: pwsh
         run: |
@@ -174,6 +169,11 @@ jobs:
               throw "Required release file '$_' is missing from '$payload'."
             }
           }
+
+      - name: Verify documented ZIP staging
+        if: matrix.platform == 'x64'
+        shell: powershell
+        run: ./scripts/Test-ZipStaging.ps1
 
       - name: Verify first-party artifacts are unsigned
         shell: pwsh
@@ -227,6 +227,39 @@ jobs:
             bin\installer\${{ matrix.platform }}\${{ matrix.build_configuration }}\ProxiFyre-*.msi
             bin\installer\${{ matrix.platform }}\${{ matrix.build_configuration }}\ProxiFyre-*-setup.exe
             bin\installer\${{ matrix.platform }}\${{ matrix.build_configuration }}\ProxiFyre-*.sha256
+
+  verify-artifact-download:
+    # Exercise the release download action and layout before a tag can publish it.
+    needs: build-and-package
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: 'artifacts'
+
+      - name: Verify downloaded release layout and checksums
+        shell: pwsh
+        run: |
+          foreach ($platform in 'x86', 'x64', 'ARM64') {
+            $directory = Join-Path 'artifacts' "$platform-artifact"
+            $files = @(Get-ChildItem -LiteralPath $directory -Recurse -File)
+            foreach ($pattern in 'ProxiFyre-*.zip', 'ProxiFyre-*.msi', 'ProxiFyre-*-setup.exe') {
+              $payload = @($files | Where-Object Name -Like $pattern)
+              if ($payload.Count -ne 1) {
+                throw "Expected one $pattern in $directory; found $($payload.Count)."
+              }
+              $sidecar = Get-Content -LiteralPath "$($payload[0].FullName).sha256" -Raw
+              $expected = ($sidecar.Trim() -split '\s+')[0]
+              if ($expected -notmatch '^[a-fA-F0-9]{64}$' -or
+                  (Get-FileHash -LiteralPath $payload[0].FullName).Hash -ine $expected) {
+                throw "Downloaded artifact checksum mismatch: $($payload[0].FullName)"
+              }
+            }
+          }
 
   upload-release:
     # Publish only after every architecture produced its ZIP, MSI, online setup,

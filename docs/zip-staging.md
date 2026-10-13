@@ -16,7 +16,7 @@ Always create a fresh protected destination **before** extracting. Do not move a
 
 Download the architecture-matched application ZIP and its `.sha256` sidecar from the same [official release](https://github.com/wiresock/proxifyre/releases). Obtain the expected 64-character hash from that sidecar and verify it before elevation. Keep the archive intact; the script checks the hash again while holding the archive open without write/delete sharing.
 
-Save the following as `Stage-ProxiFyreZip.ps1`. Run it in **Windows PowerShell 5.1 as Administrator**, using the native architecture of Windows. It intentionally uses the .NET Framework directory-creation overload that applies ownership and a protected ACL when creating the directory. PowerShell 7 is not supported by this recipe.
+Save the following as `Stage-ProxiFyreZip.ps1`. Run it in **Windows PowerShell 5.1 as Administrator**, using the native architecture of Windows. It uses Windows directory creation to apply ownership and a protected ACL atomically and refuse an existing destination, including one created concurrently. PowerShell 7 is not supported by this recipe.
 
 The destination is a new direct child of the system Program Files folder, named `ProxiFyre-Portable` by default. Use `-DestinationName ProxiFyre-Manual` for another name. Other fixed-volume locations can satisfy the application policy, but require an equally protected parent chain; this recipe deliberately confines staging to Program Files.
 
@@ -55,8 +55,7 @@ function Assert-ProxiFyreStagingParent([IO.DirectoryInfo]$Directory) {
         }
         $dangerousRights = 0x500D0040 # Generic all/write, delete/child, change ACL/owner.
         if ($ancestor.FullName -eq $Directory.FullName) {
-            # Prevent a user from creating the destination between check and creation.
-            # Directory.CreateDirectory would otherwise reuse an existing directory.
+            # Only trusted identities may create siblings of the destination.
             $dangerousRights = $dangerousRights -bor 0x4 # CreateDirectories
         }
         foreach ($rule in $acl.GetAccessRules($true, $true,
@@ -80,6 +79,44 @@ if (Test-Path -LiteralPath $destination) {
 Assert-ProxiFyreStagingParent $parent
 
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+public static class ProxiFyreStagingDirectory
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes
+    {
+        public int Length;
+        public IntPtr Descriptor;
+        [MarshalAs(UnmanagedType.Bool)] public bool InheritHandle;
+    }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern bool CreateDirectoryW(string path, ref SecurityAttributes attributes);
+
+    public static void CreateNew(string path, byte[] descriptor)
+    {
+        var pinned = GCHandle.Alloc(descriptor, GCHandleType.Pinned);
+        try
+        {
+            var attributes = new SecurityAttributes {
+                Length = Marshal.SizeOf(typeof(SecurityAttributes)),
+                Descriptor = pinned.AddrOfPinnedObject()
+            };
+            if (!CreateDirectoryW(path, ref attributes))
+            {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 183) // ERROR_ALREADY_EXISTS: do not adopt or delete it.
+                    throw new IOException("Destination already exists: " + path);
+                throw new Win32Exception(error);
+            }
+        }
+        finally { pinned.Free(); }
+    }
+}
+'@
 $archiveStream = [IO.File]::Open((Resolve-Path -LiteralPath $ZipPath).Path,
     [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
 $archive = $null
@@ -94,14 +131,16 @@ try {
     $security = [Security.AccessControl.DirectorySecurity]::new()
     $security.SetSecurityDescriptorSddlForm(
         'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)(A;OICI;RC;;;OW)')
-    [IO.Directory]::CreateDirectory($destination, $security) | Out-Null
+    [ProxiFyreStagingDirectory]::CreateNew($destination,
+        $security.GetSecurityDescriptorBinaryForm())
     $createdDestination = $true
     [IO.Compression.ZipFileExtensions]::ExtractToDirectory($archive, $destination)
 
     # Do not set the already trusted root owner again: Windows removes its
     # explicit OWNER RIGHTS ACE on ownership assignment. Keep it inheritable
     # throughout this pass so children remain protected until individually owned.
-    & icacls.exe (Join-Path $destination '*') /setowner '*S-1-5-32-544' /T /Q
+    & (Join-Path ([Environment]::GetFolderPath('System')) 'icacls.exe') `
+        (Join-Path $destination '*') /setowner '*S-1-5-32-544' /T /Q
     if ($LASTEXITCODE -ne 0) { throw 'Setting payload ownership failed.' }
     Write-Output "Staged to $destination. Launch ProxiFyreUI.exe from this directory."
 }
@@ -150,6 +189,6 @@ To upgrade a manual installation, stop its engine/service first, back up the liv
 
 ## Recipe validation
 
-Maintainers can run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-ZipStaging.ps1` from an elevated individual administrator account after building Release x64; SYSTEM is not supported for this test. It executes the exact fenced script above in fresh Windows PowerShell 5.1 processes against a ZIP assembled from the built payload. It checks trusted ownership and the existing managed service/UI integrity policies, rejects a user-owned file and a user-writable directory, and verifies that a wrong checksum or existing destination cannot overwrite files. A duplicate-entry archive tests failed-extraction cleanup. The test validates ancestors before creating its fixtures and rejects an unsafe fixture parent before writing any executable files there.
+Maintainers can run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-ZipStaging.ps1` from an elevated individual administrator account after building Release x64; SYSTEM is not supported for this test. It executes the exact fenced script above in fresh Windows PowerShell 5.1 processes against a ZIP assembled from the built payload. It checks trusted ownership and the existing managed service/UI integrity policies, rejects a user-owned file and a user-writable directory, and verifies that a wrong checksum or existing destination cannot overwrite files. A duplicate-entry archive tests failed-extraction cleanup. A deterministic concurrent-creation case verifies that another run's directory is preserved even when its ACL matches the intended descriptor. The test validates ancestors before creating its fixtures and rejects an unsafe fixture parent before writing any executable files there.
 
 An inert-file probe creates user-owned files and directories with the staged directory's inherited DACL, then attempts actual content writes, child creation, and DACL changes while impersonating the same user with Administrators disabled and privileges removed. This deterministically checks protection before trusted ownership is assigned; it does not attempt a concurrent extraction race. The test uses temporary dedicated directories beneath Program Files, removes only those test directories, and does not register/start a service or install a driver. Native GUI startup and prerequisite installation remain manual integration checks.
