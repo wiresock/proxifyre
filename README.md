@@ -30,7 +30,7 @@ Download the architecture-matched package from [GitHub Releases](https://github.
 | --- | --- |
 | `ProxiFyre-<version>-win-x86-setup.exe`, `...-x64-setup.exe`, or `...-arm64-setup.exe` | **Recommended.** Online setup that acquires verified Visual C++ and Windows Packet Filter prerequisites when needed. |
 | `ProxiFyre-<version>-win-x86.msi`, `...-x64.msi`, or `...-arm64.msi` | Managed deployment after all prerequisites have already been provisioned. It does not download them. |
-| `ProxiFyre-v<version>-x86.zip`, `...-x64.zip`, or `...-ARM64.zip` | Application payload only. It is not an offline installer and requires protected manual staging. |
+| `ProxiFyre-v<version>-x86.zip`, `...-x64.zip`, or `...-ARM64.zip` | Application payload only. It is not an offline installer and requires [protected manual staging](docs/zip-staging.md). |
 
 Before running setup, install:
 
@@ -117,6 +117,7 @@ Set `socks5Transport` to `"TLS"` to protect the SOCKS5 TCP connection and UDP `A
 - [Configuration reference](docs/configuration.md)
 - [GUI architecture, behavior, and troubleshooting](docs/gui.md)
 - [Installer, deployment, release workflow, and package verification](docs/installer.md)
+- [Protected manual ZIP staging](docs/zip-staging.md)
 - [Sample configuration](app-config.sample.json)
 
 ## Building from source

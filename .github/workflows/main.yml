@@ -147,6 +147,11 @@ jobs:
             throw "Managed tests failed with exit code $LASTEXITCODE."
           }
 
+      - name: Verify documented ZIP staging
+        if: matrix.platform == 'x64'
+        shell: powershell
+        run: ./scripts/Test-ZipStaging.ps1
+
       - name: Verify release payload
         shell: pwsh
         run: |

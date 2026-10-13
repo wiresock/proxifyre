@@ -309,7 +309,7 @@ namespace ProxiFyreUI.Infrastructure
         internal const string EngineConfigurationSha256 =
             "FEB7B159597D51A915D659A56599AA74D8B2104056B9E77F7FD9E1992600EEB4";
         internal const string LoggingConfigurationSha256 =
-            "BB92B3CF996D7DBCF1B94B34228F80478DD569E2CC84D44BDD994D08018917DC";
+            "59BAB15613E5F02C878C6BD2360F3169D324E888DE0DC4645F7C5960012E0DA0";
         private static readonly string[] DependencyFileNames =
         {
             "ProxiFyre.Configuration.dll",
