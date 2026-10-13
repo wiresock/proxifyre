@@ -3,7 +3,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$PayloadDirectory = (Join-Path $PSScriptRoot '..\bin\exe\x64\Release')
+    [string]$PayloadDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,11 +11,39 @@ Set-StrictMode -Version Latest
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
     throw 'Run this integration test in elevated Windows PowerShell 5.1.'
 }
+if ([string]::IsNullOrWhiteSpace($PayloadDirectory)) {
+    $PayloadDirectory = Join-Path $PSScriptRoot '..\bin\exe\x64\Release'
+}
+$user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+if ($user.Value -in @('S-1-5-18', 'S-1-5-32-544',
+        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')) {
+    throw 'Run this test as an elevated individual administrator, not a trusted machine identity such as SYSTEM.'
+}
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $documentation = [IO.File]::ReadAllText((Join-Path $repositoryRoot 'docs\zip-staging.md'))
 $match = [regex]::Match($documentation,
     '(?s)<!-- zip-staging-script -->\s*```powershell\r?\n(?<script>.*?)\r?\n```')
 if (-not $match.Success) { throw 'The documented staging script was not found.' }
+
+# Parse trusted repository text in memory, before writing or loading any fixture.
+$parseErrors = $null
+$tokens = $null
+$ast = [Management.Automation.Language.Parser]::ParseInput(
+    $match.Groups['script'].Value, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw 'The documented recipe has syntax errors.' }
+$preflight = $ast.Find({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Assert-ProxiFyreStagingParent'
+}, $true)
+if ($null -eq $preflight) { throw 'The documented parent preflight was not found.' }
+. ([scriptblock]::Create($preflight.Extent.Text))
+function New-ProtectedTestRoot([IO.DirectoryInfo]$Parent, [string]$Name,
+        [Security.AccessControl.DirectorySecurity]$Security) {
+    Assert-ProxiFyreStagingParent $Parent
+    $path = Join-Path $Parent.FullName $Name
+    if (Test-Path -LiteralPath $path) { throw "Test path already exists: $path" }
+    [IO.Directory]::CreateDirectory($path, $Security) | Out-Null
+}
 
 $programFiles = [Environment]::GetFolderPath('ProgramFiles')
 $testId = [Guid]::NewGuid().ToString('N')
@@ -24,28 +52,20 @@ $destinationName = "ProxiFyre-StagingTest-$testId"
 $destination = Join-Path $programFiles $destinationName
 $badDestinationName = "ProxiFyre-BadZipTest-$testId"
 $badDestination = Join-Path $programFiles $badDestinationName
-$cleanupPaths = @($destination, $badDestination, $testRoot)
+$duplicateDestinationName = "ProxiFyre-DuplicateZipTest-$testId"
+$duplicateDestination = Join-Path $programFiles $duplicateDestinationName
+$cleanupPaths = @($destination, $badDestination, $duplicateDestination, $testRoot)
 foreach ($path in $cleanupPaths) {
     if (Test-Path -LiteralPath $path) { throw "Test path already exists: $path" }
 }
 
 $security = [Security.AccessControl.DirectorySecurity]::new()
 $security.SetSecurityDescriptorSddlForm(
-    'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)')
-[IO.Directory]::CreateDirectory($testRoot, $security) | Out-Null
+    'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)(A;OICI;RC;;;OW)')
+New-ProtectedTestRoot ([IO.DirectoryInfo]::new($programFiles)) (Split-Path -Leaf $testRoot) $security
 try {
     $recipe = Join-Path $testRoot 'Stage-ProxiFyreZip.ps1'
     [IO.File]::WriteAllText($recipe, $match.Groups['script'].Value)
-    $parseErrors = $null
-    $tokens = $null
-    $ast = [Management.Automation.Language.Parser]::ParseFile($recipe, [ref]$tokens, [ref]$parseErrors)
-    if ($parseErrors.Count -ne 0) { throw 'The documented recipe has syntax errors.' }
-    $preflight = $ast.Find({ param($node)
-        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'Assert-ProxiFyreStagingParent'
-    }, $true)
-    if ($null -eq $preflight) { throw 'The documented parent preflight was not found.' }
-    . ([scriptblock]::Create($preflight.Extent.Text))
     # Never reuse the deliberately exposed probe directory for files we later load.
     $probeParent = Join-Path $testRoot 'acl-probe'
     [IO.Directory]::CreateDirectory($probeParent, $security) | Out-Null
@@ -54,16 +74,19 @@ try {
     $unsafeParentAcl = Get-Acl -LiteralPath $probeParent
     $users = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
     $unsafeParentAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-        $users, [Security.AccessControl.FileSystemRights]::CreateDirectories,
+        $users, ([Security.AccessControl.FileSystemRights]::CreateDirectories -bor
+            [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles),
         [Security.AccessControl.AccessControlType]::Allow))
     Set-Acl -LiteralPath $probeParent -AclObject $unsafeParentAcl
     $rejected = $false
-    try { Assert-ProxiFyreStagingParent ([IO.DirectoryInfo]::new($probeParent)) }
+    try { New-ProtectedTestRoot ([IO.DirectoryInfo]::new($probeParent)) 'must-not-exist' $security }
     catch {
         if ($_.Exception.Message -notlike '*Untrusted parent mutation permission*') { throw }
         $rejected = $true
     }
-    if (-not $rejected) { throw 'The recipe permitted users to race destination creation.' }
+    if (-not $rejected -or (Test-Path -LiteralPath (Join-Path $probeParent 'must-not-exist'))) {
+        throw 'Unsafe parents must be rejected before any fixture directory or script is written.'
+    }
     Set-Acl -LiteralPath $probeParent -AclObject $originalParentAcl
     Assert-ProxiFyreStagingParent ([IO.DirectoryInfo]::new($probeParent))
 
@@ -81,24 +104,38 @@ try {
     # Include a nested non-executable file to check recursive ownership assignment.
     [IO.Directory]::CreateDirectory((Join-Path $source 'notes')) | Out-Null
     [IO.File]::WriteAllText((Join-Path $source 'notes\example.txt'), 'nested archive entry')
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     $zip = Join-Path $testRoot 'payload.zip'
     [IO.Compression.ZipFile]::CreateFromDirectory($source, $zip)
     $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
 
-    $rejected = $false
-    try {
-        & $recipe -ZipPath $zip -ExpectedSha256 ('0' * 64) -DestinationName $badDestinationName
+    function Invoke-Recipe([string]$ArchivePath, [string]$ExpectedHash,
+            [string]$Name, [string]$ExpectedFailure = '') {
+        # Each execution starts with fresh assembly/type state, including failures.
+        $savedPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = & "$PSHOME\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+                -File $recipe -ZipPath $ArchivePath -ExpectedSha256 $ExpectedHash -DestinationName $Name 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $savedPreference }
+        if ($ExpectedFailure) {
+            if ($exitCode -eq 0 -or ($output | Out-String) -notlike "*$ExpectedFailure*") {
+                throw "Expected '$ExpectedFailure', got exit ${exitCode}: $output"
+            }
+        }
+        elseif ($exitCode -ne 0) { throw "Recipe failed with exit ${exitCode}: $output" }
     }
-    catch {
-        if ($_.Exception.Message -notlike '*SHA-256 mismatch*') { throw }
-        $rejected = $true
-    }
-    if (-not $rejected -or (Test-Path -LiteralPath $badDestination)) {
+    Invoke-Recipe $zip ('0' * 64) $badDestinationName 'SHA-256 mismatch'
+    if (Test-Path -LiteralPath $badDestination) {
         throw 'A checksum mismatch must fail before creating the destination.'
     }
 
-    & $recipe -ZipPath $zip -ExpectedSha256 $hash -DestinationName $destinationName
+    Invoke-Recipe $zip $hash $destinationName
+    Add-Type -Path (Join-Path $PSScriptRoot 'ZipStagingOwnerProbe.cs')
+    [ZipStagingOwnerProbe]::AssertProtected($destination)
+    Write-Output 'PASS: same-user unprivileged file/directory mutations denied before owner normalization.'
     foreach ($entry in @((Get-Item -LiteralPath $destination)) +
             @(Get-ChildItem -LiteralPath $destination -Recurse -Force)) {
         $acl = Get-Acl -LiteralPath $entry.FullName
@@ -150,7 +187,6 @@ if ($Rejection -eq 'Location') {
 
     $enginePath = Join-Path $destination 'ProxiFyre.exe'
     $originalFileAcl = Get-Acl -LiteralPath $enginePath
-    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
     $userOwned = Get-Acl -LiteralPath $enginePath
     $userOwned.SetOwner($user)
     Set-Acl -LiteralPath $enginePath -AclObject $userOwned
@@ -160,7 +196,7 @@ if ($Rejection -eq 'Location') {
     $originalDirectoryAcl = Get-Acl -LiteralPath $destination
     $userWritable = Get-Acl -LiteralPath $destination
     $userWritable.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-        $user, [Security.AccessControl.FileSystemRights]::Write,
+        $users, [Security.AccessControl.FileSystemRights]::Write,
         [Security.AccessControl.AccessControlType]::Allow))
     Set-Acl -LiteralPath $destination -AclObject $userWritable
     Assert-PayloadPolicy -Rejection Location
@@ -174,23 +210,35 @@ if ($Rejection -eq 'Location') {
 
     $marker = Join-Path $destination 'existing-installation.txt'
     [IO.File]::WriteAllText($marker, 'do not replace')
-    $rejected = $false
-    try { & $recipe -ZipPath $zip -ExpectedSha256 $hash -DestinationName $destinationName }
-    catch {
-        if ($_.Exception.Message -notlike '*Destination already exists*') { throw }
-        $rejected = $true
-    }
-    if (-not $rejected -or [IO.File]::ReadAllText($marker) -ne 'do not replace') {
+    Invoke-Recipe $zip $hash $destinationName 'Destination already exists'
+    if ([IO.File]::ReadAllText($marker) -ne 'do not replace') {
         throw 'An existing destination must be refused without overwriting it.'
     }
+
+    $duplicateZip = Join-Path $testRoot 'duplicate.zip'
+    $duplicateArchive = [IO.Compression.ZipFile]::Open($duplicateZip, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $duplicateArchive.CreateEntry('duplicate.txt') | Out-Null
+        $duplicateArchive.CreateEntry('duplicate.txt') | Out-Null
+    }
+    finally { $duplicateArchive.Dispose() }
+    Invoke-Recipe $duplicateZip (Get-FileHash -LiteralPath $duplicateZip).Hash $duplicateDestinationName 'already exists'
+    if (Test-Path -LiteralPath $duplicateDestination) {
+        throw 'Failed extraction must remove the partial destination.'
+    }
     Write-Output 'PASS: documented ZIP staging, recursive ownership, payload policies, checksum and overwrite rejection.'
+}
+catch {
+    # Preserve the original failure in the transcript if cleanup also fails.
+    Write-Output $_.Exception.ToString()
+    throw
 }
 finally {
     foreach ($path in $cleanupPaths) {
         if (-not (Test-Path -LiteralPath $path)) { continue }
         $resolved = (Resolve-Path -LiteralPath $path).Path
         if ((Split-Path -Parent $resolved) -ne $programFiles -or
-            (Split-Path -Leaf $resolved) -notmatch ('^ProxiFyre-(ZipTest|StagingTest|BadZipTest)-' + $testId + '$') -or
+            (Split-Path -Leaf $resolved) -notmatch ('^ProxiFyre-(ZipTest|StagingTest|BadZipTest|DuplicateZipTest)-' + $testId + '$') -or
             ((Get-Item -LiteralPath $resolved).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw "Refusing to remove unexpected test path: $resolved"
         }

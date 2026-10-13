@@ -8,7 +8,7 @@ A Release GUI can run from a non-default directory on a directly mounted fixed l
 
 Accepted owners are `SYSTEM` (`S-1-5-18`), the built-in **Administrators group** (`S-1-5-32-544`), and `TrustedInstaller` (`S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464`). An individual administrator's account SID is not an accepted owner. Elevating the launcher does not change file ownership. `icacls /reset` resets inherited permissions; it does not set the owner.
 
-Use the same application-directory policy as the MSI: Administrators own the directory; SYSTEM and Administrators have full control; Users have read/execute access. Files and subdirectories inherit these permissions and must also have a trusted owner. The parent chain must not grant other identities delete, delete-child, generic write/all, or permission/ownership-control access. Ownership and permissions are separate checks.
+Use the same application-directory policy as the MSI: Administrators own the directory; SYSTEM and Administrators have full control; Users have read/execute access. The recipe also adds an inheritable **OWNER RIGHTS** read-control ACE. This suppresses the owner's implicit permission to change the DACL, protecting new files and subdirectories even when their initial owner is the extracting account. The final ownership pass then sets Administrators as owner throughout. Without that ACE, another unelevated process running as the extracting user could grant itself write access before ownership is changed. Files and subdirectories must satisfy both the permissions and trusted-owner checks. The parent chain must not grant other identities delete, delete-child, generic write/all, or permission/ownership-control access.
 
 Always create a fresh protected destination **before** extracting. Do not move an existing user-owned extraction into place or tighten its permissions afterward: another process could retain a previously opened mutation handle. Do not recursively reset permissions or take ownership of `Program Files` or a drive root. If a parent fails validation, have its administrator restore the correct Windows or organizational baseline.
 
@@ -79,10 +79,11 @@ if (Test-Path -LiteralPath $destination) {
 }
 Assert-ProxiFyreStagingParent $parent
 
-Add-Type -AssemblyName System.IO.Compression.FileSystem
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $archiveStream = [IO.File]::Open((Resolve-Path -LiteralPath $ZipPath).Path,
     [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
 $archive = $null
+$createdDestination = $false
 $sha = [Security.Cryptography.SHA256]::Create()
 try {
     $actual = [BitConverter]::ToString($sha.ComputeHash($archiveStream)).Replace('-', '')
@@ -92,14 +93,33 @@ try {
         [IO.Compression.ZipArchiveMode]::Read, $true)
     $security = [Security.AccessControl.DirectorySecurity]::new()
     $security.SetSecurityDescriptorSddlForm(
-        'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)')
+        'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)(A;OICI;RC;;;OW)')
     [IO.Directory]::CreateDirectory($destination, $security) | Out-Null
+    $createdDestination = $true
     [IO.Compression.ZipFileExtensions]::ExtractToDirectory($archive, $destination)
 
-    # New files can be owned by the extracting account even in an elevated shell.
-    & icacls.exe $destination /setowner '*S-1-5-32-544' /T /Q
+    # Do not set the already trusted root owner again: Windows removes its
+    # explicit OWNER RIGHTS ACE on ownership assignment. Keep it inheritable
+    # throughout this pass so children remain protected until individually owned.
+    & icacls.exe (Join-Path $destination '*') /setowner '*S-1-5-32-544' /T /Q
     if ($LASTEXITCODE -ne 0) { throw 'Setting payload ownership failed.' }
     Write-Output "Staged to $destination. Launch ProxiFyreUI.exe from this directory."
+}
+catch {
+    $failure = $_
+    if ($createdDestination) {
+        try {
+            $resolved = (Resolve-Path -LiteralPath $destination).Path
+            if ((Split-Path -Parent $resolved) -ne $parent.FullName -or
+                (Split-Path -Leaf $resolved) -ne $DestinationName -or
+                ((Get-Item -LiteralPath $resolved).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw "Unexpected cleanup path: $resolved"
+            }
+            Remove-Item -LiteralPath $resolved -Recurse -Force
+        }
+        catch { Write-Warning "Could not remove partial staging directory: $destination. $($_.Exception.Message)" }
+    }
+    throw $failure
 }
 finally {
     if ($null -ne $archive) { $archive.Dispose() }
@@ -111,11 +131,14 @@ finally {
 For example, after substituting the release version, archive path, and published hash:
 
 ```powershell
-.\Stage-ProxiFyreZip.ps1 -ZipPath 'C:\Downloads\ProxiFyre-v<version>-x64.zip' `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Stage-ProxiFyreZip.ps1 `
+    -ZipPath 'C:\Downloads\ProxiFyre-v<version>-x64.zip' `
     -ExpectedSha256 '<64-character hash from the official .sha256 sidecar>'
 ```
 
-If extraction or ownership assignment fails, do not launch the partial payload. Inspect the failure and stage again into a new directory. The script does not change any parent ACL, replace an existing installation, or repair an existing extraction.
+The example sets execution policy for that process only so a locally reviewed script can run on clients whose default policy is Restricted. Organizational Group Policy can still prevent execution; follow your administrator's policy in that case.
+
+If extraction or ownership assignment fails, the script attempts to remove only the new destination it created. If cleanup also fails, it reports the remaining path; do not launch that partial payload. Inspect the failure before retrying. The script does not change any parent ACL, replace an existing installation, or repair an existing extraction.
 
 ## Checking the result
 
@@ -127,4 +150,6 @@ To upgrade a manual installation, stop its engine/service first, back up the liv
 
 ## Recipe validation
 
-Maintainers can run `scripts/Test-ZipStaging.ps1` from elevated Windows PowerShell 5.1 after building Release x64. It executes the exact fenced script above against a ZIP assembled from the built payload, checks trusted ownership and the existing managed service/UI integrity policies, verifies rejection of a user-owned file and a user-writable directory, and verifies that a wrong checksum or existing destination cannot overwrite files. It uses temporary dedicated directories beneath Program Files, removes only those test directories, and does not register/start a service or install a driver. Native GUI startup and prerequisite installation remain manual integration checks.
+Maintainers can run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Test-ZipStaging.ps1` from an elevated individual administrator account after building Release x64; SYSTEM is not supported for this test. It executes the exact fenced script above in fresh Windows PowerShell 5.1 processes against a ZIP assembled from the built payload. It checks trusted ownership and the existing managed service/UI integrity policies, rejects a user-owned file and a user-writable directory, and verifies that a wrong checksum or existing destination cannot overwrite files. A duplicate-entry archive tests failed-extraction cleanup. The test validates ancestors before creating its fixtures and rejects an unsafe fixture parent before writing any executable files there.
+
+An inert-file probe creates user-owned files and directories with the staged directory's inherited DACL, then attempts actual content writes, child creation, and DACL changes while impersonating the same user with Administrators disabled and privileges removed. This deterministically checks protection before trusted ownership is assigned; it does not attempt a concurrent extraction race. The test uses temporary dedicated directories beneath Program Files, removes only those test directories, and does not register/start a service or install a driver. Native GUI startup and prerequisite installation remain manual integration checks.
