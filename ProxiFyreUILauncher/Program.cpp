@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+#include "SecurityPolicy.h"
+
 namespace
 {
     constexpr DWORD kLoadWithAlteredSearchPath = 0x00000008;
@@ -39,160 +41,9 @@ namespace
     };
 
 #ifndef _DEBUG
-    constexpr ACCESS_MASK kPayloadDangerousRights =
-        GENERIC_ALL | GENERIC_WRITE | DELETE | WRITE_DAC | WRITE_OWNER |
-        FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES |
-        FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD;
-    constexpr ACCESS_MASK kAncestorDangerousRights =
-        GENERIC_ALL | GENERIC_WRITE | DELETE | WRITE_DAC | WRITE_OWNER |
-        FILE_DELETE_CHILD;
-    constexpr wchar_t kTrustedInstallerSid[] =
-        L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
-
-    std::wstring FormatAccessMask(ACCESS_MASK mask)
-    {
-        wchar_t hexadecimal[16]{};
-        swprintf_s(hexadecimal, L"0x%08lX", static_cast<unsigned long>(mask));
-
-        struct NamedRight
-        {
-            ACCESS_MASK mask;
-            const wchar_t* name;
-        };
-        constexpr NamedRight namedRights[] = {
-            { GENERIC_ALL, L"GENERIC_ALL" },
-            { GENERIC_WRITE, L"GENERIC_WRITE" },
-            { DELETE, L"DELETE" },
-            { WRITE_DAC, L"WRITE_DAC" },
-            { WRITE_OWNER, L"WRITE_OWNER" },
-            { FILE_DELETE_CHILD, L"FILE_DELETE_CHILD" },
-            { FILE_WRITE_DATA, L"FILE_WRITE_DATA/FILE_ADD_FILE" },
-            { FILE_APPEND_DATA, L"FILE_APPEND_DATA/FILE_ADD_SUBDIRECTORY" },
-            { FILE_WRITE_EA, L"FILE_WRITE_EA" },
-            { FILE_WRITE_ATTRIBUTES, L"FILE_WRITE_ATTRIBUTES" }
-        };
-
-        std::wstring result(hexadecimal);
-        std::wstring names;
-        for (const auto& right : namedRights)
-        {
-            if ((mask & right.mask) == 0)
-                continue;
-            if (!names.empty())
-                names += L", ";
-            names += right.name;
-        }
-        if (!names.empty())
-        {
-            result += L" (";
-            result += names;
-            result += L")";
-        }
-        return result;
-    }
-
-    std::wstring FormatSid(PSID identity)
-    {
-        if (identity == nullptr || !IsValidSid(identity))
-            return L"<missing or invalid>";
-
-        LPWSTR value = nullptr;
-        if (!ConvertSidToStringSidW(identity, &value) || value == nullptr)
-            return L"<unavailable>";
-        const std::wstring result(value);
-        LocalFree(value);
-        return result;
-    }
-
-    std::wstring RejectedPathPrefix(const std::wstring& path)
-    {
-        return L"Rejected path: " + path + L"\r\nReason: ";
-    }
-
-    bool IsTrustedMachineIdentity(PSID identity)
-    {
-        if (identity == nullptr || !IsValidSid(identity))
-            return false;
-        if (IsWellKnownSid(identity, WinLocalSystemSid) ||
-            IsWellKnownSid(identity, WinBuiltinAdministratorsSid))
-            return true;
-
-        PSID trustedInstaller = nullptr;
-        const bool converted = ConvertStringSidToSidW(kTrustedInstallerSid, &trustedInstaller) != FALSE;
-        const bool matches = converted && EqualSid(identity, trustedInstaller) != FALSE;
-        if (trustedInstaller != nullptr)
-            LocalFree(trustedInstaller);
-        return matches;
-    }
-
-    bool TryGetAllowedAce(const ACE_HEADER* header, ACCESS_MASK& mask, PSID& identity)
-    {
-        mask = 0;
-        identity = nullptr;
-        if (header == nullptr || header->AceSize < sizeof(ACE_HEADER))
-            return false;
-
-        const BYTE* begin = reinterpret_cast<const BYTE*>(header);
-        const BYTE* end = begin + header->AceSize;
-        const BYTE* sid = nullptr;
-        switch (header->AceType)
-        {
-        case ACCESS_ALLOWED_ACE_TYPE:
-        {
-            const auto ace = reinterpret_cast<const ACCESS_ALLOWED_ACE*>(header);
-            mask = ace->Mask;
-            sid = reinterpret_cast<const BYTE*>(&ace->SidStart);
-            break;
-        }
-        case ACCESS_ALLOWED_CALLBACK_ACE_TYPE:
-        {
-            const auto ace = reinterpret_cast<const ACCESS_ALLOWED_CALLBACK_ACE*>(header);
-            mask = ace->Mask;
-            sid = reinterpret_cast<const BYTE*>(&ace->SidStart);
-            break;
-        }
-        case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
-        {
-            const auto ace = reinterpret_cast<const ACCESS_ALLOWED_OBJECT_ACE*>(header);
-            mask = ace->Mask;
-            sid = reinterpret_cast<const BYTE*>(&ace->ObjectType);
-            if ((ace->Flags & ACE_OBJECT_TYPE_PRESENT) != 0)
-                sid += sizeof(GUID);
-            if ((ace->Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT) != 0)
-                sid += sizeof(GUID);
-            break;
-        }
-        case ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE:
-        {
-            const auto ace = reinterpret_cast<const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE*>(header);
-            mask = ace->Mask;
-            sid = reinterpret_cast<const BYTE*>(&ace->ObjectType);
-            if ((ace->Flags & ACE_OBJECT_TYPE_PRESENT) != 0)
-                sid += sizeof(GUID);
-            if ((ace->Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT) != 0)
-                sid += sizeof(GUID);
-            break;
-        }
-        case ACCESS_DENIED_ACE_TYPE:
-        case ACCESS_DENIED_OBJECT_ACE_TYPE:
-        case ACCESS_DENIED_CALLBACK_ACE_TYPE:
-        case ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE:
-            // A deny ACE does not grant the mutation rights this check is looking for.
-            return true;
-        default:
-            // Fail closed for an unfamiliar DACL entry instead of assuming it cannot grant
-            // mutation access.
-            return false;
-        }
-
-        if (sid < begin || sid >= end || !IsValidSid(const_cast<BYTE*>(sid)))
-            return false;
-        const DWORD sidLength = GetLengthSid(const_cast<BYTE*>(sid));
-        if (sidLength == 0 || sidLength > static_cast<DWORD>(end - sid))
-            return false;
-        identity = const_cast<BYTE*>(sid);
-        return true;
-    }
+    using ProxiFyre::Launcher::kAncestorDangerousRights;
+    using ProxiFyre::Launcher::kPayloadDangerousRights;
+    using ProxiFyre::Launcher::RejectedPathPrefix;
 
     bool HasProtectedSecurity(HANDLE handle, const std::wstring& path,
         ACCESS_MASK dangerousRights, bool includeInheritedChildRights,
@@ -216,66 +67,8 @@ namespace
             return false;
         }
 
-        bool protectedSecurity = IsTrustedMachineIdentity(owner);
-        if (!protectedSecurity)
-        {
-            failureReason = RejectedPathPrefix(path) + L"owner SID " + FormatSid(owner) +
-                L" is not a trusted machine identity.";
-        }
-        else if (dacl == nullptr)
-        {
-            protectedSecurity = false;
-            failureReason = RejectedPathPrefix(path) +
-                L"the object has no discretionary access-control list.";
-        }
-        if (protectedSecurity)
-        {
-            for (DWORD index = 0; index < dacl->AceCount; ++index)
-            {
-                void* rawAce = nullptr;
-                if (!GetAce(dacl, index, &rawAce) || rawAce == nullptr)
-                {
-                    protectedSecurity = false;
-                    failureReason = RejectedPathPrefix(path) +
-                        L"the DACL contains an unreadable ACE at index " +
-                        std::to_wstring(index) + L".";
-                    break;
-                }
-
-                const auto header = static_cast<const ACE_HEADER*>(rawAce);
-                if (!includeInheritedChildRights &&
-                    (header->AceFlags & INHERIT_ONLY_ACE) != 0)
-                    continue;
-
-                ACCESS_MASK mask = 0;
-                PSID identity = nullptr;
-                if (!TryGetAllowedAce(header, mask, identity))
-                {
-                    protectedSecurity = false;
-                    failureReason = RejectedPathPrefix(path) +
-                        L"the DACL contains an unsupported or malformed ACE at index " +
-                        std::to_wstring(index) + L".";
-                    break;
-                }
-                if (identity != nullptr && (mask & dangerousRights) != 0 &&
-                    !IsTrustedMachineIdentity(identity))
-                {
-                    protectedSecurity = false;
-                    failureReason = RejectedPathPrefix(path) +
-                        L"an untrusted allow ACE grants prohibited mutation access.\r\n"
-                        L"Trustee SID: " + FormatSid(identity) +
-                        L"\r\nACE mask: " + FormatAccessMask(mask) +
-                        L"\r\nProhibited rights: " +
-                        FormatAccessMask(mask & dangerousRights) +
-                        L"\r\nACE origin: " +
-                        ((header->AceFlags & INHERITED_ACE) != 0
-                            ? std::wstring(L"inherited")
-                            : std::wstring(L"explicit"));
-                    break;
-                }
-            }
-        }
-
+        const bool protectedSecurity = ProxiFyre::Launcher::EvaluateSecurity(owner, dacl, path,
+            dangerousRights, includeInheritedChildRights, failureReason);
         LocalFree(descriptor);
         return protectedSecurity;
     }

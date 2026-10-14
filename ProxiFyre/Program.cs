@@ -423,11 +423,7 @@ namespace ProxiFyre
                 if (!EngineServiceInstallLocationPolicy.IsProtected(
                         Assembly.GetExecutingAssembly().Location, out locationFailure))
                 {
-                    Console.Error.WriteLine(
-                        "ProxiFyre cannot install or run its LocalSystem service from a location " +
-                        "writable by standard users. Copy or extract the complete release into " +
-                        "a protected per-machine directory (normally under Program Files), " +
-                        "preserve inherited permissions, and retry. " + locationFailure);
+                    Console.Error.WriteLine(GetUnprotectedServiceLocationMessage(locationFailure));
                     return 5; // ERROR_ACCESS_DENIED
                 }
             }
@@ -437,6 +433,33 @@ namespace ProxiFyre
             // behind a non-inlined boundary. The CLR must execute the loader policy above before
             // it can JIT this method or resolve ProxiFyreService.
             return RunAfterNativeDependencyPolicy(args, commandLine);
+        }
+
+        internal static string GetUnprotectedServiceLocationMessage(string locationFailure)
+        {
+            return "ProxiFyre cannot install or run its LocalSystem service from this location " +
+                   "because its files might be replaceable without administrator approval." +
+                   Environment.NewLine + "Reason: " + locationFailure + Environment.NewLine +
+                   "To fix this, install ProxiFyre with the official setup or MSI package. It " +
+                   "creates a protected directory under Program Files. To use the ZIP package " +
+                   "instead, follow the protected staging procedure at " +
+                   GetZipStagingDocumentationUrl();
+        }
+
+        // Links the staging procedure from this build's release tag so the steps match the
+        // checks this binary enforces. A version that is not a plain major.minor.patch release
+        // number, such as one passed with /p:Version for a test build, has no tag to link to.
+        private static string GetZipStagingDocumentationUrl()
+        {
+            var version = typeof(Program).Assembly
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            Version parsed;
+            var isReleaseVersion = Version.TryParse(version, out parsed) && parsed.Build >= 0 &&
+                                   parsed.Revision < 0 &&
+                                   string.Equals(parsed.ToString(), version, StringComparison.Ordinal);
+            var reference = isReleaseVersion ? "v" + version : "main";
+            return "https://github.com/wiresock/proxifyre/blob/" + reference +
+                   "/docs/zip-staging.md";
         }
 
         private static string GetCommandLineDenialMessage(EngineCommandLineDenial denial)

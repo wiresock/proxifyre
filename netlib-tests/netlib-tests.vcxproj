@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <!--
-    Native x64 GoogleTest host for netlib. It is a test-only executable: it is not referenced by
-    any product project, is not part of the release payload, and links no packet-filter driver,
-    tunnel, or WireGuard component. Only x64 configurations exist; the solution maps its x86 and
-    ARM64 configurations to this project without building it.
+    Native x64 GoogleTest host for netlib and for the ProxiFyreUI launcher's header-only security
+    policy. It is a test-only executable: it is not referenced by any product project, is not part
+    of the release payload, and links no packet-filter driver, tunnel, or WireGuard component. Only
+    x64 configurations exist; the solution maps its x86 and ARM64 configurations to this project
+    without building it.
   -->
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -89,6 +90,7 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="test_support.h" />
     <ClInclude Include="allocation_fault.h" />
+    <ClInclude Include="..\ProxiFyreUILauncher\SecurityPolicy.h" />
     <ClInclude Include="..\netlib\test\iphelper\fake_ownership_source.h" />
     <ClInclude Include="..\netlib\test\iphelper\os_tables.h" />
     <ClInclude Include="..\netlib\test\iphelper\process_lookup_cases.h" />
@@ -101,6 +103,7 @@
     <ClCompile Include="allocation_fault.cpp" />
     <ClCompile Include="helper_lifecycle_test.cpp" />
     <ClCompile Include="helper_process_test.cpp" />
+    <ClCompile Include="launcher_security_policy_test.cpp" />
     <ClCompile Include="..\netlib\test\iphelper\os_tables_test.cpp" />
     <ClCompile Include="..\netlib\test\iphelper\owner_memo_lookup_test.cpp" />
     <ClCompile Include="..\netlib\test\iphelper\owner_memo_test.cpp" />

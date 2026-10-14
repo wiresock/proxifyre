@@ -7,7 +7,9 @@ Utility C++ classes used for the network development.
 `netlib-tests` (`netlib-tests/netlib-tests.vcxproj`) is a native x64 GoogleTest executable for
 netlib code. It is test-only: no product project references it, it is not part of the release
 payload, and it has only x64 configurations (the solution's x86 and ARM64 configurations do not
-build it). Test sources live under `netlib/test/`.
+build it). Test sources live under `netlib/test/`. It also hosts
+`netlib-tests/launcher_security_policy_test.cpp`, which covers the ProxiFyreUI launcher's
+owner and DACL policy (`ProxiFyreUILauncher/SecurityPolicy.h`).
 
 Prerequisites: Visual Studio 2022 (v143 toolset) and `ms-gsl:x64-windows` from vcpkg with
 `vcpkg integrate install`, as for the product build.
