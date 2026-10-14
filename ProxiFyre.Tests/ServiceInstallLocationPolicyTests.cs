@@ -34,10 +34,10 @@ namespace ProxiFyre.Tests
 
             Assert.Multiple(() =>
             {
-                Assert.That(IsAccepted("O:SYD:P(A;;FA;;;SY)(A;;FW;;;WD)", dangerousRights, true),
-                    Is.False);
-                Assert.That(IsAccepted("O:SYD:P(A;;FA;;;SY)(A;;0x1200a9;;;WD)", dangerousRights,
-                    true), Is.True);
+                Assert.That(GetRejection("O:SYD:P(A;;FA;;;SY)(A;;FW;;;WD)", dangerousRights,
+                    true), Does.Contain("Everyone (S-1-1-0)"));
+                Assert.That(GetRejection("O:SYD:P(A;;FA;;;SY)(A;;0x1200a9;;;WD)",
+                    dangerousRights, true), Is.Null);
             });
         }
 
@@ -48,8 +48,9 @@ namespace ProxiFyre.Tests
 
             Assert.Multiple(() =>
             {
-                Assert.That(IsAccepted(sddl, FileSystemRights.Write, false), Is.True);
-                Assert.That(IsAccepted(sddl, FileSystemRights.Write, true), Is.False);
+                Assert.That(GetRejection(sddl, FileSystemRights.Write, false), Is.Null);
+                Assert.That(GetRejection(sddl, FileSystemRights.Write, true),
+                    Does.Contain("Everyone (S-1-1-0)"));
             });
         }
 
@@ -63,8 +64,9 @@ namespace ProxiFyre.Tests
                 Assert.That((FileSystemRights)0x001301bf &
                             ServiceInstallLocationPolicy.AncestorDangerousRights,
                     Is.EqualTo(FileSystemRights.Delete));
-                Assert.That(IsAccepted("O:SYD:AI(A;ID;FA;;;SY)(A;ID;0x1301bf;;;AU)",
-                    ServiceInstallLocationPolicy.AncestorDangerousRights, false), Is.False);
+                Assert.That(GetRejection("O:SYD:AI(A;ID;FA;;;SY)(A;ID;0x1301bf;;;AU)",
+                        ServiceInstallLocationPolicy.AncestorDangerousRights, false),
+                    Does.Contain("Authenticated Users (S-1-5-11)"));
             });
         }
 
@@ -75,10 +77,11 @@ namespace ProxiFyre.Tests
 
             Assert.Multiple(() =>
             {
-                Assert.That(IsAccepted(sddl, ServiceInstallLocationPolicy.PayloadDangerousRights,
-                    true), Is.True);
-                Assert.That(IsAccepted(sddl + "(A;OICI;RC;;;OW)",
-                        ServiceInstallLocationPolicy.PayloadDangerousRights, true), Is.False,
+                Assert.That(GetRejection(sddl, ServiceInstallLocationPolicy.PayloadDangerousRights,
+                    true), Is.Null);
+                Assert.That(GetRejection(sddl + "(A;OICI;RC;;;OW)",
+                        ServiceInstallLocationPolicy.PayloadDangerousRights, true),
+                    Does.Contain("CREATOR OWNER (S-1-3-0)"),
                     "OWNER RIGHTS removes the implicit owner rights that CREATOR OWNER would restore.");
             });
         }
@@ -86,8 +89,9 @@ namespace ProxiFyre.Tests
         [Test]
         public void CreatorGroupInheritanceRemainsDangerousForFuturePayloadFiles()
         {
-            Assert.That(IsAccepted("O:SYD:P(A;;FA;;;SY)(A;OICIIO;FW;;;CG)",
-                ServiceInstallLocationPolicy.PayloadDangerousRights, true), Is.False);
+            Assert.That(GetRejection("O:SYD:P(A;;FA;;;SY)(A;OICIIO;FW;;;CG)",
+                    ServiceInstallLocationPolicy.PayloadDangerousRights, true),
+                Does.Contain("CREATOR GROUP (S-1-3-1)"));
         }
 
         [Test]
@@ -283,13 +287,18 @@ namespace ProxiFyre.Tests
             return security;
         }
 
-        private static bool IsAccepted(string sddl, FileSystemRights dangerousRights,
+        // Returns the policy's rejection reason, or null when the descriptor is accepted, so
+        // each assertion can name the entry it expects to be rejected.
+        private static string GetRejection(string sddl, FileSystemRights dangerousRights,
             bool includeInheritedChildRights)
         {
             string reason;
-            return ServiceInstallLocationPolicy.HasProtectedSecurity(
+            var accepted = ServiceInstallLocationPolicy.HasProtectedSecurity(
                 CreateDirectorySecurity(sddl), @"C:\Program Files\ProxiFyre", dangerousRights,
                 includeInheritedChildRights, out reason);
+            Assert.That(accepted, Is.EqualTo(reason == null),
+                "A rejection must explain itself, and an acceptance must not.");
+            return reason;
         }
 
         private static DirectorySecurity CreateDirectorySecurity(string sddl)
