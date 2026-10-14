@@ -423,11 +423,7 @@ namespace ProxiFyre
                 if (!EngineServiceInstallLocationPolicy.IsProtected(
                         Assembly.GetExecutingAssembly().Location, out locationFailure))
                 {
-                    Console.Error.WriteLine(
-                        "ProxiFyre cannot install or run its LocalSystem service from a location " +
-                        "writable by standard users. Copy or extract the complete release into " +
-                        "a protected per-machine directory (normally under Program Files), " +
-                        "preserve inherited permissions, and retry. " + locationFailure);
+                    Console.Error.WriteLine(GetUnprotectedServiceLocationMessage(locationFailure));
                     return 5; // ERROR_ACCESS_DENIED
                 }
             }
@@ -437,6 +433,17 @@ namespace ProxiFyre
             // behind a non-inlined boundary. The CLR must execute the loader policy above before
             // it can JIT this method or resolve ProxiFyreService.
             return RunAfterNativeDependencyPolicy(args, commandLine);
+        }
+
+        internal static string GetUnprotectedServiceLocationMessage(string locationFailure)
+        {
+            return "ProxiFyre cannot install or run its LocalSystem service from this location " +
+                   "because its files might be replaceable without administrator approval." +
+                   Environment.NewLine + "Reason: " + locationFailure + Environment.NewLine +
+                   "To fix this, install ProxiFyre with the official setup or MSI package. It " +
+                   "creates a protected directory under Program Files. To use the ZIP package " +
+                   "instead, follow the protected staging procedure at " +
+                   "https://github.com/wiresock/proxifyre/blob/main/docs/zip-staging.md";
         }
 
         private static string GetCommandLineDenialMessage(EngineCommandLineDenial denial)

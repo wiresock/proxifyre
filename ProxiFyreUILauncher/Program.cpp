@@ -91,6 +91,51 @@ namespace
         return result;
     }
 
+    bool IsSidString(PSID identity, const wchar_t* sidString)
+    {
+        PSID expected = nullptr;
+        const bool converted = ConvertStringSidToSidW(sidString, &expected) != FALSE;
+        const bool matches = converted && EqualSid(identity, expected) != FALSE;
+        if (expected != nullptr)
+            LocalFree(expected);
+        return matches;
+    }
+
+    // Names common well-known trustees without an account lookup, which could block on a
+    // domain controller while the failure dialog is being prepared.
+    const wchar_t* GetWellKnownSidName(PSID identity)
+    {
+        struct NamedSid
+        {
+            WELL_KNOWN_SID_TYPE type;
+            const wchar_t* name;
+        };
+        constexpr NamedSid namedSids[] = {
+            { WinCreatorOwnerSid, L"CREATOR OWNER" },
+            { WinCreatorGroupSid, L"CREATOR GROUP" },
+            { WinCreatorOwnerRightsSid, L"OWNER RIGHTS" },
+            { WinWorldSid, L"Everyone" },
+            { WinAuthenticatedUserSid, L"Authenticated Users" },
+            { WinBuiltinUsersSid, L"Users" },
+            { WinBuiltinPowerUsersSid, L"Power Users" },
+            { WinBuiltinGuestsSid, L"Guests" },
+            { WinInteractiveSid, L"INTERACTIVE" },
+            { WinAnonymousSid, L"ANONYMOUS LOGON" },
+            { WinLocalServiceSid, L"LOCAL SERVICE" },
+            { WinNetworkServiceSid, L"NETWORK SERVICE" }
+        };
+        for (const auto& namedSid : namedSids)
+        {
+            if (IsWellKnownSid(identity, namedSid.type))
+                return namedSid.name;
+        }
+        if (IsSidString(identity, L"S-1-15-2-1"))
+            return L"ALL APPLICATION PACKAGES";
+        if (IsSidString(identity, L"S-1-15-2-2"))
+            return L"ALL RESTRICTED APPLICATION PACKAGES";
+        return nullptr;
+    }
+
     std::wstring FormatSid(PSID identity)
     {
         if (identity == nullptr || !IsValidSid(identity))
@@ -99,8 +144,16 @@ namespace
         LPWSTR value = nullptr;
         if (!ConvertSidToStringSidW(identity, &value) || value == nullptr)
             return L"<unavailable>";
-        const std::wstring result(value);
+        std::wstring result(value);
         LocalFree(value);
+
+        const wchar_t* name = GetWellKnownSidName(identity);
+        if (name != nullptr)
+        {
+            result += L" (";
+            result += name;
+            result += L")";
+        }
         return result;
     }
 
@@ -117,41 +170,48 @@ namespace
             IsWellKnownSid(identity, WinBuiltinAdministratorsSid))
             return true;
 
-        PSID trustedInstaller = nullptr;
-        const bool converted = ConvertStringSidToSidW(kTrustedInstallerSid, &trustedInstaller) != FALSE;
-        const bool matches = converted && EqualSid(identity, trustedInstaller) != FALSE;
-        if (trustedInstaller != nullptr)
-            LocalFree(trustedInstaller);
-        return matches;
+        return IsSidString(identity, kTrustedInstallerSid);
     }
 
-    bool TryGetAllowedAce(const ACE_HEADER* header, ACCESS_MASK& mask, PSID& identity)
+    // Reads the trustee and access mask of a supported allow or deny ACE. All allow and deny
+    // variants share the same fixed layouts; callback variants append application data after
+    // the SID. An unfamiliar entry fails so callers can reject it instead of assuming it cannot
+    // grant mutation access.
+    bool TryGetAce(const ACE_HEADER* header, bool& allows, ACCESS_MASK& mask, PSID& identity)
     {
+        allows = false;
         mask = 0;
         identity = nullptr;
         if (header == nullptr || header->AceSize < sizeof(ACE_HEADER))
             return false;
 
-        const BYTE* begin = reinterpret_cast<const BYTE*>(header);
-        const BYTE* end = begin + header->AceSize;
-        const BYTE* sid = nullptr;
+        bool objectAce = false;
         switch (header->AceType)
         {
         case ACCESS_ALLOWED_ACE_TYPE:
-        {
-            const auto ace = reinterpret_cast<const ACCESS_ALLOWED_ACE*>(header);
-            mask = ace->Mask;
-            sid = reinterpret_cast<const BYTE*>(&ace->SidStart);
-            break;
-        }
         case ACCESS_ALLOWED_CALLBACK_ACE_TYPE:
-        {
-            const auto ace = reinterpret_cast<const ACCESS_ALLOWED_CALLBACK_ACE*>(header);
-            mask = ace->Mask;
-            sid = reinterpret_cast<const BYTE*>(&ace->SidStart);
+            allows = true;
             break;
-        }
+        case ACCESS_DENIED_ACE_TYPE:
+        case ACCESS_DENIED_CALLBACK_ACE_TYPE:
+            break;
         case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+        case ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE:
+            allows = true;
+            objectAce = true;
+            break;
+        case ACCESS_DENIED_OBJECT_ACE_TYPE:
+        case ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE:
+            objectAce = true;
+            break;
+        default:
+            return false;
+        }
+
+        const BYTE* begin = reinterpret_cast<const BYTE*>(header);
+        const BYTE* end = begin + header->AceSize;
+        const BYTE* sid = nullptr;
+        if (objectAce)
         {
             const auto ace = reinterpret_cast<const ACCESS_ALLOWED_OBJECT_ACE*>(header);
             mask = ace->Mask;
@@ -160,29 +220,12 @@ namespace
                 sid += sizeof(GUID);
             if ((ace->Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT) != 0)
                 sid += sizeof(GUID);
-            break;
         }
-        case ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE:
+        else
         {
-            const auto ace = reinterpret_cast<const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE*>(header);
+            const auto ace = reinterpret_cast<const ACCESS_ALLOWED_ACE*>(header);
             mask = ace->Mask;
-            sid = reinterpret_cast<const BYTE*>(&ace->ObjectType);
-            if ((ace->Flags & ACE_OBJECT_TYPE_PRESENT) != 0)
-                sid += sizeof(GUID);
-            if ((ace->Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT) != 0)
-                sid += sizeof(GUID);
-            break;
-        }
-        case ACCESS_DENIED_ACE_TYPE:
-        case ACCESS_DENIED_OBJECT_ACE_TYPE:
-        case ACCESS_DENIED_CALLBACK_ACE_TYPE:
-        case ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE:
-            // A deny ACE does not grant the mutation rights this check is looking for.
-            return true;
-        default:
-            // Fail closed for an unfamiliar DACL entry instead of assuming it cannot grant
-            // mutation access.
-            return false;
+            sid = reinterpret_cast<const BYTE*>(&ace->SidStart);
         }
 
         if (sid < begin || sid >= end || !IsValidSid(const_cast<BYTE*>(sid)))
@@ -192,6 +235,25 @@ namespace
             return false;
         identity = const_cast<BYTE*>(sid);
         return true;
+    }
+
+    // An OWNER RIGHTS entry replaces the implicit READ_CONTROL and WRITE_DAC rights of an
+    // object's owner. An entry that cannot be read is treated as such a restriction, which only
+    // keeps the stricter CREATOR OWNER rule in force.
+    bool DaclRestrictsOwnerRights(PACL dacl)
+    {
+        for (DWORD index = 0; index < dacl->AceCount; ++index)
+        {
+            void* rawAce = nullptr;
+            bool allows = false;
+            ACCESS_MASK mask = 0;
+            PSID identity = nullptr;
+            if (!GetAce(dacl, index, &rawAce) || rawAce == nullptr ||
+                !TryGetAce(static_cast<const ACE_HEADER*>(rawAce), allows, mask, identity) ||
+                IsWellKnownSid(identity, WinCreatorOwnerRightsSid))
+                return true;
+        }
+        return false;
     }
 
     bool HasProtectedSecurity(HANDLE handle, const std::wstring& path,
@@ -230,6 +292,7 @@ namespace
         }
         if (protectedSecurity)
         {
+            const bool daclRestrictsOwnerRights = DaclRestrictsOwnerRights(dacl);
             for (DWORD index = 0; index < dacl->AceCount; ++index)
             {
                 void* rawAce = nullptr;
@@ -247,9 +310,10 @@ namespace
                     (header->AceFlags & INHERIT_ONLY_ACE) != 0)
                     continue;
 
+                bool allows = false;
                 ACCESS_MASK mask = 0;
                 PSID identity = nullptr;
-                if (!TryGetAllowedAce(header, mask, identity))
+                if (!TryGetAce(header, allows, mask, identity))
                 {
                     protectedSecurity = false;
                     failureReason = RejectedPathPrefix(path) +
@@ -257,6 +321,19 @@ namespace
                         std::to_wstring(index) + L".";
                     break;
                 }
+                // A deny ACE does not grant the mutation rights this check is looking for.
+                if (!allows)
+                    continue;
+
+                // CREATOR OWNER never matches an access token. Windows only turns it into an
+                // entry for the owner of a new file or subdirectory, and that owner already
+                // holds implicit READ_CONTROL and WRITE_DAC. New payload files must still have
+                // a trusted owner, and only trusted identities may create them. Every new
+                // Program Files subdirectory inherits this entry. It stays prohibited when an
+                // OWNER RIGHTS entry removes the implicit owner rights it would restore.
+                if (!daclRestrictsOwnerRights && IsWellKnownSid(identity, WinCreatorOwnerSid))
+                    continue;
+
                 if (identity != nullptr && (mask & dangerousRights) != 0 &&
                     !IsTrustedMachineIdentity(identity))
                 {
@@ -270,7 +347,10 @@ namespace
                         L"\r\nACE origin: " +
                         ((header->AceFlags & INHERITED_ACE) != 0
                             ? std::wstring(L"inherited")
-                            : std::wstring(L"explicit"));
+                            : std::wstring(L"explicit")) +
+                        ((header->AceFlags & INHERIT_ONLY_ACE) != 0
+                            ? std::wstring(L", inherit-only (applies to new files and subdirectories)")
+                            : std::wstring());
                     break;
                 }
             }

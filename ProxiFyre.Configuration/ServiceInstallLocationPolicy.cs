@@ -31,6 +31,9 @@ namespace ProxiFyre.Configuration
         private const int GenericWrite = 0x40000000;
         private const string TrustedInstallerSid =
             "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+        private const string OwnerRightsSid = "S-1-3-4";
+        private const string AllApplicationPackagesSid = "S-1-15-2-1";
+        private const string AllRestrictedApplicationPackagesSid = "S-1-15-2-2";
         private const uint DriveFixed = 3;
         private const int ErrorMoreData = 234;
 
@@ -47,14 +50,14 @@ namespace ProxiFyre.Configuration
                 "Topshelf.dll"
             };
 
-        private const FileSystemRights PayloadDangerousRights =
+        internal const FileSystemRights PayloadDangerousRights =
             FileSystemRights.Write |
             FileSystemRights.Delete |
             FileSystemRights.DeleteSubdirectoriesAndFiles |
             FileSystemRights.ChangePermissions |
             FileSystemRights.TakeOwnership;
 
-        private const FileSystemRights AncestorDangerousRights =
+        internal const FileSystemRights AncestorDangerousRights =
             FileSystemRights.Delete |
             FileSystemRights.DeleteSubdirectoriesAndFiles |
             FileSystemRights.ChangePermissions |
@@ -191,7 +194,8 @@ namespace ProxiFyre.Configuration
         }
 
         internal static bool GrantsDangerousAccess(FileSystemAccessRule rule,
-            FileSystemRights dangerousRights, bool includeInheritedChildRights)
+            FileSystemRights dangerousRights, bool includeInheritedChildRights,
+            bool daclRestrictsOwnerRights)
         {
             if (rule == null || rule.AccessControlType != AccessControlType.Allow)
                 return false;
@@ -201,6 +205,20 @@ namespace ProxiFyre.Configuration
                 return false;
             if (!includeInheritedChildRights &&
                 (rule.PropagationFlags & PropagationFlags.InheritOnly) != 0)
+                return false;
+
+            // CREATOR OWNER never matches an access token. Windows only turns it into an
+            // entry for the owner of a newly created file or subdirectory, and that owner
+            // already holds implicit READ_CONTROL and WRITE_DAC, so it could grant itself the
+            // same access anyway. A new payload file must still have a trusted owner, and only
+            // trusted identities may create children here. Every new subdirectory under
+            // Program Files inherits this entry, so rejecting it blocks ordinary per-machine
+            // directories without adding protection. The exemption does not apply when an
+            // OWNER RIGHTS entry deliberately removes the implicit owner rights, because the
+            // CREATOR OWNER entry would then restore them. CREATOR GROUP is not exempt: a
+            // new item's primary group can be an untrusted group such as Domain Users.
+            if (!daclRestrictsOwnerRights && identity != null &&
+                identity.IsWellKnown(WellKnownSidType.CreatorOwnerSid))
                 return false;
 
             var rawRights = unchecked((int)rule.FileSystemRights);
@@ -222,29 +240,107 @@ namespace ProxiFyre.Configuration
                 security = ((FileInfo)fileSystemInfo).GetAccessControl(
                     AccessControlSections.Access | AccessControlSections.Owner);
 
+            return HasProtectedSecurity(security, fileSystemInfo.FullName, dangerousRights,
+                includeInheritedChildRights, out failureReason);
+        }
+
+        internal static bool HasProtectedSecurity(FileSystemSecurity security, string path,
+            FileSystemRights dangerousRights, bool includeInheritedChildRights,
+            out string failureReason)
+        {
             var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-            var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier));
+            var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier))
+                .Cast<FileSystemAccessRule>()
+                .ToList();
             if (!IsTrustedOwner(owner))
             {
-                failureReason = "'" + fileSystemInfo.FullName +
-                                "' is owned by an identity that can modify its permissions without administrator approval.";
+                failureReason = "'" + path + "' is owned by " + DescribeIdentity(owner) +
+                                ", which can modify its permissions without administrator approval.";
                 return false;
             }
 
-            foreach (FileSystemAccessRule rule in rules)
+            var daclRestrictsOwnerRights = rules.Any(rule =>
+                string.Equals(rule.IdentityReference.Value, OwnerRightsSid,
+                    StringComparison.OrdinalIgnoreCase));
+            foreach (var rule in rules)
             {
                 if (GrantsDangerousAccess(rule, dangerousRights,
-                        includeInheritedChildRights))
+                        includeInheritedChildRights, daclRestrictsOwnerRights))
                 {
-                    failureReason = "'" + fileSystemInfo.FullName +
-                                    "' grants write, delete, or permission-control access to '" +
-                                    rule.IdentityReference.Value + "'.";
+                    failureReason = "'" + path +
+                                    "' grants write, delete, or permission-control access to " +
+                                    DescribeIdentity(rule.IdentityReference as SecurityIdentifier) +
+                                    " through " + DescribeRuleOrigin(rule) + ".";
                     return false;
                 }
             }
 
             failureReason = null;
             return true;
+        }
+
+        /// <summary>
+        /// Formats a trustee for diagnostics as "Name (SID)" for common well-known identities
+        /// and as the bare SID otherwise. It deliberately avoids account lookups, which can
+        /// block on a domain controller.
+        /// </summary>
+        internal static string DescribeIdentity(SecurityIdentifier identity)
+        {
+            if (identity == null)
+                return "an unknown identity";
+
+            var name = GetWellKnownIdentityName(identity);
+            return name == null
+                ? "'" + identity.Value + "'"
+                : name + " (" + identity.Value + ")";
+        }
+
+        private static string GetWellKnownIdentityName(SecurityIdentifier identity)
+        {
+            if (identity.IsWellKnown(WellKnownSidType.CreatorOwnerSid))
+                return "CREATOR OWNER";
+            if (identity.IsWellKnown(WellKnownSidType.CreatorGroupSid))
+                return "CREATOR GROUP";
+            if (identity.IsWellKnown(WellKnownSidType.WorldSid))
+                return "Everyone";
+            if (identity.IsWellKnown(WellKnownSidType.AuthenticatedUserSid))
+                return "Authenticated Users";
+            if (identity.IsWellKnown(WellKnownSidType.BuiltinUsersSid))
+                return "Users";
+            if (identity.IsWellKnown(WellKnownSidType.BuiltinPowerUsersSid))
+                return "Power Users";
+            if (identity.IsWellKnown(WellKnownSidType.BuiltinGuestsSid))
+                return "Guests";
+            if (identity.IsWellKnown(WellKnownSidType.InteractiveSid))
+                return "INTERACTIVE";
+            if (identity.IsWellKnown(WellKnownSidType.AnonymousSid))
+                return "ANONYMOUS LOGON";
+            if (identity.IsWellKnown(WellKnownSidType.LocalServiceSid))
+                return "LOCAL SERVICE";
+            if (identity.IsWellKnown(WellKnownSidType.NetworkServiceSid))
+                return "NETWORK SERVICE";
+
+            switch (identity.Value)
+            {
+                case OwnerRightsSid:
+                    return "OWNER RIGHTS";
+                case AllApplicationPackagesSid:
+                    return "ALL APPLICATION PACKAGES";
+                case AllRestrictedApplicationPackagesSid:
+                    return "ALL RESTRICTED APPLICATION PACKAGES";
+                default:
+                    return null;
+            }
+        }
+
+        private static string DescribeRuleOrigin(FileSystemAccessRule rule)
+        {
+            var origin = rule.IsInherited
+                ? "an entry inherited from a parent directory"
+                : "an explicit entry";
+            return (rule.PropagationFlags & PropagationFlags.InheritOnly) != 0
+                ? origin + " that applies only to new files and subdirectories"
+                : origin;
         }
 
         private static bool IsTrustedRuleIdentity(SecurityIdentifier identity)
