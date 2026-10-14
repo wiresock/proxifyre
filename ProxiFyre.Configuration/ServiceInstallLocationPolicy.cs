@@ -193,17 +193,6 @@ namespace ProxiFyre.Configuration
                         StringComparison.OrdinalIgnoreCase));
         }
 
-        internal static bool GrantsDangerousAccess(FileSystemAccessRule rule,
-            FileSystemRights dangerousRights, bool includeInheritedChildRights,
-            bool daclRestrictsOwnerRights)
-        {
-            return rule != null &&
-                   GrantsDangerousAccess(rule.AccessControlType == AccessControlType.Allow,
-                       rule.IdentityReference as SecurityIdentifier,
-                       unchecked((int)rule.FileSystemRights), rule.PropagationFlags,
-                       dangerousRights, includeInheritedChildRights, daclRestrictsOwnerRights);
-        }
-
         private static bool GrantsDangerousAccess(bool allows, SecurityIdentifier identity,
             int accessMask, PropagationFlags propagationFlags, FileSystemRights dangerousRights,
             bool includeInheritedChildRights, bool daclRestrictsOwnerRights)

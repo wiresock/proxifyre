@@ -29,77 +29,56 @@ namespace ProxiFyre.Tests
         [Test]
         public void StandardUserWriteRuleIsDangerousButReadRuleIsNot()
         {
-            var world = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
-            var write = new FileSystemAccessRule(world, FileSystemRights.Write,
-                AccessControlType.Allow);
-            var read = new FileSystemAccessRule(world, FileSystemRights.ReadAndExecute,
-                AccessControlType.Allow);
+            const FileSystemRights dangerousRights =
+                FileSystemRights.Write | FileSystemRights.Delete;
 
             Assert.Multiple(() =>
             {
-                Assert.That(ServiceInstallLocationPolicy.GrantsDangerousAccess(write,
-                    FileSystemRights.Write | FileSystemRights.Delete, true, false), Is.True);
-                Assert.That(ServiceInstallLocationPolicy.GrantsDangerousAccess(read,
-                    FileSystemRights.Write | FileSystemRights.Delete, true, false), Is.False);
+                Assert.That(IsAccepted("O:SYD:P(A;;FA;;;SY)(A;;FW;;;WD)", dangerousRights, true),
+                    Is.False);
+                Assert.That(IsAccepted("O:SYD:P(A;;FA;;;SY)(A;;0x1200a9;;;WD)", dangerousRights,
+                    true), Is.True);
             });
         }
 
         [Test]
         public void InheritOnlyRuleIsIgnoredForAncestorButAppliedToPayloadChildren()
         {
-            var world = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
-            var inheritedWrite = new FileSystemAccessRule(world, FileSystemRights.Write,
-                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-                PropagationFlags.InheritOnly, AccessControlType.Allow);
+            const string sddl = "O:SYD:P(A;;FA;;;SY)(A;OICIIO;FW;;;WD)";
 
             Assert.Multiple(() =>
             {
-                Assert.That(ServiceInstallLocationPolicy.GrantsDangerousAccess(inheritedWrite,
-                    FileSystemRights.Write, false, false), Is.False);
-                Assert.That(ServiceInstallLocationPolicy.GrantsDangerousAccess(inheritedWrite,
-                    FileSystemRights.Write, true, false), Is.True);
+                Assert.That(IsAccepted(sddl, FileSystemRights.Write, false), Is.True);
+                Assert.That(IsAccepted(sddl, FileSystemRights.Write, true), Is.False);
             });
         }
 
         [Test]
         public void AuthenticatedUsersModifyAceApplyingToAncestorIsRejectedForDelete()
         {
-            var authenticatedUsers = new SecurityIdentifier(
-                WellKnownSidType.AuthenticatedUserSid, null);
-            var reportedRule = new FileSystemAccessRule(authenticatedUsers,
-                (FileSystemRights)0x001301bf, AccessControlType.Allow);
-            var ancestorDangerousRights =
-                FileSystemRights.Delete |
-                FileSystemRights.DeleteSubdirectoriesAndFiles |
-                FileSystemRights.ChangePermissions |
-                FileSystemRights.TakeOwnership;
-
+            // The effective, inherited Program Files entry reported in issue #169. It
+            // intersects the ancestor policy only through DELETE.
             Assert.Multiple(() =>
             {
-                Assert.That(reportedRule.FileSystemRights & FileSystemRights.Delete,
+                Assert.That((FileSystemRights)0x001301bf &
+                            ServiceInstallLocationPolicy.AncestorDangerousRights,
                     Is.EqualTo(FileSystemRights.Delete));
-                Assert.That(ServiceInstallLocationPolicy.GrantsDangerousAccess(reportedRule,
-                    ancestorDangerousRights, false, false), Is.True);
+                Assert.That(IsAccepted("O:SYD:AI(A;ID;FA;;;SY)(A;ID;0x1301bf;;;AU)",
+                    ServiceInstallLocationPolicy.AncestorDangerousRights, false), Is.False);
             });
         }
 
         [Test]
         public void CreatorOwnerInheritanceIsAcceptedBecauseOwnershipAlreadyImpliesIt()
         {
-            var creatorOwner = new SecurityIdentifier(WellKnownSidType.CreatorOwnerSid, null);
-            var inheritedFullControl = new FileSystemAccessRule(creatorOwner,
-                FileSystemRights.FullControl,
-                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-                PropagationFlags.InheritOnly, AccessControlType.Allow);
+            const string sddl = "O:SYD:P(A;;FA;;;SY)(A;OICIIO;FA;;;CO)";
 
             Assert.Multiple(() =>
             {
-                Assert.That(ServiceInstallLocationPolicy.GrantsDangerousAccess(
-                    inheritedFullControl, ServiceInstallLocationPolicy.PayloadDangerousRights,
-                    true, false), Is.False);
-                Assert.That(ServiceInstallLocationPolicy.GrantsDangerousAccess(
-                    inheritedFullControl, ServiceInstallLocationPolicy.PayloadDangerousRights,
-                    true, true), Is.True,
+                Assert.That(IsAccepted(sddl, ServiceInstallLocationPolicy.PayloadDangerousRights,
+                    true), Is.True);
+                Assert.That(IsAccepted(sddl + "(A;OICI;RC;;;OW)",
+                        ServiceInstallLocationPolicy.PayloadDangerousRights, true), Is.False,
                     "OWNER RIGHTS removes the implicit owner rights that CREATOR OWNER would restore.");
             });
         }
@@ -107,14 +86,8 @@ namespace ProxiFyre.Tests
         [Test]
         public void CreatorGroupInheritanceRemainsDangerousForFuturePayloadFiles()
         {
-            var creatorGroup = new SecurityIdentifier(WellKnownSidType.CreatorGroupSid, null);
-            var inheritedWrite = new FileSystemAccessRule(creatorGroup,
-                FileSystemRights.Write,
-                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-                PropagationFlags.InheritOnly, AccessControlType.Allow);
-
-            Assert.That(ServiceInstallLocationPolicy.GrantsDangerousAccess(inheritedWrite,
-                ServiceInstallLocationPolicy.PayloadDangerousRights, true, false), Is.True);
+            Assert.That(IsAccepted("O:SYD:P(A;;FA;;;SY)(A;OICIIO;FW;;;CG)",
+                ServiceInstallLocationPolicy.PayloadDangerousRights, true), Is.False);
         }
 
         [Test]
@@ -308,6 +281,15 @@ namespace ProxiFyre.Tests
             var security = new DirectorySecurity();
             security.SetSecurityDescriptorBinaryForm(binary);
             return security;
+        }
+
+        private static bool IsAccepted(string sddl, FileSystemRights dangerousRights,
+            bool includeInheritedChildRights)
+        {
+            string reason;
+            return ServiceInstallLocationPolicy.HasProtectedSecurity(
+                CreateDirectorySecurity(sddl), @"C:\Program Files\ProxiFyre", dangerousRights,
+                includeInheritedChildRights, out reason);
         }
 
         private static DirectorySecurity CreateDirectorySecurity(string sddl)
