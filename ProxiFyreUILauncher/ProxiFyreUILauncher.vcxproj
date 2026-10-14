@@ -88,6 +88,7 @@
     <ClCompile Include="Program.cpp" />
     <ResourceCompile Include="Resources.rc" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="SecurityPolicy.h" />
   </ItemGroup>
   <Target Name="GenerateVersionedApplicationManifest" BeforeTargets="ComputeManifestInputsTargets">
     <MakeDir Directories="$(IntDir)" />
