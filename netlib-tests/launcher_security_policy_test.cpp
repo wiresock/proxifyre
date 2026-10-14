@@ -80,6 +80,44 @@ namespace
         bool valid_{ false };
     };
 
+    struct well_known_sid
+    {
+        explicit well_known_sid(WELL_KNOWN_SID_TYPE type)
+        {
+            DWORD size = sizeof(bytes);
+            ok = ::CreateWellKnownSid(type, nullptr, bytes, &size) != FALSE;
+        }
+
+        PSID get() const { return const_cast<BYTE*>(bytes); }
+
+        BYTE bytes[SECURITY_MAX_SID_SIZE]{};
+        bool ok{ false };
+    };
+
+    // A one-entry ACL written byte by byte, for layouts the Add*Ace functions refuse to build.
+    // The buffer is larger than any size it declares, so a parser that overruns the declared
+    // sizes still reads zeroed memory instead of crashing the test host.
+    class raw_acl
+    {
+    public:
+        raw_acl(BYTE ace_type, WORD ace_size, WORD acl_size = 0)
+        {
+            const auto acl = reinterpret_cast<ACL*>(bytes_);
+            acl->AclRevision = ACL_REVISION_DS;
+            acl->AclSize = acl_size != 0 ? acl_size : static_cast<WORD>(sizeof(ACL) + ace_size);
+            acl->AceCount = 1;
+            const auto header = reinterpret_cast<ACE_HEADER*>(bytes_ + sizeof(ACL));
+            header->AceType = ace_type;
+            header->AceSize = ace_size;
+        }
+
+        PACL get() { return reinterpret_cast<PACL>(bytes_); }
+        BYTE* body() { return bytes_ + sizeof(ACL) + sizeof(ACE_HEADER); }
+
+    private:
+        alignas(DWORD) BYTE bytes_[128]{};
+    };
+
     struct evaluation
     {
         bool accepted{ false };
@@ -133,18 +171,33 @@ namespace
 
     TEST(LauncherSecurityPolicyTest, OwnerRightsRestrictionKeepsCreatorOwnerInheritanceDangerous)
     {
-        const auto result = evaluate_payload(
-            program_files_child_sddl + L"(A;;RC;;;OW)");
-        EXPECT_FALSE(result.accepted);
-        EXPECT_TRUE(contains(result.reason, L"S-1-3-0 (CREATOR OWNER)")) << result.reason;
-        EXPECT_TRUE(contains(result.reason, L"inherit-only")) << result.reason;
+        // Container inheritance alone is enough: new subdirectories would receive both entries.
+        for (const wchar_t* owner_rights : { L"(A;OICI;RC;;;OW)", L"(A;CIIO;RC;;;OW)" })
+        {
+            const auto result = evaluate_payload(program_files_child_sddl + owner_rights);
+            EXPECT_FALSE(result.accepted) << owner_rights;
+            EXPECT_TRUE(contains(result.reason, L"S-1-3-0 (CREATOR OWNER)")) << result.reason;
+            EXPECT_TRUE(contains(result.reason, L"inherit-only")) << result.reason;
+        }
     }
 
     TEST(LauncherSecurityPolicyTest, DenyOwnerRightsEntryAlsoKeepsCreatorOwnerInheritanceDangerous)
     {
-        const auto result = evaluate_payload(L"O:SYD:P(A;;FA;;;SY)(D;;WD;;;OW)(A;OICIIO;GA;;;CO)");
+        const auto result = evaluate_payload(
+            L"O:SYD:P(A;;FA;;;SY)(D;OI;WD;;;OW)(A;OICIIO;GA;;;CO)");
         EXPECT_FALSE(result.accepted);
         EXPECT_TRUE(contains(result.reason, L"S-1-3-0 (CREATOR OWNER)")) << result.reason;
+    }
+
+    TEST(LauncherSecurityPolicyTest, NonInheritableOwnerRightsEntryKeepsCreatorOwnerExemption)
+    {
+        // An entry that applies only to the directory never reaches new items, so their owners
+        // keep the implicit rights the CREATOR OWNER entry repeats.
+        for (const wchar_t* owner_rights : { L"(A;;RC;;;OW)", L"(D;;WD;;;OW)" })
+        {
+            const auto result = evaluate_payload(program_files_child_sddl + owner_rights);
+            EXPECT_TRUE(result.accepted) << owner_rights << L": " << result.reason;
+        }
     }
 
     TEST(LauncherSecurityPolicyTest, CreatorGroupInheritanceRemainsDangerousForPayloadChildren)
@@ -248,6 +301,103 @@ namespace
         EXPECT_FALSE(EvaluateSecurity(system_sid, dacl, test_path, kPayloadDangerousRights, true,
             reason));
         EXPECT_TRUE(contains(reason, L"unsupported or malformed ACE at index 1")) << reason;
+    }
+
+    TEST(LauncherSecurityPolicyTest, ObjectAceTrusteeIsReadAfterOptionalGuids)
+    {
+        const well_known_sid system(WinLocalSystemSid);
+        const well_known_sid users(WinBuiltinUsersSid);
+        const well_known_sid everyone(WinWorldSid);
+        ASSERT_TRUE(system.ok && users.ok && everyone.ok);
+
+        GUID object_type{ 0x11111111, 0x2222, 0x3333, { 4, 4, 4, 4, 4, 4, 4, 4 } };
+        GUID inherited_object_type{ 0x55555555, 0x6666, 0x7777, { 8, 8, 8, 8, 8, 8, 8, 8 } };
+        const struct
+        {
+            GUID* object;
+            GUID* inherited;
+        } layouts[] = {
+            { nullptr, nullptr },
+            { &object_type, nullptr },
+            { nullptr, &inherited_object_type },
+            { &object_type, &inherited_object_type },
+        };
+        for (const auto& layout : layouts)
+        {
+            alignas(DWORD) BYTE buffer[256]{};
+            const auto dacl = reinterpret_cast<PACL>(buffer);
+            ASSERT_TRUE(::InitializeAcl(dacl, sizeof(buffer), ACL_REVISION_DS));
+            ASSERT_TRUE(::AddAccessAllowedAce(dacl, ACL_REVISION_DS, FILE_ALL_ACCESS, system.get()));
+            ASSERT_TRUE(::AddAccessDeniedObjectAce(dacl, ACL_REVISION_DS, 0, FILE_ALL_ACCESS,
+                layout.object, layout.inherited, everyone.get()));
+            ASSERT_TRUE(::AddAccessAllowedObjectAce(dacl, ACL_REVISION_DS, 0, FILE_GENERIC_WRITE,
+                layout.object, layout.inherited, users.get()));
+
+            // The deny entry must parse to be skipped, and the allow entry must resolve its
+            // trustee past whichever GUIDs are present.
+            std::wstring reason;
+            EXPECT_FALSE(EvaluateSecurity(system.get(), dacl, test_path, kPayloadDangerousRights,
+                true, reason));
+            EXPECT_TRUE(contains(reason, L"Trustee SID: S-1-5-32-545 (Users)")) << reason;
+        }
+    }
+
+    TEST(LauncherSecurityPolicyTest, CallbackAceTrusteeIsReadBeforeApplicationData)
+    {
+        const std::wstring conditional_deny = L"(XD;;FA;;;WD;(Member_of {SID(BA)}))";
+        const std::wstring conditional_allow = L"(XA;;FW;;;BU;(Member_of {SID(BA)}))";
+
+        const auto denied = evaluate_payload(L"O:SYD:P(A;;FA;;;SY)" + conditional_deny);
+        EXPECT_TRUE(denied.accepted) << denied.reason;
+
+        const auto allowed = evaluate_payload(
+            L"O:SYD:P(A;;FA;;;SY)" + conditional_deny + conditional_allow);
+        EXPECT_FALSE(allowed.accepted);
+        EXPECT_TRUE(contains(allowed.reason, L"Trustee SID: S-1-5-32-545 (Users)"))
+            << allowed.reason;
+    }
+
+    TEST(LauncherSecurityPolicyTest, TruncatedAcesAreRejected)
+    {
+        const well_known_sid system(WinLocalSystemSid);
+        ASSERT_TRUE(system.ok);
+
+        // Mask present, no room for a SID.
+        raw_acl no_sid(ACCESS_ALLOWED_ACE_TYPE, 8);
+        // Object ACE ending before its Flags field.
+        raw_acl no_object_flags(ACCESS_ALLOWED_OBJECT_ACE_TYPE, 8);
+        // SID header claims two sub-authorities, but the entry ends after the header.
+        raw_acl short_sid(ACCESS_ALLOWED_ACE_TYPE, 16);
+        short_sid.body()[4] = SID_REVISION;
+        short_sid.body()[5] = 2;
+        short_sid.body()[11] = 5;
+
+        for (raw_acl* acl : { &no_sid, &no_object_flags, &short_sid })
+        {
+            std::wstring reason;
+            EXPECT_FALSE(EvaluateSecurity(system.get(), acl->get(), test_path,
+                kPayloadDangerousRights, true, reason));
+            EXPECT_TRUE(contains(reason, L"unsupported or malformed ACE at index 0")) << reason;
+        }
+    }
+
+    TEST(LauncherSecurityPolicyTest, AceExtendingPastTheAclIsRejected)
+    {
+        const well_known_sid system(WinLocalSystemSid);
+        ASSERT_TRUE(system.ok);
+
+        // A well-formed SYSTEM full-control entry whose ACL claims to end four bytes early.
+        const WORD ace_size = static_cast<WORD>(
+            offsetof(ACCESS_ALLOWED_ACE, SidStart) + ::GetLengthSid(system.get()));
+        raw_acl acl(ACCESS_ALLOWED_ACE_TYPE, ace_size, static_cast<WORD>(sizeof(ACL) + ace_size - 4));
+        *reinterpret_cast<ACCESS_MASK*>(acl.body()) = FILE_ALL_ACCESS;
+        ASSERT_TRUE(::CopySid(::GetLengthSid(system.get()), acl.body() + sizeof(ACCESS_MASK),
+            system.get()));
+
+        std::wstring reason;
+        EXPECT_FALSE(EvaluateSecurity(system.get(), acl.get(), test_path, kPayloadDangerousRights,
+            true, reason));
+        EXPECT_TRUE(contains(reason, L"unreadable ACE at index 0")) << reason;
     }
 
     TEST(LauncherSecurityPolicyTest, WellKnownTrusteesAreNamedAndOthersAreReportedBySid)

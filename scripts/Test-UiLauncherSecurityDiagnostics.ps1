@@ -10,11 +10,14 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
-$sourcePath = Join-Path $repositoryRoot 'ProxiFyreUILauncher\Program.cpp'
+# The launcher's ACL evaluation lives in SecurityPolicy.h; Program.cpp propagates its result.
+$sourcePaths = @(
+    (Join-Path $repositoryRoot 'ProxiFyreUILauncher\Program.cpp'),
+    (Join-Path $repositoryRoot 'ProxiFyreUILauncher\SecurityPolicy.h'))
 $launcherPath = Join-Path $repositoryRoot (
     "bin\exe\$Platform\Release\ProxiFyreUI.exe")
 
-$source = [IO.File]::ReadAllText($sourcePath)
+$source = ($sourcePaths | ForEach-Object { [IO.File]::ReadAllText($_) }) -join "`n"
 $requiredSourceFragments = @(
     'ConvertSidToStringSidW(identity, &value)',
     'Rejected path: ',

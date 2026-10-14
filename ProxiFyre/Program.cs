@@ -443,7 +443,18 @@ namespace ProxiFyre
                    "To fix this, install ProxiFyre with the official setup or MSI package. It " +
                    "creates a protected directory under Program Files. To use the ZIP package " +
                    "instead, follow the protected staging procedure at " +
-                   "https://github.com/wiresock/proxifyre/blob/main/docs/zip-staging.md";
+                   GetZipStagingDocumentationUrl();
+        }
+
+        // Links the staging procedure from this build's release tag so the steps match the
+        // checks this binary enforces.
+        private static string GetZipStagingDocumentationUrl()
+        {
+            var version = typeof(Program).Assembly
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            var reference = string.IsNullOrWhiteSpace(version) ? "main" : "v" + version;
+            return "https://github.com/wiresock/proxifyre/blob/" + reference +
+                   "/docs/zip-staging.md";
         }
 
         private static string GetCommandLineDenialMessage(EngineCommandLineDenial denial)

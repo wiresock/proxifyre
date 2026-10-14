@@ -149,6 +149,22 @@ namespace ProxiFyre.Tests
             });
         }
 
+        [TestCase("(A;;RC;;;OW)")]
+        [TestCase("(D;;WD;;;OW)")]
+        public void NonInheritableOwnerRightsEntryKeepsCreatorOwnerExemption(string ownerRights)
+        {
+            // An entry that applies only to the directory never reaches new items, so their
+            // owners keep the implicit rights the CREATOR OWNER entry repeats.
+            var security = CreateDirectorySecurity(DefaultProgramFilesSubdirectorySddl +
+                                                   ownerRights);
+
+            string reason;
+            Assert.That(ServiceInstallLocationPolicy.HasProtectedSecurity(security,
+                    @"C:\Program Files\ProxiFyre",
+                    ServiceInstallLocationPolicy.PayloadDangerousRights, true, out reason),
+                Is.True, reason);
+        }
+
         [Test]
         public void UntrustedInheritOnlyWriteRejectionNamesTrusteeAndOrigin()
         {

@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <sddl.h>
 
+#include <cstddef>
 #include <cwchar>
 #include <string>
 
@@ -145,10 +146,32 @@ namespace ProxiFyre::Launcher
         return IsSidString(identity, kTrustedInstallerSid);
     }
 
-    // Reads the trustee and access mask of a supported allow or deny ACE. All allow and deny
-    // variants share the same fixed layouts; callback variants append application data after
-    // the SID. An unfamiliar entry fails so callers can reject it instead of assuming it cannot
-    // grant mutation access.
+    // Resolves an ACE and confirms that its header and declared size lie entirely inside the
+    // ACL, so every later read of the entry stays within the ACL buffer.
+    inline const ACE_HEADER* GetAceWithinAcl(PACL dacl, DWORD index)
+    {
+        void* rawAce = nullptr;
+        if (!GetAce(dacl, index, &rawAce) || rawAce == nullptr)
+            return nullptr;
+
+        const BYTE* aclBegin = reinterpret_cast<const BYTE*>(dacl);
+        const BYTE* aclEnd = aclBegin + dacl->AclSize;
+        const BYTE* ace = static_cast<const BYTE*>(rawAce);
+        if (ace < aclBegin + sizeof(ACL) || ace > aclEnd ||
+            static_cast<size_t>(aclEnd - ace) < sizeof(ACE_HEADER))
+            return nullptr;
+        const auto header = reinterpret_cast<const ACE_HEADER*>(ace);
+        if (header->AceSize < sizeof(ACE_HEADER) ||
+            header->AceSize > static_cast<size_t>(aclEnd - ace))
+            return nullptr;
+        return header;
+    }
+
+    // Reads the trustee and access mask of a supported allow or deny ACE that lies within its
+    // ACL (see GetAceWithinAcl). All allow and deny variants share the same fixed layouts;
+    // callback variants append application data after the SID. Each field is read only after
+    // AceSize is known to cover it. An unfamiliar or truncated entry fails so callers can reject
+    // it instead of assuming it cannot grant mutation access.
     inline bool TryGetAce(const ACE_HEADER* header, bool& allows, ACCESS_MASK& mask, PSID& identity)
     {
         allows = false;
@@ -185,6 +208,8 @@ namespace ProxiFyre::Launcher
         const BYTE* sid = nullptr;
         if (objectAce)
         {
+            if (header->AceSize < offsetof(ACCESS_ALLOWED_OBJECT_ACE, ObjectType))
+                return false;
             const auto ace = reinterpret_cast<const ACCESS_ALLOWED_OBJECT_ACE*>(header);
             mask = ace->Mask;
             sid = reinterpret_cast<const BYTE*>(&ace->ObjectType);
@@ -195,33 +220,41 @@ namespace ProxiFyre::Launcher
         }
         else
         {
+            if (header->AceSize < offsetof(ACCESS_ALLOWED_ACE, SidStart))
+                return false;
             const auto ace = reinterpret_cast<const ACCESS_ALLOWED_ACE*>(header);
             mask = ace->Mask;
             sid = reinterpret_cast<const BYTE*>(&ace->SidStart);
         }
 
-        if (sid < begin || sid >= end || !IsValidSid(const_cast<BYTE*>(sid)))
+        // The fixed SID header holds the sub-authority count, which sizes the rest of the SID.
+        constexpr size_t sidHeaderSize = offsetof(SID, SubAuthority);
+        if (sid < begin || sid > end || static_cast<size_t>(end - sid) < sidHeaderSize)
             return false;
-        const DWORD sidLength = GetLengthSid(const_cast<BYTE*>(sid));
-        if (sidLength == 0 || sidLength > static_cast<DWORD>(end - sid))
+        const size_t sidLength = sidHeaderSize +
+            reinterpret_cast<const SID*>(sid)->SubAuthorityCount * sizeof(DWORD);
+        if (sidLength > static_cast<size_t>(end - sid) || !IsValidSid(const_cast<BYTE*>(sid)))
             return false;
         identity = const_cast<BYTE*>(sid);
         return true;
     }
 
-    // An OWNER RIGHTS entry replaces the implicit READ_CONTROL and WRITE_DAC rights of an
-    // object's owner. An entry that cannot be read is treated as such a restriction, which only
-    // keeps the stricter CREATOR OWNER rule in force.
-    inline bool DaclRestrictsOwnerRights(PACL dacl)
+    // An inheritable OWNER RIGHTS entry replaces the implicit READ_CONTROL and WRITE_DAC rights
+    // of the owner of a new file or subdirectory, which an inherited CREATOR OWNER entry would
+    // then restore. An OWNER RIGHTS entry without object or container inheritance never reaches
+    // new items. An entry that cannot be read is treated as a restriction, which only keeps the
+    // stricter CREATOR OWNER rule in force.
+    inline bool DaclRestrictsNewOwnerRights(PACL dacl)
     {
         for (DWORD index = 0; index < dacl->AceCount; ++index)
         {
-            void* rawAce = nullptr;
+            const ACE_HEADER* header = GetAceWithinAcl(dacl, index);
             bool allows = false;
             ACCESS_MASK mask = 0;
             PSID identity = nullptr;
-            if (!GetAce(dacl, index, &rawAce) || rawAce == nullptr ||
-                !TryGetAce(static_cast<const ACE_HEADER*>(rawAce), allows, mask, identity) ||
+            if (header == nullptr || !TryGetAce(header, allows, mask, identity))
+                return true;
+            if ((header->AceFlags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)) != 0 &&
                 IsWellKnownSid(identity, WinCreatorOwnerRightsSid))
                 return true;
         }
@@ -250,11 +283,11 @@ namespace ProxiFyre::Launcher
         }
         if (protectedSecurity)
         {
-            const bool daclRestrictsOwnerRights = DaclRestrictsOwnerRights(dacl);
+            const bool daclRestrictsNewOwnerRights = DaclRestrictsNewOwnerRights(dacl);
             for (DWORD index = 0; index < dacl->AceCount; ++index)
             {
-                void* rawAce = nullptr;
-                if (!GetAce(dacl, index, &rawAce) || rawAce == nullptr)
+                const ACE_HEADER* header = GetAceWithinAcl(dacl, index);
+                if (header == nullptr)
                 {
                     protectedSecurity = false;
                     failureReason = RejectedPathPrefix(path) +
@@ -263,7 +296,6 @@ namespace ProxiFyre::Launcher
                     break;
                 }
 
-                const auto header = static_cast<const ACE_HEADER*>(rawAce);
                 if (!includeInheritedChildRights &&
                     (header->AceFlags & INHERIT_ONLY_ACE) != 0)
                     continue;
@@ -288,8 +320,9 @@ namespace ProxiFyre::Launcher
                 // holds implicit READ_CONTROL and WRITE_DAC. New payload files must still have
                 // a trusted owner, and only trusted identities may create them. Every new
                 // Program Files subdirectory inherits this entry. It stays prohibited when an
-                // OWNER RIGHTS entry removes the implicit owner rights it would restore.
-                if (!daclRestrictsOwnerRights && IsWellKnownSid(identity, WinCreatorOwnerSid))
+                // inheritable OWNER RIGHTS entry removes the implicit owner rights it would
+                // restore.
+                if (!daclRestrictsNewOwnerRights && IsWellKnownSid(identity, WinCreatorOwnerSid))
                     continue;
 
                 if (identity != nullptr && (mask & dangerousRights) != 0 &&

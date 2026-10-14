@@ -214,9 +214,10 @@ namespace ProxiFyre.Configuration
             // trusted identities may create children here. Every new subdirectory under
             // Program Files inherits this entry, so rejecting it blocks ordinary per-machine
             // directories without adding protection. The exemption does not apply when an
-            // OWNER RIGHTS entry deliberately removes the implicit owner rights, because the
-            // CREATOR OWNER entry would then restore them. CREATOR GROUP is not exempt: a
-            // new item's primary group can be an untrusted group such as Domain Users.
+            // inheritable OWNER RIGHTS entry deliberately removes the implicit rights of new
+            // items' owners, because the CREATOR OWNER entry would then restore them. An OWNER
+            // RIGHTS entry without inheritance never reaches new items. CREATOR GROUP is not
+            // exempt: a new item's primary group can be an untrusted group such as Domain Users.
             if (!daclRestrictsOwnerRights && identity != null &&
                 identity.IsWellKnown(WellKnownSidType.CreatorOwnerSid))
                 return false;
@@ -260,6 +261,7 @@ namespace ProxiFyre.Configuration
             }
 
             var daclRestrictsOwnerRights = rules.Any(rule =>
+                rule.InheritanceFlags != InheritanceFlags.None &&
                 string.Equals(rule.IdentityReference.Value, OwnerRightsSid,
                     StringComparison.OrdinalIgnoreCase));
             foreach (var rule in rules)
