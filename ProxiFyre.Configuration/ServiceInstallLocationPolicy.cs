@@ -197,14 +197,21 @@ namespace ProxiFyre.Configuration
             FileSystemRights dangerousRights, bool includeInheritedChildRights,
             bool daclRestrictsOwnerRights)
         {
-            if (rule == null || rule.AccessControlType != AccessControlType.Allow)
-                return false;
+            return rule != null &&
+                   GrantsDangerousAccess(rule.AccessControlType == AccessControlType.Allow,
+                       rule.IdentityReference as SecurityIdentifier,
+                       unchecked((int)rule.FileSystemRights), rule.PropagationFlags,
+                       dangerousRights, includeInheritedChildRights, daclRestrictsOwnerRights);
+        }
 
-            var identity = rule.IdentityReference as SecurityIdentifier;
-            if (IsTrustedRuleIdentity(identity))
+        private static bool GrantsDangerousAccess(bool allows, SecurityIdentifier identity,
+            int accessMask, PropagationFlags propagationFlags, FileSystemRights dangerousRights,
+            bool includeInheritedChildRights, bool daclRestrictsOwnerRights)
+        {
+            if (!allows || IsTrustedRuleIdentity(identity))
                 return false;
             if (!includeInheritedChildRights &&
-                (rule.PropagationFlags & PropagationFlags.InheritOnly) != 0)
+                (propagationFlags & PropagationFlags.InheritOnly) != 0)
                 return false;
 
             // CREATOR OWNER never matches an access token. Windows only turns it into an
@@ -222,10 +229,9 @@ namespace ProxiFyre.Configuration
                 identity.IsWellKnown(WellKnownSidType.CreatorOwnerSid))
                 return false;
 
-            var rawRights = unchecked((int)rule.FileSystemRights);
-            return (rawRights & GenericAll) != 0 ||
-                   (rawRights & GenericWrite) != 0 ||
-                   (rule.FileSystemRights & dangerousRights) != 0;
+            return (accessMask & GenericAll) != 0 ||
+                   (accessMask & GenericWrite) != 0 ||
+                   (accessMask & (int)dangerousRights) != 0;
         }
 
         private static bool HasProtectedSecurity(FileSystemInfo fileSystemInfo,
@@ -250,9 +256,6 @@ namespace ProxiFyre.Configuration
             out string failureReason)
         {
             var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-            var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier))
-                .Cast<FileSystemAccessRule>()
-                .ToList();
             if (!IsTrustedOwner(owner))
             {
                 failureReason = "'" + path + "' is owned by " + DescribeIdentity(owner) +
@@ -260,19 +263,50 @@ namespace ProxiFyre.Configuration
                 return false;
             }
 
-            var daclRestrictsOwnerRights = rules.Any(rule =>
-                rule.InheritanceFlags != InheritanceFlags.None &&
-                string.Equals(rule.IdentityReference.Value, OwnerRightsSid,
-                    StringComparison.OrdinalIgnoreCase));
-            foreach (var rule in rules)
+            // Read the DACL itself rather than GetAccessRules, which omits object ACEs and
+            // entry types it cannot express as rules even though Windows can still grant
+            // access through them. Anything other than an allow or deny entry is rejected, as
+            // the native launcher does.
+            var dacl = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0)
+                .DiscretionaryAcl;
+            if (dacl == null)
             {
-                if (GrantsDangerousAccess(rule, dangerousRights,
-                        includeInheritedChildRights, daclRestrictsOwnerRights))
+                failureReason = "'" + path +
+                                "' has no discretionary access-control list, so every user has full access.";
+                return false;
+            }
+
+            var entries = new List<QualifiedAce>(dacl.Count);
+            for (var index = 0; index < dacl.Count; index++)
+            {
+                var entry = dacl[index] as QualifiedAce;
+                if (entry == null ||
+                    (entry.AceQualifier != AceQualifier.AccessAllowed &&
+                     entry.AceQualifier != AceQualifier.AccessDenied))
+                {
+                    failureReason = "'" + path + "' has a " + dacl[index].AceType +
+                                    " access-control entry at index " + index +
+                                    ", which the service policy cannot evaluate.";
+                    return false;
+                }
+                entries.Add(entry);
+            }
+
+            var daclRestrictsOwnerRights = entries.Any(entry =>
+                entry.InheritanceFlags != InheritanceFlags.None &&
+                string.Equals(entry.SecurityIdentifier.Value, OwnerRightsSid,
+                    StringComparison.OrdinalIgnoreCase));
+            foreach (var entry in entries)
+            {
+                if (GrantsDangerousAccess(entry.AceQualifier == AceQualifier.AccessAllowed,
+                        entry.SecurityIdentifier, entry.AccessMask, entry.PropagationFlags,
+                        dangerousRights, includeInheritedChildRights, daclRestrictsOwnerRights))
                 {
                     failureReason = "'" + path +
                                     "' grants write, delete, or permission-control access to " +
-                                    DescribeIdentity(rule.IdentityReference as SecurityIdentifier) +
-                                    " through " + DescribeRuleOrigin(rule) + ".";
+                                    DescribeIdentity(entry.SecurityIdentifier) + " through " +
+                                    DescribeEntryOrigin(entry.IsInherited, entry.PropagationFlags) +
+                                    ".";
                     return false;
                 }
             }
@@ -335,12 +369,13 @@ namespace ProxiFyre.Configuration
             }
         }
 
-        private static string DescribeRuleOrigin(FileSystemAccessRule rule)
+        private static string DescribeEntryOrigin(bool isInherited,
+            PropagationFlags propagationFlags)
         {
-            var origin = rule.IsInherited
+            var origin = isInherited
                 ? "an entry inherited from a parent directory"
                 : "an explicit entry";
-            return (rule.PropagationFlags & PropagationFlags.InheritOnly) != 0
+            return (propagationFlags & PropagationFlags.InheritOnly) != 0
                 ? origin + " that applies only to new files and subdirectories"
                 : origin;
         }

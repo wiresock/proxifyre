@@ -146,32 +146,32 @@ namespace ProxiFyre::Launcher
         return IsSidString(identity, kTrustedInstallerSid);
     }
 
-    // Resolves an ACE and confirms that its header and declared size lie entirely inside the
-    // ACL, so every later read of the entry stays within the ACL buffer.
-    inline const ACE_HEADER* GetAceWithinAcl(PACL dacl, DWORD index)
+    // Returns the ACE that follows previous, or the first ACE when previous is null, once its
+    // header and declared size are known to lie entirely inside the ACL, so every later read of
+    // the entry stays within the ACL buffer. Callers walk the ACL once with this instead of
+    // calling GetAce for each index, which rescans from the first entry every time.
+    inline const ACE_HEADER* NextAceWithinAcl(PACL dacl, const ACE_HEADER* previous)
     {
-        void* rawAce = nullptr;
-        if (!GetAce(dacl, index, &rawAce) || rawAce == nullptr)
-            return nullptr;
-
         const BYTE* aclBegin = reinterpret_cast<const BYTE*>(dacl);
-        const BYTE* aclEnd = aclBegin + dacl->AclSize;
-        const BYTE* ace = static_cast<const BYTE*>(rawAce);
-        if (ace < aclBegin + sizeof(ACL) || ace > aclEnd ||
-            static_cast<size_t>(aclEnd - ace) < sizeof(ACE_HEADER))
+        const size_t aclSize = dacl->AclSize;
+        const size_t offset = previous == nullptr
+            ? sizeof(ACL)
+            : static_cast<size_t>(reinterpret_cast<const BYTE*>(previous) - aclBegin) +
+                previous->AceSize;
+        if (aclSize < sizeof(ACL) || offset > aclSize ||
+            aclSize - offset < sizeof(ACE_HEADER))
             return nullptr;
-        const auto header = reinterpret_cast<const ACE_HEADER*>(ace);
-        if (header->AceSize < sizeof(ACE_HEADER) ||
-            header->AceSize > static_cast<size_t>(aclEnd - ace))
+        const auto header = reinterpret_cast<const ACE_HEADER*>(aclBegin + offset);
+        if (header->AceSize < sizeof(ACE_HEADER) || header->AceSize > aclSize - offset)
             return nullptr;
         return header;
     }
 
     // Reads the trustee and access mask of a supported allow or deny ACE that lies within its
-    // ACL (see GetAceWithinAcl). All allow and deny variants share the same fixed layouts;
-    // callback variants append application data after the SID. Each field is read only after
-    // AceSize is known to cover it. An unfamiliar or truncated entry fails so callers can reject
-    // it instead of assuming it cannot grant mutation access.
+    // ACL (see NextAceWithinAcl). All allow and deny variants share the same fixed layouts;
+    // callback variants append application data after the SID. Offsets are computed as sizes
+    // and each field is read only after AceSize is known to cover it. An unfamiliar or truncated
+    // entry fails so callers can reject it instead of assuming it cannot grant mutation access.
     inline bool TryGetAce(const ACE_HEADER* header, bool& allows, ACCESS_MASK& mask, PSID& identity)
     {
         allows = false;
@@ -203,39 +203,39 @@ namespace ProxiFyre::Launcher
             return false;
         }
 
-        const BYTE* begin = reinterpret_cast<const BYTE*>(header);
-        const BYTE* end = begin + header->AceSize;
-        const BYTE* sid = nullptr;
+        const size_t aceSize = header->AceSize;
+        size_t sidOffset = 0;
         if (objectAce)
         {
-            if (header->AceSize < offsetof(ACCESS_ALLOWED_OBJECT_ACE, ObjectType))
+            if (aceSize < offsetof(ACCESS_ALLOWED_OBJECT_ACE, ObjectType))
                 return false;
             const auto ace = reinterpret_cast<const ACCESS_ALLOWED_OBJECT_ACE*>(header);
             mask = ace->Mask;
-            sid = reinterpret_cast<const BYTE*>(&ace->ObjectType);
+            sidOffset = offsetof(ACCESS_ALLOWED_OBJECT_ACE, ObjectType);
             if ((ace->Flags & ACE_OBJECT_TYPE_PRESENT) != 0)
-                sid += sizeof(GUID);
+                sidOffset += sizeof(GUID);
             if ((ace->Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT) != 0)
-                sid += sizeof(GUID);
+                sidOffset += sizeof(GUID);
         }
         else
         {
-            if (header->AceSize < offsetof(ACCESS_ALLOWED_ACE, SidStart))
+            if (aceSize < offsetof(ACCESS_ALLOWED_ACE, SidStart))
                 return false;
             const auto ace = reinterpret_cast<const ACCESS_ALLOWED_ACE*>(header);
             mask = ace->Mask;
-            sid = reinterpret_cast<const BYTE*>(&ace->SidStart);
+            sidOffset = offsetof(ACCESS_ALLOWED_ACE, SidStart);
         }
 
         // The fixed SID header holds the sub-authority count, which sizes the rest of the SID.
         constexpr size_t sidHeaderSize = offsetof(SID, SubAuthority);
-        if (sid < begin || sid > end || static_cast<size_t>(end - sid) < sidHeaderSize)
+        if (sidOffset > aceSize || aceSize - sidOffset < sidHeaderSize)
             return false;
+        BYTE* sid = const_cast<BYTE*>(reinterpret_cast<const BYTE*>(header)) + sidOffset;
         const size_t sidLength = sidHeaderSize +
             reinterpret_cast<const SID*>(sid)->SubAuthorityCount * sizeof(DWORD);
-        if (sidLength > static_cast<size_t>(end - sid) || !IsValidSid(const_cast<BYTE*>(sid)))
+        if (sidLength > aceSize - sidOffset || !IsValidSid(sid))
             return false;
-        identity = const_cast<BYTE*>(sid);
+        identity = sid;
         return true;
     }
 
@@ -246,9 +246,10 @@ namespace ProxiFyre::Launcher
     // stricter CREATOR OWNER rule in force.
     inline bool DaclRestrictsNewOwnerRights(PACL dacl)
     {
+        const ACE_HEADER* header = nullptr;
         for (DWORD index = 0; index < dacl->AceCount; ++index)
         {
-            const ACE_HEADER* header = GetAceWithinAcl(dacl, index);
+            header = NextAceWithinAcl(dacl, header);
             bool allows = false;
             ACCESS_MASK mask = 0;
             PSID identity = nullptr;
@@ -284,9 +285,10 @@ namespace ProxiFyre::Launcher
         if (protectedSecurity)
         {
             const bool daclRestrictsNewOwnerRights = DaclRestrictsNewOwnerRights(dacl);
+            const ACE_HEADER* header = nullptr;
             for (DWORD index = 0; index < dacl->AceCount; ++index)
             {
-                const ACE_HEADER* header = GetAceWithinAcl(dacl, index);
+                header = NextAceWithinAcl(dacl, header);
                 if (header == nullptr)
                 {
                     protectedSecurity = false;

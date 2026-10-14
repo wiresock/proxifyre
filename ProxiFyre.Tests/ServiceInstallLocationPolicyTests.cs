@@ -165,6 +165,71 @@ namespace ProxiFyre.Tests
                 Is.True, reason);
         }
 
+        // GetAccessRules omits object ACEs that carry a GUID, so the policy must read the DACL
+        // itself. Each case grants Users write access through an entry type other than a plain
+        // allow ACE.
+        [TestCase("(OA;;FW;;11111111-2222-3333-4444-555555555555;BU)")]
+        [TestCase("(OA;;FW;11111111-2222-3333-4444-555555555555;;BU)")]
+        [TestCase("(OA;;FW;11111111-2222-3333-4444-555555555555;" +
+                  "66666666-7777-8888-9999-000000000000;BU)")]
+        [TestCase("(XA;;FW;;;BU;(Member_of {SID(BA)}))")]
+        public void ObjectAndCallbackAllowEntriesAreEvaluated(string entry)
+        {
+            var security = CreateDirectorySecurity("O:SYD:P(A;;FA;;;SY)" + entry);
+
+            string reason;
+            Assert.Multiple(() =>
+            {
+                Assert.That(ServiceInstallLocationPolicy.HasProtectedSecurity(security,
+                        @"C:\Program Files\ProxiFyre",
+                        ServiceInstallLocationPolicy.PayloadDangerousRights, true, out reason),
+                    Is.False);
+                Assert.That(reason, Does.Contain("Users (S-1-5-32-545)"));
+            });
+        }
+
+        [TestCase("(OD;;FA;;11111111-2222-3333-4444-555555555555;WD)")]
+        [TestCase("(XD;;FA;;;WD;(Member_of {SID(BA)}))")]
+        public void ObjectAndCallbackDenyEntriesAreIgnored(string entry)
+        {
+            var security = CreateDirectorySecurity("O:SYD:P" + entry + "(A;;FA;;;SY)");
+
+            string reason;
+            Assert.That(ServiceInstallLocationPolicy.HasProtectedSecurity(security,
+                    @"C:\Program Files\ProxiFyre",
+                    ServiceInstallLocationPolicy.PayloadDangerousRights, true, out reason),
+                Is.True, reason);
+        }
+
+        [Test]
+        public void UnsupportedEntryTypeIsRejected()
+        {
+            var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+            var dacl = new RawAcl(GenericAcl.AclRevision, 2);
+            dacl.InsertAce(0, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed,
+                unchecked((int)FileSystemRights.FullControl), system, false, null));
+            // A mandatory-label entry, which belongs in the SACL and grants nothing the
+            // policy can reason about.
+            dacl.InsertAce(1, new CustomAce((AceType)0x11, AceFlags.None, new byte[8]));
+            var descriptor = new RawSecurityDescriptor(
+                ControlFlags.DiscretionaryAclPresent | ControlFlags.SelfRelative,
+                system, null, null, dacl);
+            var binary = new byte[descriptor.BinaryLength];
+            descriptor.GetBinaryForm(binary, 0);
+            var security = new DirectorySecurity();
+            security.SetSecurityDescriptorBinaryForm(binary);
+
+            string reason;
+            Assert.Multiple(() =>
+            {
+                Assert.That(ServiceInstallLocationPolicy.HasProtectedSecurity(security,
+                        @"C:\Program Files\ProxiFyre",
+                        ServiceInstallLocationPolicy.PayloadDangerousRights, true, out reason),
+                    Is.False);
+                Assert.That(reason, Does.Contain("at index 1"));
+            });
+        }
+
         [Test]
         public void UntrustedInheritOnlyWriteRejectionNamesTrusteeAndOrigin()
         {

@@ -95,27 +95,53 @@ namespace
     };
 
     // A one-entry ACL written byte by byte, for layouts the Add*Ace functions refuse to build.
-    // The buffer is larger than any size it declares, so a parser that overruns the declared
-    // sizes still reads zeroed memory instead of crashing the test host.
+    // Its last byte sits directly before a PAGE_NOACCESS page, so a parser that reads past the
+    // declared sizes faults instead of silently reading zeroed memory. ace_size and acl_size
+    // must be multiples of four so the ACL stays DWORD-aligned.
     class raw_acl
     {
     public:
         raw_acl(BYTE ace_type, WORD ace_size, WORD acl_size = 0)
         {
+            const size_t declared_size = acl_size != 0 ? acl_size : sizeof(ACL) + ace_size;
+            const size_t written_size = (std::max)(declared_size, sizeof(ACL) + ace_size);
+
+            SYSTEM_INFO system_info{};
+            ::GetSystemInfo(&system_info);
+            const size_t page_size = system_info.dwPageSize;
+            base_ = static_cast<BYTE*>(::VirtualAlloc(nullptr, 2 * page_size,
+                MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+            DWORD old_protection = 0;
+            if (base_ == nullptr || written_size % sizeof(DWORD) != 0 ||
+                !::VirtualProtect(base_ + page_size, page_size, PAGE_NOACCESS, &old_protection))
+                return;
+
+            bytes_ = base_ + page_size - written_size;
             const auto acl = reinterpret_cast<ACL*>(bytes_);
             acl->AclRevision = ACL_REVISION_DS;
-            acl->AclSize = acl_size != 0 ? acl_size : static_cast<WORD>(sizeof(ACL) + ace_size);
+            acl->AclSize = static_cast<WORD>(declared_size);
             acl->AceCount = 1;
             const auto header = reinterpret_cast<ACE_HEADER*>(bytes_ + sizeof(ACL));
             header->AceType = ace_type;
             header->AceSize = ace_size;
         }
 
+        ~raw_acl()
+        {
+            if (base_ != nullptr)
+                ::VirtualFree(base_, 0, MEM_RELEASE);
+        }
+
+        raw_acl(const raw_acl&) = delete;
+        raw_acl& operator=(const raw_acl&) = delete;
+
+        bool valid() const { return bytes_ != nullptr; }
         PACL get() { return reinterpret_cast<PACL>(bytes_); }
         BYTE* body() { return bytes_ + sizeof(ACL) + sizeof(ACE_HEADER); }
 
     private:
-        alignas(DWORD) BYTE bytes_[128]{};
+        BYTE* base_{};
+        BYTE* bytes_{};
     };
 
     struct evaluation
@@ -171,8 +197,10 @@ namespace
 
     TEST(LauncherSecurityPolicyTest, OwnerRightsRestrictionKeepsCreatorOwnerInheritanceDangerous)
     {
-        // Container inheritance alone is enough: new subdirectories would receive both entries.
-        for (const wchar_t* owner_rights : { L"(A;OICI;RC;;;OW)", L"(A;CIIO;RC;;;OW)" })
+        // Object or container inheritance alone is enough: new files or new subdirectories
+        // would receive both entries.
+        for (const wchar_t* owner_rights :
+            { L"(A;OICI;RC;;;OW)", L"(A;CIIO;RC;;;OW)", L"(A;OI;RC;;;OW)" })
         {
             const auto result = evaluate_payload(program_files_child_sddl + owner_rights);
             EXPECT_FALSE(result.accepted) << owner_rights;
@@ -357,22 +385,39 @@ namespace
             << allowed.reason;
     }
 
+    TEST(LauncherSecurityPolicyTest, CallbackObjectAceTrusteeIsReadAfterGuidsAndBeforeData)
+    {
+        // Callback object entries take the object layout and append application data.
+        const auto result = evaluate_payload(L"O:SYD:P(A;;FA;;;SY)"
+            L"(ZA;;FW;11111111-2222-3333-4444-555555555555;;BU;(Member_of {SID(BA)}))");
+        EXPECT_FALSE(result.accepted);
+        EXPECT_TRUE(contains(result.reason, L"Trustee SID: S-1-5-32-545 (Users)"))
+            << result.reason;
+    }
+
     TEST(LauncherSecurityPolicyTest, TruncatedAcesAreRejected)
     {
         const well_known_sid system(WinLocalSystemSid);
         ASSERT_TRUE(system.ok);
 
+        // Header only, no mask.
+        raw_acl no_mask(ACCESS_ALLOWED_ACE_TYPE, 4);
         // Mask present, no room for a SID.
         raw_acl no_sid(ACCESS_ALLOWED_ACE_TYPE, 8);
         // Object ACE ending before its Flags field.
         raw_acl no_object_flags(ACCESS_ALLOWED_OBJECT_ACE_TYPE, 8);
+        // Object ACE whose flags announce both GUIDs, but the entry ends after the flags.
+        raw_acl missing_guids(ACCESS_ALLOWED_OBJECT_ACE_TYPE, 12);
         // SID header claims two sub-authorities, but the entry ends after the header.
         raw_acl short_sid(ACCESS_ALLOWED_ACE_TYPE, 16);
+        ASSERT_TRUE(no_mask.valid() && no_sid.valid() && no_object_flags.valid() &&
+            missing_guids.valid() && short_sid.valid());
+        missing_guids.body()[4] = ACE_OBJECT_TYPE_PRESENT | ACE_INHERITED_OBJECT_TYPE_PRESENT;
         short_sid.body()[4] = SID_REVISION;
         short_sid.body()[5] = 2;
         short_sid.body()[11] = 5;
 
-        for (raw_acl* acl : { &no_sid, &no_object_flags, &short_sid })
+        for (raw_acl* acl : { &no_mask, &no_sid, &no_object_flags, &missing_guids, &short_sid })
         {
             std::wstring reason;
             EXPECT_FALSE(EvaluateSecurity(system.get(), acl->get(), test_path,
@@ -390,6 +435,7 @@ namespace
         const WORD ace_size = static_cast<WORD>(
             offsetof(ACCESS_ALLOWED_ACE, SidStart) + ::GetLengthSid(system.get()));
         raw_acl acl(ACCESS_ALLOWED_ACE_TYPE, ace_size, static_cast<WORD>(sizeof(ACL) + ace_size - 4));
+        ASSERT_TRUE(acl.valid());
         *reinterpret_cast<ACCESS_MASK*>(acl.body()) = FILE_ALL_ACCESS;
         ASSERT_TRUE(::CopySid(::GetLengthSid(system.get()), acl.body() + sizeof(ACCESS_MASK),
             system.get()));

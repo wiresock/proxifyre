@@ -447,12 +447,17 @@ namespace ProxiFyre
         }
 
         // Links the staging procedure from this build's release tag so the steps match the
-        // checks this binary enforces.
+        // checks this binary enforces. A version that is not a plain major.minor.patch release
+        // number, such as one passed with /p:Version for a test build, has no tag to link to.
         private static string GetZipStagingDocumentationUrl()
         {
             var version = typeof(Program).Assembly
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
-            var reference = string.IsNullOrWhiteSpace(version) ? "main" : "v" + version;
+            Version parsed;
+            var isReleaseVersion = Version.TryParse(version, out parsed) && parsed.Build >= 0 &&
+                                   parsed.Revision < 0 &&
+                                   string.Equals(parsed.ToString(), version, StringComparison.Ordinal);
+            var reference = isReleaseVersion ? "v" + version : "main";
             return "https://github.com/wiresock/proxifyre/blob/" + reference +
                    "/docs/zip-staging.md";
         }
