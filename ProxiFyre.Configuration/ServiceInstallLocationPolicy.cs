@@ -266,7 +266,7 @@ namespace ProxiFyre.Configuration
             // Read the DACL itself rather than GetAccessRules, which omits object ACEs and
             // entry types it cannot express as rules even though Windows can still grant
             // access through them. Anything other than an allow or deny entry is rejected, as
-            // the native launcher does.
+            // the native launcher does, unless it is an inherit-only entry the caller excludes.
             var dacl = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0)
                 .DiscretionaryAcl;
             if (dacl == null)
@@ -277,6 +277,7 @@ namespace ProxiFyre.Configuration
             }
 
             var entries = new List<QualifiedAce>(dacl.Count);
+            var hasUnevaluatedEntry = false;
             for (var index = 0; index < dacl.Count; index++)
             {
                 var entry = dacl[index] as QualifiedAce;
@@ -284,15 +285,24 @@ namespace ProxiFyre.Configuration
                     (entry.AceQualifier != AceQualifier.AccessAllowed &&
                      entry.AceQualifier != AceQualifier.AccessDenied))
                 {
-                    failureReason = "'" + path + "' has a " + dacl[index].AceType +
-                                    " access-control entry at index " + index +
-                                    ", which the service policy cannot evaluate.";
+                    if (!includeInheritedChildRights &&
+                        (dacl[index].PropagationFlags & PropagationFlags.InheritOnly) != 0)
+                    {
+                        hasUnevaluatedEntry = true;
+                        continue;
+                    }
+
+                    failureReason = "'" + path + "' has an access-control entry of type 0x" +
+                                    ((int)dacl[index].AceType).ToString("X2") + " at index " +
+                                    index + ", which the service policy cannot evaluate.";
                     return false;
                 }
                 entries.Add(entry);
             }
 
-            var daclRestrictsOwnerRights = entries.Any(entry =>
+            // An entry that cannot be evaluated is treated as an OWNER RIGHTS restriction, which
+            // only keeps the stricter CREATOR OWNER rule in force, as in the native launcher.
+            var daclRestrictsOwnerRights = hasUnevaluatedEntry || entries.Any(entry =>
                 entry.InheritanceFlags != InheritanceFlags.None &&
                 string.Equals(entry.SecurityIdentifier.Value, OwnerRightsSid,
                     StringComparison.OrdinalIgnoreCase));

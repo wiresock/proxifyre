@@ -131,11 +131,16 @@ namespace ProxiFyre.Tests
                 Is.True, reason);
         }
 
-        [Test]
-        public void OwnerRightsRestrictionKeepsCreatorOwnerInheritanceDangerous()
+        // Object or container inheritance alone is enough: new files or new subdirectories
+        // would receive both entries.
+        [TestCase("(A;OICI;RC;;;OW)")]
+        [TestCase("(A;CIIO;RC;;;OW)")]
+        [TestCase("(A;OI;RC;;;OW)")]
+        public void OwnerRightsRestrictionKeepsCreatorOwnerInheritanceDangerous(
+            string ownerRights)
         {
             var security = CreateDirectorySecurity(DefaultProgramFilesSubdirectorySddl +
-                                                   "(A;OICI;RC;;;OW)");
+                                                   ownerRights);
 
             string reason;
             Assert.Multiple(() =>
@@ -173,6 +178,7 @@ namespace ProxiFyre.Tests
         [TestCase("(OA;;FW;11111111-2222-3333-4444-555555555555;" +
                   "66666666-7777-8888-9999-000000000000;BU)")]
         [TestCase("(XA;;FW;;;BU;(Member_of {SID(BA)}))")]
+        [TestCase("(ZA;;FW;11111111-2222-3333-4444-555555555555;;BU;(Member_of {SID(BA)}))")]
         public void ObjectAndCallbackAllowEntriesAreEvaluated(string entry)
         {
             var security = CreateDirectorySecurity("O:SYD:P(A;;FA;;;SY)" + entry);
@@ -204,20 +210,7 @@ namespace ProxiFyre.Tests
         [Test]
         public void UnsupportedEntryTypeIsRejected()
         {
-            var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-            var dacl = new RawAcl(GenericAcl.AclRevision, 2);
-            dacl.InsertAce(0, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed,
-                unchecked((int)FileSystemRights.FullControl), system, false, null));
-            // A mandatory-label entry, which belongs in the SACL and grants nothing the
-            // policy can reason about.
-            dacl.InsertAce(1, new CustomAce((AceType)0x11, AceFlags.None, new byte[8]));
-            var descriptor = new RawSecurityDescriptor(
-                ControlFlags.DiscretionaryAclPresent | ControlFlags.SelfRelative,
-                system, null, null, dacl);
-            var binary = new byte[descriptor.BinaryLength];
-            descriptor.GetBinaryForm(binary, 0);
-            var security = new DirectorySecurity();
-            security.SetSecurityDescriptorBinaryForm(binary);
+            var security = CreateSecurityWithMandatoryLabelEntry(AceFlags.None);
 
             string reason;
             Assert.Multiple(() =>
@@ -226,7 +219,32 @@ namespace ProxiFyre.Tests
                         @"C:\Program Files\ProxiFyre",
                         ServiceInstallLocationPolicy.PayloadDangerousRights, true, out reason),
                     Is.False);
-                Assert.That(reason, Does.Contain("at index 1"));
+                Assert.That(reason, Does.Contain("entry of type 0x11 at index 1"));
+            });
+        }
+
+        [Test]
+        public void UnsupportedInheritOnlyEntryIsSkippedOnlyForAncestors()
+        {
+            // Matches the native launcher: an ancestor check ignores inherit-only entries before
+            // reading them, while a payload directory check must evaluate them.
+            var security = CreateSecurityWithMandatoryLabelEntry(
+                AceFlags.ContainerInherit | AceFlags.InheritOnly);
+
+            string ancestorReason;
+            string payloadReason;
+            Assert.Multiple(() =>
+            {
+                Assert.That(ServiceInstallLocationPolicy.HasProtectedSecurity(security,
+                        @"C:\Program Files",
+                        ServiceInstallLocationPolicy.AncestorDangerousRights, false,
+                        out ancestorReason),
+                    Is.True, ancestorReason);
+                Assert.That(ServiceInstallLocationPolicy.HasProtectedSecurity(security,
+                        @"C:\Program Files\ProxiFyre",
+                        ServiceInstallLocationPolicy.PayloadDangerousRights, true,
+                        out payloadReason),
+                    Is.False);
             });
         }
 
@@ -272,6 +290,25 @@ namespace ProxiFyre.Tests
             "(A;OICIIOID;GA;;;CO)" +
             "(A;ID;0x1200a9;;;S-1-15-2-1)(A;OICIIOID;GXGR;;;S-1-15-2-1)" +
             "(A;ID;0x1200a9;;;S-1-15-2-2)(A;OICIIOID;GXGR;;;S-1-15-2-2)";
+
+        // A SYSTEM full-control entry followed by a mandatory-label entry, which belongs in the
+        // SACL and grants nothing the policy can reason about. SDDL cannot place it in a DACL.
+        private static DirectorySecurity CreateSecurityWithMandatoryLabelEntry(AceFlags flags)
+        {
+            var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+            var dacl = new RawAcl(GenericAcl.AclRevision, 2);
+            dacl.InsertAce(0, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed,
+                unchecked((int)FileSystemRights.FullControl), system, false, null));
+            dacl.InsertAce(1, new CustomAce((AceType)0x11, flags, new byte[8]));
+            var descriptor = new RawSecurityDescriptor(
+                ControlFlags.DiscretionaryAclPresent | ControlFlags.SelfRelative,
+                system, null, null, dacl);
+            var binary = new byte[descriptor.BinaryLength];
+            descriptor.GetBinaryForm(binary, 0);
+            var security = new DirectorySecurity();
+            security.SetSecurityDescriptorBinaryForm(binary);
+            return security;
+        }
 
         private static DirectorySecurity CreateDirectorySecurity(string sddl)
         {

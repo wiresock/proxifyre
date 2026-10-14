@@ -149,9 +149,13 @@ namespace ProxiFyre::Launcher
     // Returns the ACE that follows previous, or the first ACE when previous is null, once its
     // header and declared size are known to lie entirely inside the ACL, so every later read of
     // the entry stays within the ACL buffer. Callers walk the ACL once with this instead of
-    // calling GetAce for each index, which rescans from the first entry every time.
+    // calling GetAce for each index, which rescans from the first entry every time. Like GetAce,
+    // it rejects an ACL whose revision Windows does not define.
     inline const ACE_HEADER* NextAceWithinAcl(PACL dacl, const ACE_HEADER* previous)
     {
+        if (dacl->AclRevision < MIN_ACL_REVISION || dacl->AclRevision > MAX_ACL_REVISION)
+            return nullptr;
+
         const BYTE* aclBegin = reinterpret_cast<const BYTE*>(dacl);
         const size_t aclSize = dacl->AclSize;
         const size_t offset = previous == nullptr

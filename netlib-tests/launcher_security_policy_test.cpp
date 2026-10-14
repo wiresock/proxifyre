@@ -426,6 +426,31 @@ namespace
         }
     }
 
+    TEST(LauncherSecurityPolicyTest, UndefinedAclRevisionIsRejected)
+    {
+        const well_known_sid system(WinLocalSystemSid);
+        ASSERT_TRUE(system.ok);
+
+        // A well-formed SYSTEM full-control entry in an ACL whose revision Windows does not
+        // define.
+        const WORD ace_size = static_cast<WORD>(
+            offsetof(ACCESS_ALLOWED_ACE, SidStart) + ::GetLengthSid(system.get()));
+        for (const BYTE revision : { BYTE{ 0 }, BYTE{ MAX_ACL_REVISION + 1 } })
+        {
+            raw_acl acl(ACCESS_ALLOWED_ACE_TYPE, ace_size);
+            ASSERT_TRUE(acl.valid());
+            acl.get()->AclRevision = revision;
+            *reinterpret_cast<ACCESS_MASK*>(acl.body()) = FILE_ALL_ACCESS;
+            ASSERT_TRUE(::CopySid(::GetLengthSid(system.get()), acl.body() + sizeof(ACCESS_MASK),
+                system.get()));
+
+            std::wstring reason;
+            EXPECT_FALSE(EvaluateSecurity(system.get(), acl.get(), test_path,
+                kPayloadDangerousRights, true, reason)) << static_cast<int>(revision);
+            EXPECT_TRUE(contains(reason, L"unreadable ACE at index 0")) << reason;
+        }
+    }
+
     TEST(LauncherSecurityPolicyTest, AceExtendingPastTheAclIsRejected)
     {
         const well_known_sid system(WinLocalSystemSid);
