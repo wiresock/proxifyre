@@ -93,7 +93,10 @@ DNS (UDP/TCP port 53) bypasses the proxies by default. To prevent DNS leaks, giv
 "dns": { "mode": "Proxy", "proxyId": "office", "serverOverride": "1.1.1.1" }
 ```
 
-In `Proxy` mode DNS is never sent directly: if the selected proxy cannot carry a query, the query is dropped. See [DNS routing](docs/configuration.md#dns-routing) for the behavior, the TCP port 53 change in `Direct` mode, and limitations.
+In `Proxy` mode DNS is never sent directly: if the selected proxy cannot carry a query, the query is dropped. See [DNS routing](docs/configuration.md#dns-routing) for the behavior and limitations.
+
+> [!IMPORTANT]
+> **Upgrade note — DNS over TCP port 53.** In the default `Direct` DNS mode, which also applies to existing configurations without a `dns` section, DNS over TCP port 53 now always bypasses the proxies, as DNS over UDP port 53 already did. Rules that previously carried TCP port 53 through a proxy, for example a catch-all rule, no longer do so. To route DNS through a proxy, use DNS `Proxy` mode.
 
 See the [configuration reference](docs/configuration.md) for matching rules, authentication, LAN bypass, DNS routing, logging, TLS options, and complete examples. The repository also includes a ready-to-edit [sample configuration](app-config.sample.json).
 

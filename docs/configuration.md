@@ -144,7 +144,7 @@ The optional `dns` object controls conventional DNS: UDP and TCP traffic to dest
 
 UDP and TCP DNS to port 53 bypass every SOCKS5 proxy for both address families, whatever process sends it. This is the behavior of configurations without a `dns` section.
 
-> **Behavior change:** earlier releases bypassed only UDP port 53. TCP port 53 was routed like any other TCP traffic of the owning process, so a catch-all rule could send it through a proxy. In `Direct` mode TCP/53 is now also always direct, so DNS uses one consistent path whether or not an answer was truncated.
+> **Behavior change on upgrade:** earlier releases bypassed only UDP port 53. TCP port 53 was routed like any other TCP traffic of the owning process, so a catch-all or application rule could send it through a proxy. In `Direct` mode, which also applies to existing configurations without a `dns` section, TCP/53 is now always direct as well, so DNS uses one consistent path whether or not an answer was truncated. Rules that previously carried TCP port 53 through a proxy no longer do so; use `Proxy` mode to route DNS through a proxy.
 
 ### Proxy mode
 
