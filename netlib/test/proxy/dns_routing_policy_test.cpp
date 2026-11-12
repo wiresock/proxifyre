@@ -622,3 +622,60 @@ TEST(DnsReplyRestore, NeededOnlyInProxyModeWithAnOverride)
     EXPECT_FALSE(dns_reply_restore_needed(direct, true, true));
     EXPECT_FALSE(dns_reply_restore_needed(direct, false, false));
 }
+
+// 10. Eviction uses insertion order: a refreshed key is not the oldest, the queue of insertion
+//     records stays bounded under repeated refreshes, and inserting into a full table is cheap.
+TEST(DnsUdpOriginTracker, RefreshedKeysAreEvictedByTheirLatestTime)
+{
+    tracker origins{ std::chrono::seconds{ 30 }, 2 };
+    const auto start = clock::now();
+    origins.remember(1, 1, { "a", 53 }, start);
+    origins.remember(2, 1, { "b", 53 }, start + std::chrono::milliseconds{ 1 });
+    origins.remember(1, 1, { "a2", 53 }, start + std::chrono::milliseconds{ 2 }); // refresh: now newest
+    origins.remember(3, 1, { "c", 53 }, start + std::chrono::milliseconds{ 3 });  // evicts key 2
+
+    const auto at = start + std::chrono::milliseconds{ 4 };
+    EXPECT_EQ(origins.resolve(1, 1, at), (endpoint{ "a2", 53 }));
+    EXPECT_FALSE(origins.resolve(2, 1, at).has_value());
+    EXPECT_TRUE(origins.resolve(3, 1, at).has_value());
+    EXPECT_EQ(origins.size(), 2u);
+}
+
+TEST(DnsUdpOriginTracker, InsertionRecordsStayBoundedUnderRepeatedRefreshes)
+{
+    constexpr std::size_t capacity = 64;
+    tracker origins{ std::chrono::seconds{ 30 }, capacity };
+    const auto start = clock::now();
+    for (int i = 0; i < 100000; ++i)
+        origins.remember(static_cast<uint16_t>(i % 8), 7, { "x", 53 }, start + std::chrono::microseconds{ i });
+
+    EXPECT_EQ(origins.size(), 8u);
+    EXPECT_LE(origins.order_records(), 2 * capacity + 16);
+    for (uint16_t port = 0; port < 8; ++port)
+        EXPECT_TRUE(origins.resolve(port, 7, start + std::chrono::seconds{ 1 }).has_value());
+}
+
+TEST(DnsUdpOriginTracker, InsertingIntoAFullTableOfLiveEntriesIsCheap)
+{
+    constexpr std::size_t capacity = 8192;
+    tracker origins{ std::chrono::seconds{ 30 }, capacity };
+    const auto start = clock::now();
+
+    // 200k inserts with the table permanently full of live entries. With a linear scan per
+    // insert this is ~1.6e9 entry visits; with insertion-order eviction it is linear overall.
+    const auto timer = std::chrono::steady_clock::now();
+    for (uint32_t i = 0; i < 200000; ++i)
+        origins.remember(static_cast<uint16_t>(i >> 16), static_cast<uint16_t>(i), { "s", 53 },
+            start + std::chrono::microseconds{ i });
+    const auto elapsed = std::chrono::steady_clock::now() - timer;
+
+    EXPECT_EQ(origins.size(), capacity);
+    EXPECT_LE(origins.order_records(), 2 * capacity + 16);
+    // The newest entries survive, the oldest are evicted.
+    EXPECT_TRUE(origins.resolve(3, static_cast<uint16_t>(199999 & 0xffff), start + std::chrono::seconds{ 1 }).has_value());
+    EXPECT_FALSE(origins.resolve(0, 0, start + std::chrono::seconds{ 1 }).has_value());
+    // Measured on the portable runner: ~10 ms with insertion-order eviction, ~6.7 s with the
+    // earlier per-insert sweep and linear search for the oldest entry. The bound leaves two
+    // orders of magnitude of headroom for slow or sanitized builds and still fails the latter.
+    EXPECT_LT(elapsed, std::chrono::seconds{ 2 });
+}

@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -527,7 +528,14 @@ namespace proxy
         {
         }
 
-        /// Records the original server of a query sent from @p client_port with @p message_id.
+        /**
+         * @brief Records the original server of a query sent from @p client_port with
+         *        @p message_id. Re-remembering a key refreshes its time.
+         *
+         * Runs on the packet thread, so it costs amortized O(1) even when the table is full of
+         * live entries: expired and then oldest entries are found at the front of an
+         * insertion-ordered queue instead of by scanning the table.
+         */
         void remember(const uint16_t client_port, const uint16_t message_id, const Endpoint& original,
             const clock::time_point now = clock::now())
         {
@@ -536,24 +544,24 @@ namespace proxy
 
             if (const auto it = entries_.find(key); it != entries_.end())
             {
+                // The key's earlier queue record becomes stale; it is skipped when it reaches
+                // the front.
                 it->second = entry{ now, original };
+                order_.push_back({ key, now });
+                compact_if_needed_locked();
                 return;
             }
 
             if (entries_.size() >= capacity_)
             {
-                sweep_locked(now);
+                expire_front_locked(now);
                 if (entries_.size() >= capacity_)
-                {
-                    // Still full of live entries: evict the oldest one. Linear, but only reached
-                    // when more than `capacity_` queries are outstanding within one TTL.
-                    const auto oldest = std::min_element(entries_.begin(), entries_.end(),
-                        [](const auto& left, const auto& right) { return left.second.created_at < right.second.created_at; });
-                    entries_.erase(oldest);
-                }
+                    evict_oldest_locked();
             }
 
             entries_.emplace(key, entry{ now, original });
+            order_.push_back({ key, now });
+            compact_if_needed_locked();
         }
 
         /// Returns the original server for a response to @p client_port with @p message_id.
@@ -574,24 +582,39 @@ namespace proxy
             return it->second.original;
         }
 
-        /// Removes expired entries.
+        /// Removes every expired entry (maintenance thread).
         void sweep(const clock::time_point now = clock::now())
         {
             std::scoped_lock lock(lock_);
-            sweep_locked(now);
+            for (auto it = entries_.begin(); it != entries_.end();)
+            {
+                if (now - it->second.created_at > ttl_)
+                    it = entries_.erase(it);
+                else
+                    ++it;
+            }
+            expire_front_locked(now);
         }
 
-        /// Removes every entry (router stop).
+        /// Removes every entry (router start).
         void clear()
         {
             std::scoped_lock lock(lock_);
             entries_.clear();
+            order_.clear();
         }
 
         [[nodiscard]] std::size_t size() const
         {
             std::scoped_lock lock(lock_);
             return entries_.size();
+        }
+
+        /// Number of insertion-order records, including stale ones (bounded; for tests).
+        [[nodiscard]] std::size_t order_records() const
+        {
+            std::scoped_lock lock(lock_);
+            return order_.size();
         }
 
     private:
@@ -601,24 +624,69 @@ namespace proxy
             Endpoint original;
         };
 
+        struct record
+        {
+            uint32_t key;
+            clock::time_point created_at;
+        };
+
         static constexpr uint32_t make_key(const uint16_t client_port, const uint16_t message_id) noexcept
         {
             return (static_cast<uint32_t>(client_port) << 16) | message_id;
         }
 
-        void sweep_locked(const clock::time_point now)
+        /// True when @p r is the current record of a live entry.
+        [[nodiscard]] bool is_current_locked(const record& r) const
         {
-            for (auto it = entries_.begin(); it != entries_.end();)
+            const auto it = entries_.find(r.key);
+            return it != entries_.end() && it->second.created_at == r.created_at;
+        }
+
+        /// Pops expired records from the front, erasing the entries they still describe.
+        void expire_front_locked(const clock::time_point now)
+        {
+            while (!order_.empty() && now - order_.front().created_at > ttl_)
             {
-                if (now - it->second.created_at > ttl_)
-                    it = entries_.erase(it);
-                else
-                    ++it;
+                if (is_current_locked(order_.front()))
+                    entries_.erase(order_.front().key);
+                order_.pop_front();
             }
+        }
+
+        /// Erases the oldest live entry, skipping stale records.
+        void evict_oldest_locked()
+        {
+            while (!order_.empty())
+            {
+                const auto front = order_.front();
+                order_.pop_front();
+                if (is_current_locked(front))
+                {
+                    entries_.erase(front.key);
+                    return;
+                }
+            }
+        }
+
+        /// Keeps the queue bounded when keys are refreshed repeatedly: rebuilds it from the
+        /// live entries, oldest first, once stale records outnumber them.
+        void compact_if_needed_locked()
+        {
+            if (order_.size() <= 2 * capacity_ + 16)
+                return;
+
+            std::vector<record> live;
+            live.reserve(entries_.size());
+            for (const auto& [key, value] : entries_)
+                live.push_back({ key, value.created_at });
+            std::sort(live.begin(), live.end(),
+                [](const record& left, const record& right) { return left.created_at < right.created_at; });
+            order_.assign(live.begin(), live.end());
         }
 
         mutable std::mutex lock_;
         std::unordered_map<uint32_t, entry> entries_;
+        std::deque<record> order_;
         std::chrono::seconds ttl_;
         std::size_t capacity_;
     };
