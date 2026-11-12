@@ -40,7 +40,8 @@ namespace proxy
         not_dns, ///< not conventional DNS: continue with the ordinary application routing
         pass,    ///< DNS that stays direct
         proxy,   ///< redirect to the selected proxy's local listener (dns_route_decision::listener_port)
-        block    ///< DNS that must use the proxy but cannot: drop it, never send it direct
+        block,   ///< DNS that must use the proxy but cannot: drop it, never send it direct
+        defer    ///< addressed to a SOCKS5 server and its sender is not known yet: resolve it later
     };
 
     /// Why Proxy mode blocked a DNS packet; used for throttled diagnostics.
@@ -54,6 +55,7 @@ namespace proxy
         override_family_mismatch, ///< a server override of the other address family is configured
         redirect_failed,          ///< the packet could not be redirected (e.g. fragmented, oversized,
                                   ///< or a TCP segment of a connection opened before ProxiFyre started)
+        upstream_sender_unknown,  ///< addressed to a SOCKS5 server, and its sender could not be resolved
         count
     };
 
@@ -81,33 +83,76 @@ namespace proxy
         bool override_family_matches{};      ///< the override has the family of this packet
     };
 
+    /// Outcome of the recursion guard for a port-53 packet in Proxy mode.
+    enum class dns_upstream_guard : uint8_t
+    {
+        apply_policy, ///< not ProxiFyre's own traffic to a SOCKS5 server: apply the DNS policy
+        exempt,       ///< ProxiFyre's own traffic to one of its SOCKS5 servers: pass it
+        defer,        ///< addressed to a SOCKS5 server, sender not resolved yet: resolve it later
+        drop          ///< addressed to a SOCKS5 server, sender still unresolved: drop it
+    };
+
+    /**
+     * @brief The recursion guard: keeps ProxiFyre's own SOCKS5 traffic out of the DNS proxy.
+     *
+     * Matching the destination against the configured SOCKS5 servers is only a cheap pre-filter.
+     * A host can be both the SOCKS5 server and a resolver, so a packet addressed to it is exempt
+     * only when its sender is ProxiFyre itself; anyone else's query to that host is subject to
+     * the DNS policy like any other. When the sender cannot be determined inline the packet is
+     * deferred to the resolver thread; if it is still unknown there it is dropped: passing it
+     * could leak a query, and redirecting ProxiFyre's own traffic would loop.
+     *
+     * @param destination_matches_upstream The destination is a configured SOCKS5 server (UDP: its
+     *        address; TCP: its address and port).
+     * @param sender_is_proxifyre Whether the resolved owner is ProxiFyre's own process; nullopt
+     *        when the owner is not resolved. Only consulted when the destination matches.
+     * @param sender_lookup_final The lookup used a refreshed connection table (deferred path).
+     */
+    [[nodiscard]] constexpr dns_upstream_guard decide_dns_upstream_guard(
+        const bool destination_matches_upstream,
+        const std::optional<bool> sender_is_proxifyre,
+        const bool sender_lookup_final) noexcept
+    {
+        if (!destination_matches_upstream)
+            return dns_upstream_guard::apply_policy;
+        if (sender_is_proxifyre)
+            return *sender_is_proxifyre ? dns_upstream_guard::exempt : dns_upstream_guard::apply_policy;
+        return sender_lookup_final ? dns_upstream_guard::drop : dns_upstream_guard::defer;
+    }
+
     /**
      * @brief Decides how a captured outbound packet addressed to @p destination_port is routed.
      *
-     * The decision depends only on the destination port, the global mode, and the selected
-     * proxy. It never depends on the process that sent the packet, so traffic from the Windows
-     * DNS Client service (svchost.exe) and from applications with their own resolvers is
-     * treated identically, independently of application rules and exclusions.
+     * Apart from the recursion guard (see decide_dns_upstream_guard()), the decision depends
+     * only on the destination port, the global mode, and the selected proxy. It does not depend
+     * on the process that sent the packet, so traffic from the Windows DNS Client service
+     * (svchost.exe) and from applications with their own resolvers is treated identically,
+     * independently of application rules and exclusions.
      *
-     * @param destination_is_upstream The packet is addressed to one of ProxiFyre's own SOCKS5
-     *        upstream servers (recursion guard: ProxiFyre's own proxy traffic is never captured).
+     * @param guard The recursion guard's outcome for this packet (apply_policy when the
+     *        destination is not a SOCKS5 server).
      */
     [[nodiscard]] constexpr dns_route_decision decide_dns_route(
         const dns_routing_mode mode,
         const uint16_t destination_port,
-        const bool destination_is_upstream,
+        const dns_upstream_guard guard,
         const dns_proxy_target& target) noexcept
     {
         if (destination_port != dns_port)
             return { dns_route_action::not_dns, dns_block_reason::none, 0 };
 
-        if (mode == dns_routing_mode::direct || destination_is_upstream)
+        if (mode == dns_routing_mode::direct || guard == dns_upstream_guard::exempt)
             return { dns_route_action::pass, dns_block_reason::none, 0 };
 
         const auto block = [](const dns_block_reason reason) constexpr
         {
             return dns_route_decision{ dns_route_action::block, reason, 0 };
         };
+
+        if (guard == dns_upstream_guard::defer)
+            return { dns_route_action::defer, dns_block_reason::none, 0 };
+        if (guard == dns_upstream_guard::drop)
+            return block(dns_block_reason::upstream_sender_unknown);
 
         if (!target.selected)
             return block(dns_block_reason::proxy_unavailable);
@@ -141,6 +186,9 @@ namespace proxy
         case dns_block_reason::redirect_failed:
             return "the packet could not be redirected to the DNS proxy (fragmented, oversized, "
                 "not a DNS message, or part of a TCP connection opened before ProxiFyre started)";
+        case dns_block_reason::upstream_sender_unknown:
+            return "the packet is addressed to a configured SOCKS5 server and its sending process could not be "
+                "resolved, so it cannot be identified as ProxiFyre's own traffic";
         default:
             return "unknown";
         }
@@ -494,12 +542,14 @@ namespace proxy
     // Compile-time checks of the decision table's key invariants.
     static_assert(decide_listener_reply(true, false) == listener_reply_action::drop,
         "An untranslatable listener reply must never be passed to the wire.");
-    static_assert(decide_dns_route(dns_routing_mode::direct, 443, false, {}).action == dns_route_action::not_dns,
-        "Non-DNS traffic must keep its ordinary routing.");
-    static_assert(decide_dns_route(dns_routing_mode::direct, dns_port, false, {}).action == dns_route_action::pass,
-        "Direct mode must pass DNS without consulting a proxy.");
-    static_assert(decide_dns_route(dns_routing_mode::proxy, dns_port, false, {}).action == dns_route_action::block,
-        "Proxy mode without a usable proxy must fail closed.");
-    static_assert(decide_dns_route(dns_routing_mode::proxy, dns_port, true, {}).action == dns_route_action::pass,
-        "ProxiFyre's own upstream traffic must never be captured recursively.");
+    static_assert(decide_dns_route(dns_routing_mode::direct, 443, dns_upstream_guard::apply_policy, {}).action ==
+        dns_route_action::not_dns, "Non-DNS traffic must keep its ordinary routing.");
+    static_assert(decide_dns_route(dns_routing_mode::direct, dns_port, dns_upstream_guard::apply_policy, {}).action ==
+        dns_route_action::pass, "Direct mode must pass DNS without consulting a proxy.");
+    static_assert(decide_dns_route(dns_routing_mode::proxy, dns_port, dns_upstream_guard::apply_policy, {}).action ==
+        dns_route_action::block, "Proxy mode without a usable proxy must fail closed.");
+    static_assert(decide_dns_route(dns_routing_mode::proxy, dns_port, dns_upstream_guard::exempt, {}).action ==
+        dns_route_action::pass, "ProxiFyre's own upstream traffic must never be captured recursively.");
+    static_assert(decide_dns_upstream_guard(true, std::nullopt, true) == dns_upstream_guard::drop,
+        "Unattributed traffic to a SOCKS5 server must be neither passed nor redirected.");
 }

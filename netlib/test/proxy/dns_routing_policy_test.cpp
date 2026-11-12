@@ -32,6 +32,8 @@ namespace
 
     constexpr auto direct = dns_routing_mode::direct;
     constexpr auto proxy_mode = dns_routing_mode::proxy;
+    constexpr auto apply = proxy::dns_upstream_guard::apply_policy;
+    constexpr auto exempt = proxy::dns_upstream_guard::exempt;
 
     /// A selected proxy with listeners for every transport and family, mirroring the router's
     /// dns_listener_port_locked() for one proxy index.
@@ -85,10 +87,10 @@ TEST(DnsRoutingPolicy, DirectModePassesUdpAndTcpDnsForBothFamilies)
     const dns_proxy configured{};
     for (const auto& c : all_cases)
     {
-        EXPECT_EQ(decide_dns_route(direct, dns_port, false, configured.target(c.transport, c.family)).action,
+        EXPECT_EQ(decide_dns_route(direct, dns_port, apply, configured.target(c.transport, c.family)).action,
             dns_route_action::pass);
         // No proxy selected at all: Direct still passes.
-        EXPECT_EQ(decide_dns_route(direct, dns_port, false, dns_proxy_target{}).action, dns_route_action::pass);
+        EXPECT_EQ(decide_dns_route(direct, dns_port, apply, dns_proxy_target{}).action, dns_route_action::pass);
     }
 }
 
@@ -96,10 +98,10 @@ TEST(DnsRoutingPolicy, DirectModePassesUdpAndTcpDnsForBothFamilies)
 TEST(DnsRoutingPolicy, ProxyModeRedirectsToTheListenerOfTheTransportAndFamily)
 {
     const dns_proxy p{};
-    const auto udp4 = decide_dns_route(proxy_mode, dns_port, false, p.target(dns_transport::udp, dns_family::ipv4));
-    const auto udp6 = decide_dns_route(proxy_mode, dns_port, false, p.target(dns_transport::udp, dns_family::ipv6));
-    const auto tcp4 = decide_dns_route(proxy_mode, dns_port, false, p.target(dns_transport::tcp, dns_family::ipv4));
-    const auto tcp6 = decide_dns_route(proxy_mode, dns_port, false, p.target(dns_transport::tcp, dns_family::ipv6));
+    const auto udp4 = decide_dns_route(proxy_mode, dns_port, apply, p.target(dns_transport::udp, dns_family::ipv4));
+    const auto udp6 = decide_dns_route(proxy_mode, dns_port, apply, p.target(dns_transport::udp, dns_family::ipv6));
+    const auto tcp4 = decide_dns_route(proxy_mode, dns_port, apply, p.target(dns_transport::tcp, dns_family::ipv4));
+    const auto tcp6 = decide_dns_route(proxy_mode, dns_port, apply, p.target(dns_transport::tcp, dns_family::ipv6));
 
     EXPECT_EQ(udp4.action, dns_route_action::proxy);
     EXPECT_EQ(udp4.listener_port, p.udp4);
@@ -118,13 +120,13 @@ TEST(DnsRoutingPolicy, DecisionDoesNotDependOnTheSendingProcess)
 {
     const dns_proxy p{};
     const auto target = p.target(dns_transport::udp, dns_family::ipv4);
-    const auto expected = decide_dns_route(proxy_mode, dns_port, false, target);
+    const auto expected = decide_dns_route(proxy_mode, dns_port, apply, target);
 
     // The only inputs are the mode, the destination port, the upstream guard, and the proxy.
     // Calling the decision repeatedly (as each sender would) yields the same result.
     for (int sender = 0; sender < 4; ++sender)
     {
-        const auto decision = decide_dns_route(proxy_mode, dns_port, false, target);
+        const auto decision = decide_dns_route(proxy_mode, dns_port, apply, target);
         EXPECT_EQ(decision.action, expected.action);
         EXPECT_EQ(decision.listener_port, expected.listener_port);
     }
@@ -137,7 +139,7 @@ TEST(DnsRoutingPolicy, ProxyModeBlocksInsteadOfFallingBackToDirect)
     for (const auto& c : all_cases)
     {
         (void)c;
-        const auto d = decide_dns_route(proxy_mode, dns_port, false, dns_proxy_target{});
+        const auto d = decide_dns_route(proxy_mode, dns_port, apply, dns_proxy_target{});
         EXPECT_EQ(d.action, dns_route_action::block);
         EXPECT_EQ(d.reason, dns_block_reason::proxy_unavailable);
     }
@@ -145,28 +147,28 @@ TEST(DnsRoutingPolicy, ProxyModeBlocksInsteadOfFallingBackToDirect)
     // The proxy lacks the transport (unsupported protocol combination).
     dns_proxy tcp_only{};
     tcp_only.udp = false;
-    auto d = decide_dns_route(proxy_mode, dns_port, false, tcp_only.target(dns_transport::udp, dns_family::ipv4));
+    auto d = decide_dns_route(proxy_mode, dns_port, apply, tcp_only.target(dns_transport::udp, dns_family::ipv4));
     EXPECT_EQ(d.action, dns_route_action::block);
     EXPECT_EQ(d.reason, dns_block_reason::transport_unsupported);
 
     // The proxy does not accept IPv6 destinations.
     dns_proxy v4_only{};
     v4_only.ipv6 = false;
-    d = decide_dns_route(proxy_mode, dns_port, false, v4_only.target(dns_transport::tcp, dns_family::ipv6));
+    d = decide_dns_route(proxy_mode, dns_port, apply, v4_only.target(dns_transport::tcp, dns_family::ipv6));
     EXPECT_EQ(d.action, dns_route_action::block);
     EXPECT_EQ(d.reason, dns_block_reason::family_unsupported);
 
     // The listener is not running (for example the IPv6 listener failed to start).
     dns_proxy no_v6_listener{};
     no_v6_listener.udp6 = 0;
-    d = decide_dns_route(proxy_mode, dns_port, false, no_v6_listener.target(dns_transport::udp, dns_family::ipv6));
+    d = decide_dns_route(proxy_mode, dns_port, apply, no_v6_listener.target(dns_transport::udp, dns_family::ipv6));
     EXPECT_EQ(d.action, dns_route_action::block);
     EXPECT_EQ(d.reason, dns_block_reason::listener_unavailable);
 
     // A missing listener port value and an explicit zero are both unusable.
     auto target = dns_proxy{}.target(dns_transport::udp, dns_family::ipv4);
     target.listener_port = std::nullopt;
-    EXPECT_EQ(decide_dns_route(proxy_mode, dns_port, false, target).action, dns_route_action::block);
+    EXPECT_EQ(decide_dns_route(proxy_mode, dns_port, apply, target).action, dns_route_action::block);
 }
 
 // 6. A server override applies to queries of its own family; queries of the other family are
@@ -178,32 +180,67 @@ TEST(DnsRoutingPolicy, ServerOverrideFamilyIsHandledExplicitly)
 
     for (const auto transport : { dns_transport::udp, dns_transport::tcp })
     {
-        EXPECT_EQ(decide_dns_route(proxy_mode, dns_port, false, with_v4_override.target(transport, dns_family::ipv4)).action,
+        EXPECT_EQ(decide_dns_route(proxy_mode, dns_port, apply, with_v4_override.target(transport, dns_family::ipv4)).action,
             dns_route_action::proxy);
 
-        const auto other = decide_dns_route(proxy_mode, dns_port, false, with_v4_override.target(transport, dns_family::ipv6));
+        const auto other = decide_dns_route(proxy_mode, dns_port, apply, with_v4_override.target(transport, dns_family::ipv6));
         EXPECT_EQ(other.action, dns_route_action::block);
         EXPECT_EQ(other.reason, dns_block_reason::override_family_mismatch);
     }
 
     dns_proxy with_v6_override{};
     with_v6_override.server_override = dns_family::ipv6;
-    EXPECT_EQ(decide_dns_route(proxy_mode, dns_port, false, with_v6_override.target(dns_transport::udp, dns_family::ipv6)).action,
+    EXPECT_EQ(decide_dns_route(proxy_mode, dns_port, apply, with_v6_override.target(dns_transport::udp, dns_family::ipv6)).action,
         dns_route_action::proxy);
-    EXPECT_EQ(decide_dns_route(proxy_mode, dns_port, false, with_v6_override.target(dns_transport::udp, dns_family::ipv4)).action,
+    EXPECT_EQ(decide_dns_route(proxy_mode, dns_port, apply, with_v6_override.target(dns_transport::udp, dns_family::ipv4)).action,
         dns_route_action::block);
 }
 
-// 11. Recursion prevention: ProxiFyre's own traffic to an upstream SOCKS5 server (even one
-//     listening on port 53) is never redirected into the DNS proxy.
-TEST(DnsRoutingPolicy, UpstreamProxyTrafficIsNeverCaptured)
+// 11. Recursion prevention: a packet to a configured SOCKS5 server is exempt only when its sender
+//     is ProxiFyre itself. Another process's query to a host that is both the SOCKS5 server and a
+//     resolver is subject to the policy; an unattributed one is deferred, then dropped.
+TEST(DnsRoutingPolicy, UpstreamGuardExemptsOnlyProxiFyresOwnTraffic)
+{
+    using proxy::decide_dns_upstream_guard;
+    using guard = proxy::dns_upstream_guard;
+
+    // Not addressed to a SOCKS5 server: the sender is irrelevant.
+    EXPECT_EQ(decide_dns_upstream_guard(false, std::nullopt, false), guard::apply_policy);
+    EXPECT_EQ(decide_dns_upstream_guard(false, true, true), guard::apply_policy);
+
+    EXPECT_EQ(decide_dns_upstream_guard(true, true, false), guard::exempt);
+    EXPECT_EQ(decide_dns_upstream_guard(true, true, true), guard::exempt);
+    EXPECT_EQ(decide_dns_upstream_guard(true, false, false), guard::apply_policy);
+    EXPECT_EQ(decide_dns_upstream_guard(true, false, true), guard::apply_policy);
+    EXPECT_EQ(decide_dns_upstream_guard(true, std::nullopt, false), guard::defer);
+    EXPECT_EQ(decide_dns_upstream_guard(true, std::nullopt, true), guard::drop);
+}
+
+TEST(DnsRoutingPolicy, UpstreamGuardOutcomesMapToFailClosedActions)
 {
     const dns_proxy p{};
     for (const auto& c : all_cases)
     {
-        EXPECT_EQ(decide_dns_route(proxy_mode, dns_port, true, p.target(c.transport, c.family)).action,
+        const auto target = p.target(c.transport, c.family);
+
+        // ProxiFyre's own traffic passes, even with no usable DNS proxy.
+        EXPECT_EQ(decide_dns_route(proxy_mode, dns_port, exempt, target).action, dns_route_action::pass);
+        EXPECT_EQ(decide_dns_route(proxy_mode, dns_port, exempt, dns_proxy_target{}).action, dns_route_action::pass);
+
+        // Another process's query to the SOCKS5 host is proxied like any other query.
+        const auto other = decide_dns_route(proxy_mode, dns_port, apply, target);
+        EXPECT_EQ(other.action, dns_route_action::proxy);
+
+        // Unknown sender: deferred inline, dropped after the deferred lookup; never passed.
+        EXPECT_EQ(decide_dns_route(proxy_mode, dns_port, proxy::dns_upstream_guard::defer, target).action,
+            dns_route_action::defer);
+        const auto dropped = decide_dns_route(proxy_mode, dns_port, proxy::dns_upstream_guard::drop, target);
+        EXPECT_EQ(dropped.action, dns_route_action::block);
+        EXPECT_EQ(dropped.reason, dns_block_reason::upstream_sender_unknown);
+
+        // Direct mode passes DNS whatever the guard says.
+        EXPECT_EQ(decide_dns_route(direct, dns_port, proxy::dns_upstream_guard::drop, target).action,
             dns_route_action::pass);
-        EXPECT_EQ(decide_dns_route(proxy_mode, dns_port, true, dns_proxy_target{}).action, dns_route_action::pass);
     }
 }
 
@@ -217,9 +254,9 @@ TEST(DnsRoutingPolicy, NonDnsTrafficIsNotClassified)
     {
         for (const auto mode : { direct, proxy_mode })
         {
-            EXPECT_EQ(decide_dns_route(mode, port, false, p.target(dns_transport::udp, dns_family::ipv4)).action,
+            EXPECT_EQ(decide_dns_route(mode, port, apply, p.target(dns_transport::udp, dns_family::ipv4)).action,
                 dns_route_action::not_dns) << port;
-            EXPECT_EQ(decide_dns_route(mode, port, true, dns_proxy_target{}).action, dns_route_action::not_dns) << port;
+            EXPECT_EQ(decide_dns_route(mode, port, exempt, dns_proxy_target{}).action, dns_route_action::not_dns) << port;
         }
     }
 }
@@ -231,8 +268,8 @@ TEST(DnsRoutingPolicy, TruncatedUdpAnswerTcpRetryUsesTheSameProxy)
     dns_proxy p{};
     p.server_override = dns_family::ipv4;
 
-    const auto udp = decide_dns_route(proxy_mode, dns_port, false, p.target(dns_transport::udp, dns_family::ipv4));
-    const auto tcp = decide_dns_route(proxy_mode, dns_port, false, p.target(dns_transport::tcp, dns_family::ipv4));
+    const auto udp = decide_dns_route(proxy_mode, dns_port, apply, p.target(dns_transport::udp, dns_family::ipv4));
+    const auto tcp = decide_dns_route(proxy_mode, dns_port, apply, p.target(dns_transport::tcp, dns_family::ipv4));
     EXPECT_EQ(udp.action, dns_route_action::proxy);
     EXPECT_EQ(tcp.action, dns_route_action::proxy);
     EXPECT_EQ(udp.listener_port, p.udp4);

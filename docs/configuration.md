@@ -190,7 +190,7 @@ Proxy with an IPv4 override for a configuration that uses a router-provided reso
 
 ### Recursion and ProxiFyre's own traffic
 
-SOCKS5 endpoint host names are resolved once while the configuration is loaded, before packet filtering starts, so that lookup is never captured. Traffic addressed to a configured SOCKS5 server itself (TCP to its address and port, UDP to its address) is never redirected, even if the server listens on port 53. A consequence is that a DNS query addressed to the SOCKS5 server's own IP address is sent directly to that server.
+SOCKS5 endpoint host names are resolved once while the configuration is loaded, before packet filtering starts, so that lookup is never captured. ProxiFyre's own traffic to a configured SOCKS5 server is never redirected into the DNS proxy, even if the server listens on port 53: a port-53 packet addressed to a SOCKS5 server (TCP: its address and port; UDP: its address) is exempt only when its sending process is ProxiFyre itself. Queries from any other process to a host that is both the SOCKS5 server and a resolver follow the DNS policy like any other query, including `serverOverride`. If the sender of such a packet cannot be determined, even after the connection table is refreshed, the packet is dropped rather than passed or redirected.
 
 ### Limitations
 

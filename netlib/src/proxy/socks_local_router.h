@@ -2196,11 +2196,12 @@ namespace proxy
 
         /**
          * @brief True when @p destination (and, for TCP, @p port) is one of ProxiFyre's own
-         *        SOCKS5 upstream servers. Such traffic is never captured by the DNS policy so a
-         *        SOCKS5 server listening on port 53 cannot cause a redirect loop. UDP is matched by
-         *        address only because a UDP ASSOCIATE relay port is unrelated to the configured
-         *        port; this mirrors the upstream PASS filters installed by add_socks5_proxy().
-         *        The caller holds lock_.
+         *        SOCKS5 upstream servers. This is only the cheap pre-filter of the recursion guard
+         *        (decide_dns_upstream_guard()): a matching port-53 packet is exempt from the DNS
+         *        policy only when its sender is ProxiFyre itself, so a SOCKS5 server listening on
+         *        port 53 cannot cause a redirect loop while other processes' queries to a host that
+         *        is also a resolver are still proxied. UDP is matched by address only because a UDP
+         *        ASSOCIATE relay port is unrelated to the configured port. The caller holds lock_.
          */
         template <typename AddrT, dns_transport Transport>
         bool is_upstream_destination_locked(const AddrT& destination, const uint16_t port) const
@@ -2236,43 +2237,70 @@ namespace proxy
         };
 
         /**
+         * @brief Whether a resolved owner is ProxiFyre itself; nullopt when the owner is unknown
+         *        (no owner, or the shared unresolved default owner).
+         */
+        static std::optional<bool> sender_is_proxifyre(const std::shared_ptr<iphelper::network_process>& owner) noexcept
+        {
+            if (!owner || !owner->resolved)
+                return std::nullopt;
+            return owner->id == ::GetCurrentProcessId();
+        }
+
+        /**
          * @brief Applies the global DNS policy to an outbound packet addressed to
          *        @p destination : @p destination_port. Non-DNS packets return not_dns without
          *        taking any lock.
+         *
+         * @param postponed The packet is being processed by the deferred-resolve thread with a
+         *        refreshed connection table; the result is then never `defer`.
+         * @param sender_lookup (bool refresh) -> std::optional<bool>: whether the packet's sender
+         *        is ProxiFyre (see sender_is_proxifyre()). Called only for packets addressed to a
+         *        configured SOCKS5 server in Proxy mode, and never while lock_ is held.
          */
-        template <typename AddrT, dns_transport Transport>
-        dns_route<AddrT> decide_dns(const AddrT& destination, const uint16_t destination_port)
+        template <typename AddrT, dns_transport Transport, typename SenderLookup>
+        dns_route<AddrT> decide_dns(const AddrT& destination, const uint16_t destination_port, const bool postponed,
+            SenderLookup&& sender_lookup)
         {
             if (destination_port != dns_port)
                 return {};
 
-            std::shared_lock lock(lock_);
-
-            if (dns_mode_ == dns_routing_mode::direct)
-                return { decide_dns_route(dns_mode_, destination_port, false, {}), std::nullopt };
-
             constexpr auto v4 = std::is_same_v<AddrT, net::ip_address_v4>;
 
             dns_proxy_target target;
-            target.selected = dns_proxy_id_.has_value() && *dns_proxy_id_ < proxy_protocols_.size();
-            if (target.selected)
+            bool destination_matches_upstream = false;
+            std::optional<net::ip_endpoint<AddrT>> server_override;
             {
-                const auto id = *dns_proxy_id_;
-                target.transport_supported = Transport == dns_transport::tcp
-                    ? protocol_supports_tcp(proxy_protocols_[id])
-                    : protocol_supports_udp(proxy_protocols_[id]);
-                target.family_supported = id >= proxy_address_families_.size() ||
-                    (v4 ? family_supports_ipv4(proxy_address_families_[id]) : family_supports_ipv6(proxy_address_families_[id]));
-                target.listener_port = dns_listener_port_locked<AddrT, Transport>();
+                std::shared_lock lock(lock_);
+
+                if (dns_mode_ == dns_routing_mode::direct)
+                    return { decide_dns_route(dns_mode_, destination_port, dns_upstream_guard::apply_policy, {}), std::nullopt };
+
+                target.selected = dns_proxy_id_.has_value() && *dns_proxy_id_ < proxy_protocols_.size();
+                if (target.selected)
+                {
+                    const auto id = *dns_proxy_id_;
+                    target.transport_supported = Transport == dns_transport::tcp
+                        ? protocol_supports_tcp(proxy_protocols_[id])
+                        : protocol_supports_udp(proxy_protocols_[id]);
+                    target.family_supported = id >= proxy_address_families_.size() ||
+                        (v4 ? family_supports_ipv4(proxy_address_families_[id]) : family_supports_ipv6(proxy_address_families_[id]));
+                    target.listener_port = dns_listener_port_locked<AddrT, Transport>();
+                }
+
+                target.override_configured = dns_server_override_v4_.has_value() || dns_server_override_v6_.has_value();
+                target.override_family_matches = dns_server_override_for<AddrT>().has_value();
+                server_override = dns_server_override_for<AddrT>();
+                destination_matches_upstream = is_upstream_destination_locked<AddrT, Transport>(destination, destination_port);
             }
 
-            target.override_configured = dns_server_override_v4_.has_value() || dns_server_override_v6_.has_value();
-            target.override_family_matches = dns_server_override_for<AddrT>().has_value();
+            // The DNS mode and proxy selection cannot change while the router runs
+            // (set_dns_routing() refuses), so releasing lock_ before the process lookup is safe.
+            const auto guard = decide_dns_upstream_guard(destination_matches_upstream,
+                destination_matches_upstream ? sender_lookup(postponed) : std::optional<bool>{}, postponed);
 
-            const auto decision = decide_dns_route(dns_mode_, destination_port,
-                is_upstream_destination_locked<AddrT, Transport>(destination, destination_port), target);
-
-            return { decision, decision.action == dns_route_action::proxy ? dns_server_override_for<AddrT>() : std::nullopt };
+            const auto decision = decide_dns_route(dns_routing_mode::proxy, destination_port, guard, target);
+            return { decision, decision.action == dns_route_action::proxy ? server_override : std::nullopt };
         }
 
         /**
@@ -2319,6 +2347,14 @@ namespace proxy
             if (route.decision.action == dns_route_action::block)
             {
                 note_dns_block<AddrT, dns_transport::udp>(route.decision.reason);
+                return packet_filter::packet_action{ action_type::drop };
+            }
+
+            if (route.decision.action != dns_route_action::proxy)
+            {
+                // `defer` is handled by the caller (queued for deferred resolution); anything
+                // else that is not a redirect must fail closed.
+                note_dns_block<AddrT, dns_transport::udp>(dns_block_reason::upstream_sender_unknown);
                 return packet_filter::packet_action{ action_type::drop };
             }
 
@@ -2385,6 +2421,14 @@ namespace proxy
             if (route.decision.action == dns_route_action::block)
             {
                 note_dns_block<AddrT, dns_transport::tcp>(route.decision.reason);
+                return packet_filter::packet_action{ action_type::drop };
+            }
+
+            if (route.decision.action != dns_route_action::proxy)
+            {
+                // `defer` is handled by the caller (queued for deferred resolution); anything
+                // else that is not a redirect must fail closed.
+                note_dns_block<AddrT, dns_transport::tcp>(dns_block_reason::upstream_sender_unknown);
                 return packet_filter::packet_action{ action_type::drop };
             }
 
@@ -2585,9 +2629,18 @@ namespace proxy
             // independently of process attribution and application rules: Direct passes it,
             // Proxy redirects it to the DNS proxy or drops it.
             if (const auto dns = decide_dns<net::ip_address_v4, dns_transport::udp>(
-                    net::ip_address_v4{ ip_header->ip_dst }, ntohs(udp_header->th_dport));
+                    net::ip_address_v4{ ip_header->ip_dst }, ntohs(udp_header->th_dport), postponed,
+                    [&](const bool refresh)
+                    {
+                        const net::ip_endpoint<net::ip_address_v4> sender{ ip_header->ip_src, ntohs(udp_header->th_sport) };
+                        return sender_is_proxifyre(refresh
+                            ? process_lookup_v4_.lookup_process_for_udp<true>(sender)
+                            : process_lookup_v4_.lookup_process_for_udp<false>(sender));
+                    });
                 dns.decision.action != dns_route_action::not_dns)
             {
+                if (dns.decision.action == dns_route_action::defer)
+                    return std::nullopt;
                 return handle_dns_udp<net::ip_address_v4>(buffer, dns, net::ip_address_v4{ ip_header->ip_dst },
                     ntohs(udp_header->th_sport), ntohs(udp_header->th_dport),
                     reinterpret_cast<const uint8_t*>(udp_header + 1), captured_udp_payload_size(buffer, udp_header));
@@ -2707,9 +2760,19 @@ namespace proxy
             // now unconditionally direct (previously it was routed like any other TCP traffic of
             // the owning process).
             if (const auto dns = decide_dns<net::ip_address_v4, dns_transport::tcp>(
-                    net::ip_address_v4{ ip_header->ip_dst }, ntohs(tcp_header->th_dport));
+                    net::ip_address_v4{ ip_header->ip_dst }, ntohs(tcp_header->th_dport), postponed,
+                    [&](const bool refresh)
+                    {
+                        const net::ip_session<net::ip_address_v4> session{ ip_header->ip_src, ip_header->ip_dst,
+                            ntohs(tcp_header->th_sport), ntohs(tcp_header->th_dport) };
+                        return sender_is_proxifyre(refresh
+                            ? process_lookup_v4_.lookup_process_for_tcp<true>(session)
+                            : process_lookup_v4_.lookup_process_for_tcp<false>(session));
+                    });
                 dns.decision.action != dns_route_action::not_dns)
             {
+                if (dns.decision.action == dns_route_action::defer)
+                    return std::nullopt;
                 return handle_dns_tcp<net::ip_address_v4>(buffer, dns, net::ip_address_v4{ ip_header->ip_dst },
                     ntohs(tcp_header->th_sport), ntohs(tcp_header->th_dport), tcp_header->th_flags);
             }
@@ -2891,9 +2954,18 @@ namespace proxy
 
             // Conventional DNS follows the global DNS policy (mirrors the IPv4 path).
             if (const auto dns = decide_dns<net::ip_address_v6, dns_transport::udp>(
-                    net::ip_address_v6{ ip_header->ip6_dst }, ntohs(udp_header->th_dport));
+                    net::ip_address_v6{ ip_header->ip6_dst }, ntohs(udp_header->th_dport), postponed,
+                    [&](const bool refresh)
+                    {
+                        const net::ip_endpoint<net::ip_address_v6> sender{ ip_header->ip6_src, ntohs(udp_header->th_sport) };
+                        return sender_is_proxifyre(refresh
+                            ? process_lookup_v6_.lookup_process_for_udp<true>(sender)
+                            : process_lookup_v6_.lookup_process_for_udp<false>(sender));
+                    });
                 dns.decision.action != dns_route_action::not_dns)
             {
+                if (dns.decision.action == dns_route_action::defer)
+                    return std::nullopt;
                 return handle_dns_udp<net::ip_address_v6>(buffer, dns, net::ip_address_v6{ ip_header->ip6_dst },
                     ntohs(udp_header->th_sport), ntohs(udp_header->th_dport),
                     reinterpret_cast<const uint8_t*>(udp_header + 1), captured_udp_payload_size(buffer, udp_header));
@@ -3007,9 +3079,19 @@ namespace proxy
 
             // Conventional DNS over TCP follows the global DNS policy (mirrors the IPv4 path).
             if (const auto dns = decide_dns<net::ip_address_v6, dns_transport::tcp>(
-                    net::ip_address_v6{ ip_header->ip6_dst }, ntohs(tcp_header->th_dport));
+                    net::ip_address_v6{ ip_header->ip6_dst }, ntohs(tcp_header->th_dport), postponed,
+                    [&](const bool refresh)
+                    {
+                        const net::ip_session<net::ip_address_v6> session{ ip_header->ip6_src, ip_header->ip6_dst,
+                            ntohs(tcp_header->th_sport), ntohs(tcp_header->th_dport) };
+                        return sender_is_proxifyre(refresh
+                            ? process_lookup_v6_.lookup_process_for_tcp<true>(session)
+                            : process_lookup_v6_.lookup_process_for_tcp<false>(session));
+                    });
                 dns.decision.action != dns_route_action::not_dns)
             {
+                if (dns.decision.action == dns_route_action::defer)
+                    return std::nullopt;
                 return handle_dns_tcp<net::ip_address_v6>(buffer, dns, net::ip_address_v6{ ip_header->ip6_dst },
                     ntohs(tcp_header->th_sport), ntohs(tcp_header->th_dport), tcp_header->th_flags);
             }
