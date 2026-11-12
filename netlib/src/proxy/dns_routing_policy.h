@@ -56,6 +56,7 @@ namespace proxy
         redirect_failed,          ///< the packet could not be redirected (e.g. fragmented, oversized,
                                   ///< or a TCP segment of a connection opened before ProxiFyre started)
         upstream_sender_unknown,  ///< addressed to a SOCKS5 server, and its sender could not be resolved
+        fragmented,               ///< the first fragment of a fragmented datagram addressed to port 53
         count
     };
 
@@ -186,12 +187,121 @@ namespace proxy
         case dns_block_reason::redirect_failed:
             return "the packet could not be redirected to the DNS proxy (fragmented, oversized, "
                 "not a DNS message, or part of a TCP connection opened before ProxiFyre started)";
+        case dns_block_reason::fragmented:
+            return "the datagram is fragmented and cannot be redirected through the DNS proxy; only its first "
+                "fragment, which carries the port, is dropped";
         case dns_block_reason::upstream_sender_unknown:
             return "the packet is addressed to a configured SOCKS5 server and its sending process could not be "
                 "resolved, so it cannot be identified as ProxiFyre's own traffic";
         default:
             return "unknown";
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Fragments
+    //
+    // Only the first fragment of a fragmented datagram carries the transport header, so only it
+    // can be classified as DNS. Redirection rewrites single packets, so a fragmented DNS datagram
+    // cannot be sent through the DNS proxy; in Proxy mode its first fragment is dropped, which
+    // keeps the datagram from being reassembled at the real server. Later fragments carry no
+    // ports and are left alone, so unrelated fragmented traffic is not affected.
+    // ---------------------------------------------------------------------------------------
+
+    /// Fragmentation state of an IPv4 packet.
+    enum class ipv4_fragment : uint8_t
+    {
+        none,  ///< not fragmented
+        first, ///< fragment offset 0 with More Fragments set: carries the transport header
+        later  ///< non-zero fragment offset: no transport header, its "ports" are payload bytes
+    };
+
+    /// Classifies an IPv4 packet from its flags/fragment-offset field (host byte order).
+    [[nodiscard]] constexpr ipv4_fragment classify_ipv4_fragment(const uint16_t flags_and_offset) noexcept
+    {
+        if ((flags_and_offset & 0x1fff) != 0)
+            return ipv4_fragment::later;
+        return (flags_and_offset & 0x2000) != 0 ? ipv4_fragment::first : ipv4_fragment::none;
+    }
+
+    /**
+     * @brief Applies fragmentation to a DNS routing decision: a datagram that would be redirected
+     *        but is fragmented cannot be, so it is blocked instead of being passed.
+     */
+    [[nodiscard]] constexpr dns_route_decision apply_fragmentation(const dns_route_decision decision,
+        const bool first_fragment) noexcept
+    {
+        if (first_fragment && decision.action == dns_route_action::proxy)
+            return { dns_route_action::block, dns_block_reason::fragmented, 0 };
+        return decision;
+    }
+
+    /// Upper-layer protocol and destination port read from the first fragment of an IPv6 datagram.
+    struct ipv6_first_fragment
+    {
+        uint8_t protocol{};          ///< IPPROTO_UDP (17) or IPPROTO_TCP (6)
+        uint16_t destination_port{}; ///< host byte order
+    };
+
+    /**
+     * @brief For an IPv6 packet that is the first fragment (offset 0) of a fragmented datagram
+     *        whose upper-layer header is UDP or TCP, returns that protocol and its destination
+     *        port.
+     *
+     * Walks the hop-by-hop, routing, and destination-options extension headers and the
+     * fragment header. Returns std::nullopt for an unfragmented packet (the normal path handles
+     * it), a later fragment (no ports), another upper-layer protocol, or a header chain that is
+     * truncated within @p size bytes.
+     *
+     * @param ipv6_packet The IPv6 header followed by the captured payload.
+     */
+    [[nodiscard]] constexpr std::optional<ipv6_first_fragment> parse_ipv6_first_fragment(
+        const uint8_t* ipv6_packet, const std::size_t size) noexcept
+    {
+        constexpr std::size_t ipv6_header_size = 40;
+        constexpr uint8_t hop_by_hop = 0, tcp = 6, udp = 17, routing = 43, fragment = 44, destination_options = 60;
+
+        if (ipv6_packet == nullptr || size < ipv6_header_size || (ipv6_packet[0] >> 4) != 6)
+            return std::nullopt;
+
+        uint8_t next = ipv6_packet[6];
+        std::size_t offset = ipv6_header_size;
+        bool fragmented = false;
+
+        // A bound on the chain length keeps a malformed chain from looping.
+        for (int headers = 0; headers < 16; ++headers)
+        {
+            if (next == hop_by_hop || next == routing || next == destination_options)
+            {
+                if (offset + 2 > size)
+                    return std::nullopt;
+                const auto length = (static_cast<std::size_t>(ipv6_packet[offset + 1]) + 1) * 8;
+                next = ipv6_packet[offset];
+                offset += length;
+                continue;
+            }
+
+            if (next == fragment)
+            {
+                if (fragmented || offset + 8 > size)
+                    return std::nullopt;
+                const auto offset_and_flags = static_cast<uint16_t>((ipv6_packet[offset + 2] << 8) | ipv6_packet[offset + 3]);
+                if ((offset_and_flags >> 3) != 0)
+                    return std::nullopt; // a later fragment: no upper-layer header
+                fragmented = true;
+                next = ipv6_packet[offset];
+                offset += 8;
+                continue;
+            }
+
+            if (!fragmented || (next != udp && next != tcp) || offset + 4 > size)
+                return std::nullopt;
+
+            return ipv6_first_fragment{ next,
+                static_cast<uint16_t>((ipv6_packet[offset + 2] << 8) | ipv6_packet[offset + 3]) };
+        }
+
+        return std::nullopt;
     }
 
     /// What a packet handler does with an outbound packet whose source port is the port of one of

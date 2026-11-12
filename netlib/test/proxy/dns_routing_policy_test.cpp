@@ -452,3 +452,119 @@ TEST(ListenerReplyPolicy, UntranslatedListenerRepliesAreDroppedNeverPassed)
     EXPECT_EQ(decide_listener_reply(false, false), listener_reply_action::not_listener);
     EXPECT_EQ(decide_listener_reply(false, true), listener_reply_action::not_listener);
 }
+
+// 5. Fragments: only a first fragment carries ports. IPv4 later fragments are not classified;
+//    a fragmented datagram that would be redirected is blocked instead.
+TEST(DnsFragmentPolicy, Ipv4FragmentClassification)
+{
+    using proxy::classify_ipv4_fragment;
+    using proxy::ipv4_fragment;
+
+    EXPECT_EQ(classify_ipv4_fragment(0x0000), ipv4_fragment::none);
+    EXPECT_EQ(classify_ipv4_fragment(0x4000), ipv4_fragment::none);   // DF only
+    EXPECT_EQ(classify_ipv4_fragment(0x2000), ipv4_fragment::first);  // MF, offset 0
+    EXPECT_EQ(classify_ipv4_fragment(0x2001), ipv4_fragment::later);  // MF, offset 8
+    EXPECT_EQ(classify_ipv4_fragment(0x00b9), ipv4_fragment::later);  // last fragment
+}
+
+TEST(DnsFragmentPolicy, FragmentedDatagramsThatWouldBeRedirectedAreBlocked)
+{
+    using proxy::apply_fragmentation;
+    const dns_proxy p{};
+    const auto redirect = decide_dns_route(proxy_mode, dns_port, apply, p.target(dns_transport::udp, dns_family::ipv4));
+    ASSERT_EQ(redirect.action, dns_route_action::proxy);
+
+    const auto fragmented = apply_fragmentation(redirect, true);
+    EXPECT_EQ(fragmented.action, dns_route_action::block);
+    EXPECT_EQ(fragmented.reason, dns_block_reason::fragmented);
+    EXPECT_EQ(apply_fragmentation(redirect, false).action, dns_route_action::proxy);
+
+    // Direct mode and non-DNS decisions are unaffected by fragmentation.
+    const auto direct_pass = decide_dns_route(direct, dns_port, apply, {});
+    EXPECT_EQ(apply_fragmentation(direct_pass, true).action, dns_route_action::pass);
+    EXPECT_EQ(apply_fragmentation(decide_dns_route(proxy_mode, 443, apply, {}), true).action, dns_route_action::not_dns);
+}
+
+namespace
+{
+    /// Builds an IPv6 packet: 40-byte header followed by @p chain bytes.
+    std::vector<uint8_t> ipv6_packet(const uint8_t next_header, const std::vector<uint8_t>& chain)
+    {
+        std::vector<uint8_t> packet(40, 0);
+        packet[0] = 0x60;
+        packet[4] = static_cast<uint8_t>(chain.size() >> 8);
+        packet[5] = static_cast<uint8_t>(chain.size() & 0xff);
+        packet[6] = next_header;
+        packet[7] = 64;
+        packet.insert(packet.end(), chain.begin(), chain.end());
+        return packet;
+    }
+
+    std::vector<uint8_t> fragment_header(const uint8_t next, const uint16_t offset_in_8_bytes, const bool more)
+    {
+        const auto field = static_cast<uint16_t>((offset_in_8_bytes << 3) | (more ? 1 : 0));
+        return { next, 0, static_cast<uint8_t>(field >> 8), static_cast<uint8_t>(field & 0xff), 0, 0, 0x12, 0x34 };
+    }
+
+    std::vector<uint8_t> ports(const uint16_t source, const uint16_t destination)
+    {
+        return { static_cast<uint8_t>(source >> 8), static_cast<uint8_t>(source & 0xff),
+                 static_cast<uint8_t>(destination >> 8), static_cast<uint8_t>(destination & 0xff),
+                 0, 8, 0, 0 };
+    }
+
+    std::vector<uint8_t> concat(std::initializer_list<std::vector<uint8_t>> parts)
+    {
+        std::vector<uint8_t> out;
+        for (const auto& part : parts)
+            out.insert(out.end(), part.begin(), part.end());
+        return out;
+    }
+
+    std::optional<proxy::ipv6_first_fragment> parse(const std::vector<uint8_t>& packet)
+    {
+        return proxy::parse_ipv6_first_fragment(packet.data(), packet.size());
+    }
+
+    constexpr uint8_t udp_proto = 17, tcp_proto = 6, fragment_proto = 44, hop_proto = 0, dest_opts_proto = 60;
+}
+
+TEST(DnsFragmentPolicy, Ipv6FirstFragmentExposesTheUpperLayerDestinationPort)
+{
+    const auto udp_first = parse(ipv6_packet(fragment_proto, concat({ fragment_header(udp_proto, 0, true), ports(50001, 53) })));
+    ASSERT_TRUE(udp_first.has_value());
+    EXPECT_EQ(udp_first->protocol, udp_proto);
+    EXPECT_EQ(udp_first->destination_port, 53);
+
+    const auto tcp_first = parse(ipv6_packet(fragment_proto, concat({ fragment_header(tcp_proto, 0, true), ports(50001, 53) })));
+    ASSERT_TRUE(tcp_first.has_value());
+    EXPECT_EQ(tcp_first->protocol, tcp_proto);
+
+    // Extension headers before and after the fragment header are skipped.
+    const std::vector<uint8_t> hop_by_hop{ fragment_proto, 0, 1, 4, 0, 0, 0, 0 };
+    const std::vector<uint8_t> destination_options{ udp_proto, 0, 1, 4, 0, 0, 0, 0 };
+    const auto chained = parse(ipv6_packet(hop_proto,
+        concat({ hop_by_hop, fragment_header(dest_opts_proto, 0, true), destination_options, ports(50001, 443) })));
+    ASSERT_TRUE(chained.has_value());
+    EXPECT_EQ(chained->protocol, udp_proto);
+    EXPECT_EQ(chained->destination_port, 443);
+}
+
+TEST(DnsFragmentPolicy, Ipv6PacketsWithoutAClassifiableFirstFragmentAreNotReported)
+{
+    // Unfragmented: handled by the normal path.
+    EXPECT_FALSE(parse(ipv6_packet(udp_proto, ports(50001, 53))).has_value());
+    // A later fragment has no upper-layer header: its leading bytes must not be read as ports.
+    EXPECT_FALSE(parse(ipv6_packet(fragment_proto, concat({ fragment_header(udp_proto, 185, false), ports(1, 53) }))).has_value());
+    // Another upper-layer protocol (ICMPv6).
+    EXPECT_FALSE(parse(ipv6_packet(fragment_proto, concat({ fragment_header(58, 0, true), ports(1, 53) }))).has_value());
+    // Truncated: fragment header, but not the ports.
+    EXPECT_FALSE(parse(ipv6_packet(fragment_proto, fragment_header(udp_proto, 0, true))).has_value());
+    // Not IPv6, empty, or a nested fragment header.
+    auto not_v6 = ipv6_packet(fragment_proto, concat({ fragment_header(udp_proto, 0, true), ports(1, 53) }));
+    not_v6[0] = 0x45;
+    EXPECT_FALSE(parse(not_v6).has_value());
+    EXPECT_FALSE(proxy::parse_ipv6_first_fragment(nullptr, 100).has_value());
+    EXPECT_FALSE(parse(ipv6_packet(fragment_proto,
+        concat({ fragment_header(fragment_proto, 0, true), fragment_header(udp_proto, 0, true), ports(1, 53) }))).has_value());
+}

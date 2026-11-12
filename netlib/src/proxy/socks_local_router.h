@@ -2236,6 +2236,13 @@ namespace proxy
             std::optional<net::ip_endpoint<AddrT>> server_override; ///< set when the destination is rewritten
         };
 
+        /// True when DNS routing is in Proxy mode.
+        bool dns_proxy_mode()
+        {
+            std::shared_lock lock(lock_);
+            return dns_mode_ == dns_routing_mode::proxy;
+        }
+
         /**
          * @brief Whether a resolved owner is ProxiFyre itself; nullopt when the owner is unknown
          *        (no owner, or the shared unresolved default owner).
@@ -2627,23 +2634,29 @@ namespace proxy
 
             // Conventional DNS (destination port 53) follows the global DNS policy, before and
             // independently of process attribution and application rules: Direct passes it,
-            // Proxy redirects it to the DNS proxy or drops it.
-            if (const auto dns = decide_dns<net::ip_address_v4, dns_transport::udp>(
-                    net::ip_address_v4{ ip_header->ip_dst }, ntohs(udp_header->th_dport), postponed,
-                    [&](const bool refresh)
-                    {
-                        const net::ip_endpoint<net::ip_address_v4> sender{ ip_header->ip_src, ntohs(udp_header->th_sport) };
-                        return sender_is_proxifyre(refresh
-                            ? process_lookup_v4_.lookup_process_for_udp<true>(sender)
-                            : process_lookup_v4_.lookup_process_for_udp<false>(sender));
-                    });
-                dns.decision.action != dns_route_action::not_dns)
+            // Proxy redirects it to the DNS proxy or drops it. A later IPv4 fragment carries no
+            // UDP header, so its "port" is payload and it is not classified.
+            if (const auto fragment = classify_ipv4_fragment(ntohs(ip_header->ip_off)); fragment != ipv4_fragment::later)
             {
-                if (dns.decision.action == dns_route_action::defer)
-                    return std::nullopt;
-                return handle_dns_udp<net::ip_address_v4>(buffer, dns, net::ip_address_v4{ ip_header->ip_dst },
-                    ntohs(udp_header->th_sport), ntohs(udp_header->th_dport),
-                    reinterpret_cast<const uint8_t*>(udp_header + 1), captured_udp_payload_size(buffer, udp_header));
+                if (auto dns = decide_dns<net::ip_address_v4, dns_transport::udp>(
+                        net::ip_address_v4{ ip_header->ip_dst }, ntohs(udp_header->th_dport), postponed,
+                        [&](const bool refresh)
+                        {
+                            const net::ip_endpoint<net::ip_address_v4> sender{ ip_header->ip_src, ntohs(udp_header->th_sport) };
+                            return sender_is_proxifyre(refresh
+                                ? process_lookup_v4_.lookup_process_for_udp<true>(sender)
+                                : process_lookup_v4_.lookup_process_for_udp<false>(sender));
+                        });
+                    dns.decision.action != dns_route_action::not_dns)
+                {
+                    if (dns.decision.action == dns_route_action::defer)
+                        return std::nullopt;
+
+                    dns.decision = apply_fragmentation(dns.decision, fragment == ipv4_fragment::first);
+                    return handle_dns_udp<net::ip_address_v4>(buffer, dns, net::ip_address_v4{ ip_header->ip_dst },
+                        ntohs(udp_header->th_sport), ntohs(udp_header->th_dport),
+                        reinterpret_cast<const uint8_t*>(udp_header + 1), captured_udp_payload_size(buffer, udp_header));
+                }
             }
 
             auto process = process_lookup_v4_.
@@ -2759,22 +2772,28 @@ namespace proxy
             // Conventional DNS over TCP follows the global DNS policy. In Direct mode TCP/53 is
             // now unconditionally direct (previously it was routed like any other TCP traffic of
             // the owning process).
-            if (const auto dns = decide_dns<net::ip_address_v4, dns_transport::tcp>(
-                    net::ip_address_v4{ ip_header->ip_dst }, ntohs(tcp_header->th_dport), postponed,
-                    [&](const bool refresh)
-                    {
-                        const net::ip_session<net::ip_address_v4> session{ ip_header->ip_src, ip_header->ip_dst,
-                            ntohs(tcp_header->th_sport), ntohs(tcp_header->th_dport) };
-                        return sender_is_proxifyre(refresh
-                            ? process_lookup_v4_.lookup_process_for_tcp<true>(session)
-                            : process_lookup_v4_.lookup_process_for_tcp<false>(session));
-                    });
-                dns.decision.action != dns_route_action::not_dns)
+            // A later IPv4 fragment carries no TCP header and is not classified (see the UDP path).
+            if (const auto fragment = classify_ipv4_fragment(ntohs(ip_header->ip_off)); fragment != ipv4_fragment::later)
             {
-                if (dns.decision.action == dns_route_action::defer)
-                    return std::nullopt;
-                return handle_dns_tcp<net::ip_address_v4>(buffer, dns, net::ip_address_v4{ ip_header->ip_dst },
-                    ntohs(tcp_header->th_sport), ntohs(tcp_header->th_dport), tcp_header->th_flags);
+                if (auto dns = decide_dns<net::ip_address_v4, dns_transport::tcp>(
+                        net::ip_address_v4{ ip_header->ip_dst }, ntohs(tcp_header->th_dport), postponed,
+                        [&](const bool refresh)
+                        {
+                            const net::ip_session<net::ip_address_v4> session{ ip_header->ip_src, ip_header->ip_dst,
+                                ntohs(tcp_header->th_sport), ntohs(tcp_header->th_dport) };
+                            return sender_is_proxifyre(refresh
+                                ? process_lookup_v4_.lookup_process_for_tcp<true>(session)
+                                : process_lookup_v4_.lookup_process_for_tcp<false>(session));
+                        });
+                    dns.decision.action != dns_route_action::not_dns)
+                {
+                    if (dns.decision.action == dns_route_action::defer)
+                        return std::nullopt;
+
+                    dns.decision = apply_fragmentation(dns.decision, fragment == ipv4_fragment::first);
+                    return handle_dns_tcp<net::ip_address_v4>(buffer, dns, net::ip_address_v4{ ip_header->ip_dst },
+                        ntohs(tcp_header->th_sport), ntohs(tcp_header->th_dport), tcp_header->th_flags);
+                }
             }
 
             auto process = process_lookup_v4_.
@@ -2863,6 +2882,24 @@ namespace proxy
 
             if (transport == nullptr)
             {
+                // In DNS Proxy mode, the first fragment of a fragmented UDP/TCP datagram addressed
+                // to port 53 is dropped: the datagram cannot be redirected, and passing it would
+                // send DNS directly. Later fragments carry no ports and cannot be classified, so
+                // they are left alone and unrelated fragmented traffic is unaffected.
+                if (buffer.m_Length > ETHER_HEADER_LENGTH)
+                {
+                    if (const auto first = parse_ipv6_first_fragment(reinterpret_cast<const uint8_t*>(ip_header),
+                            buffer.m_Length - ETHER_HEADER_LENGTH);
+                        first && first->destination_port == dns_port && dns_proxy_mode())
+                    {
+                        if (first->protocol == IPPROTO_UDP)
+                            note_dns_block<net::ip_address_v6, dns_transport::udp>(dns_block_reason::fragmented);
+                        else
+                            note_dns_block<net::ip_address_v6, dns_transport::tcp>(dns_block_reason::fragmented);
+                        return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+                    }
+                }
+
                 // No usable transport header: either a fragmented IPv6 datagram (which
                 // this build deliberately does not rewrite, to avoid corrupting a
                 // partially-rewritten datagram) or an unsupported extension chain. Such

@@ -114,7 +114,7 @@ IPv6 destination routing also requires:
 - a SOCKS5 server that accepts IPv6 target addresses (`ATYP=4`); and
 - an upstream proxy reachable through IPv4. The endpoint itself must be an IPv4 literal or a hostname with an A record; IPv6-literal and AAAA-only upstreams are not supported.
 
-Fragmented IPv6 datagrams are passed through directly to avoid rewriting an incomplete packet. Applications that emit oversized fragmented UDP datagrams can therefore bypass the proxy; TCP and path-MTU-aware UDP such as normal QUIC traffic are unaffected.
+Fragmented IPv6 datagrams are passed through directly to avoid rewriting an incomplete packet. Applications that emit oversized fragmented UDP datagrams can therefore bypass the proxy; TCP and path-MTU-aware UDP such as normal QUIC traffic are unaffected. DNS `Proxy` mode is the exception for port 53: see [Proxy mode](#proxy-mode).
 
 ## LAN bypass
 
@@ -156,7 +156,8 @@ ProxiFyre never falls back to sending DNS directly. DNS is dropped, and a warnin
 - the SOCKS5 connection, authentication, TLS handshake, or `UDP ASSOCIATE` fails, or the proxy disconnects;
 - the proxy does not accept the destination's address family (for example IPv6 DNS with an IPv4-only rule);
 - a `serverOverride` is configured and the query is addressed to a server of the other address family (an IPv4 override blocks queries to IPv6 servers and vice versa; Windows then uses its other configured DNS servers); or
-- the packet cannot be redirected, such as a fragmented datagram or a TCP connection to port 53 that was opened before ProxiFyre started.
+- the packet cannot be redirected, such as a TCP connection to port 53 that was opened before ProxiFyre started, or a datagram too large to carry the SOCKS5 UDP header; or
+- the datagram is fragmented. Only the first fragment carries the UDP or TCP header, so only a first fragment (IPv4 or IPv6) addressed to port 53 can be recognized as DNS; it is dropped, which also prevents the datagram from being reassembled at the server. Later fragments carry no ports, cannot be classified, and are passed unchanged, so other fragmented traffic is not affected. In `Direct` mode fragmented DNS is passed like any other DNS.
 
 Windows retries a failed query and, for UDP answers marked truncated, retries over TCP; both go through the same proxy. ProxiFyre does not inspect payloads to decide what is DNS: only destination port 53 is classified.
 
