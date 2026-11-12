@@ -222,6 +222,15 @@ namespace
             static_cast<uint8_t>(std::is_same_v<Addr, v4> ? 1 : 4), reinterpret_cast<const uint8_t*>(&raw), sizeof(Raw),
             server_override.port, ntohs(reply.udp()->th_dport), origins);
     }
+
+    /// classify() for a DNS proxy without a server override, as the router calls it then.
+    template <typename Addr>
+    std::pair<proxy::dns_reply_restore, std::optional<net::ip_endpoint<Addr>>> classify_without_override(frame& reply,
+        proxy::dns_udp_origin_tracker<net::ip_endpoint<Addr>>& origins)
+    {
+        return proxy::classify_dns_override_reply(reply.udp_payload(), reply.udp_payload_size(),
+            static_cast<uint8_t>(std::is_same_v<Addr, v4> ? 1 : 4), nullptr, 0, 0, ntohs(reply.udp()->th_dport), origins);
+    }
 }
 
 // 6./7. IPv4 UDP query to a private resolver with an IPv4 override: the relay is asked for the
@@ -413,6 +422,49 @@ TEST(DnsPacketRedirect, RelayReportingAnotherSourceStillRestoresTheQueriedServer
     EXPECT_EQ(reply.payload(), answer);
     EXPECT_TRUE(reply.ip4_checksum_valid());
     EXPECT_TRUE(reply.l4_checksum_valid());
+}
+
+// 8. Without a server override the relay is asked for the server the resolver queried. A relay
+//    that reports another source (here its own address) must still produce an answer the
+//    resolver accepts; nothing is ever dropped for naming an override, because there is none.
+TEST(DnsPacketRedirect, WithoutAnOverrideARelayReportingAnotherSourceIsStillRestored)
+{
+    ndisapi::socks5_udp_local_redirect<v4> redirect{ log_level::error };
+    proxy::dns_udp_origin_tracker<net::ip_endpoint<v4>> origins;
+
+    auto query = frame::udp4("192.168.1.10", "8.8.8.8", client_port, 53, dns_message(0x6161));
+    origins.remember(client_port, 0x6161, net::ip_endpoint<v4>{ v4{ query.ip4()->ip_dst }, 53 });
+    ASSERT_TRUE(redirect.is_new_endpoint(query.buffer));
+    ASSERT_TRUE(redirect.process_client_to_server_packet(query.buffer, htons(udp_listener)));
+
+    // The relay reports its own address and port instead of 8.8.8.8:53.
+    const auto answer = dns_message(0x6161, 30);
+    auto reply = local_proxy_reply("192.168.1.10", "8.8.8.8", v4{ std::string{ "198.51.100.7" } }, 1080, answer);
+    const auto [restore, origin] = classify_without_override<v4>(reply, origins);
+    ASSERT_EQ(restore, proxy::dns_reply_restore::restore);
+    ASSERT_TRUE(origin.has_value());
+    ASSERT_TRUE(redirect.process_server_to_client_packet(reply.buffer, origin));
+    EXPECT_EQ(v4{ reply.ip4()->ip_src }, v4{ std::string{ "8.8.8.8" } });
+    EXPECT_EQ(ntohs(reply.udp()->th_sport), 53);
+    EXPECT_EQ(reply.payload(), answer);
+    EXPECT_TRUE(reply.ip4_checksum_valid());
+    EXPECT_TRUE(reply.l4_checksum_valid());
+
+    // A relay that reports the queried server is restored to the same endpoint (a no-op).
+    auto compliant = local_proxy_reply("192.168.1.10", "8.8.8.8", v4{ std::string{ "8.8.8.8" } }, 53, answer);
+    const auto [compliant_restore, compliant_origin] = classify_without_override<v4>(compliant, origins);
+    EXPECT_EQ(compliant_restore, proxy::dns_reply_restore::restore);
+    ASSERT_TRUE(compliant_origin.has_value());
+    EXPECT_EQ(compliant_origin->ip, v4{ std::string{ "8.8.8.8" } });
+
+    // Anything that matches no tracked query is left unchanged, never dropped: application
+    // traffic sharing the proxy, an unknown message ID, or a payload too short for a DNS header.
+    auto other = local_proxy_reply("192.168.1.10", "203.0.113.5", v4{ std::string{ "203.0.113.5" } }, 443, dns_message(0x7777));
+    EXPECT_EQ(classify_without_override<v4>(other, origins).first, proxy::dns_reply_restore::unchanged);
+    auto unknown_id = local_proxy_reply("192.168.1.10", "8.8.8.8", v4{ std::string{ "8.8.8.8" } }, 53, dns_message(0x7777));
+    EXPECT_EQ(classify_without_override<v4>(unknown_id, origins).first, proxy::dns_reply_restore::unchanged);
+    auto short_payload = local_proxy_reply("192.168.1.10", "8.8.8.8", v4{ std::string{ "8.8.8.8" } }, 53, std::vector<uint8_t>{ 0x61, 0x61 });
+    EXPECT_EQ(classify_without_override<v4>(short_payload, origins).first, proxy::dns_reply_restore::unchanged);
 }
 
 // 8. A datagram that cannot be redirected is reported as such (the router then drops it rather
@@ -654,13 +706,13 @@ TEST(DnsTcpCloseTracking, UntranslatableListenerSegmentIsDropped)
     auto stray = listener_segment(TH_ACK);
     const bool translated = redirect.process_server_to_client_packet(stray.buffer);
     EXPECT_FALSE(translated);
-    EXPECT_EQ(proxy::decide_listener_reply(true, translated), proxy::listener_reply_action::drop);
+    EXPECT_EQ(proxy::decide_listener_reply(translated), proxy::listener_reply_action::drop);
 
     ndisapi::socks5_udp_local_redirect<v4> udp{ log_level::error };
     auto unknown = local_proxy_reply("192.168.1.10", "192.168.1.1", v4{ std::string{ "192.168.1.1" } }, 53, dns_message(1));
     const bool udp_translated = udp.process_server_to_client_packet(unknown.buffer);
     EXPECT_FALSE(udp_translated);
-    EXPECT_EQ(proxy::decide_listener_reply(true, udp_translated), proxy::listener_reply_action::drop);
+    EXPECT_EQ(proxy::decide_listener_reply(udp_translated), proxy::listener_reply_action::drop);
 }
 
 // 14. Truncation fallback end to end: the truncated UDP answer reaches the resolver unchanged

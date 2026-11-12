@@ -266,9 +266,9 @@ namespace proxy
 
         /**
          * @brief True when replies from the DNS proxy's UDP listener may need their source
-         *        restored (dns_reply_restore_needed()). Lets every listener reply skip lock_ in
-         *        Direct mode and in Proxy mode without an override. Written by set_dns_routing()
-         *        while the router is inactive.
+         *        restored (dns_reply_restore_needed()): in Proxy mode with a usable DNS proxy.
+         *        Lets every listener reply skip lock_ in Direct mode. Written by
+         *        set_dns_routing() while the router is inactive.
          */
         std::atomic_bool dns_reply_restore_active_{ false };
 
@@ -282,8 +282,9 @@ namespace proxy
         std::atomic_bool udp_relay_on_dns_port_{ false };
 
         /**
-         * @brief Original server of each UDP DNS query rewritten to the server override, so the
-         *        answer can be restored to the server the resolver actually queried.
+         * @brief Original server of each UDP DNS query redirected to the DNS proxy, so the answer
+         *        can be restored to the server the resolver actually queried whatever source the
+         *        relay reports (with or without a server override).
          */
         dns_udp_origin_tracker<net::ip_endpoint<net::ip_address_v4>> dns_udp_origins_v4_;
         dns_udp_origin_tracker<net::ip_endpoint<net::ip_address_v6>> dns_udp_origins_v6_;
@@ -1882,8 +1883,7 @@ namespace proxy
             }
 
             dns_proxy_id_ = proxy_id;
-            dns_reply_restore_active_.store(dns_reply_restore_needed(dns_mode_, true,
-                dns_server_override_v4_.has_value() || dns_server_override_v6_.has_value()), std::memory_order_release);
+            dns_reply_restore_active_.store(dns_reply_restore_needed(dns_mode_, true), std::memory_order_release);
 
             const auto upstream = proxy_id < proxy_upstreams_.size()
                 ? proxy_upstreams_[proxy_id].to_string()
@@ -2460,8 +2460,9 @@ namespace proxy
          * In Proxy mode the datagram is redirected to the DNS proxy's local UDP listener via the
          * existing socks5_udp_local_redirect, which also writes the SOCKS5 UDP header. With a
          * server override the header carries the override while the IP header keeps the
-         * original destination, and the original server is remembered so the answer can be
-         * restored to it. Anything that cannot be redirected is dropped, never passed.
+         * original destination. The server the resolver addressed is remembered, with or without
+         * an override, so the answer can be restored to it whatever source the relay reports.
+         * Anything that cannot be redirected is dropped, never passed.
          */
         template <typename AddrT>
         packet_filter::packet_action handle_dns_udp(netlib::ndisapi::intermediate_buffer& buffer,
@@ -2487,17 +2488,19 @@ namespace proxy
                 return packet_filter::packet_action{ action_type::drop };
             }
 
-            if (route.server_override)
+            // The relay may report a source other than the server the resolver addressed (always,
+            // with a server override), and the resolver accepts an answer only from that server.
+            // Remember it so the answer can be restored to it (decide_dns_query_tracking()).
+            const auto message_id = dns_message_id(payload, payload_size);
+            const auto tracking = decide_dns_query_tracking(route.server_override.has_value(), message_id.has_value());
+            if (tracking == dns_query_tracking::drop)
             {
-                // The answer comes back from the override server; remember which server the
-                // resolver addressed so that answer can be restored to it.
-                const auto message_id = dns_message_id(payload, payload_size);
-                if (!message_id)
-                {
-                    note_dns_block<AddrT, dns_transport::udp>(dns_block_reason::redirect_failed);
-                    return packet_filter::packet_action{ action_type::drop };
-                }
+                note_dns_block<AddrT, dns_transport::udp>(dns_block_reason::redirect_failed);
+                return packet_filter::packet_action{ action_type::drop };
+            }
 
+            if (tracking == dns_query_tracking::track)
+            {
                 dns_udp_origins_for<AddrT>().remember(source_port, *message_id,
                     net::ip_endpoint<AddrT>{ destination, destination_port });
             }
@@ -2590,24 +2593,27 @@ namespace proxy
         /**
          * @brief Determines how a reply leaving local UDP proxy listener @p listener_port toward
          *        client port @p client_port is presented, given the relayed SOCKS5 UDP datagram
-         *        in @p socks_payload. Only answers relayed from the configured server override
-         *        by the DNS proxy's listener are restored (see classify_dns_override_reply());
-         *        other traffic through the same proxy is unchanged.
+         *        in @p socks_payload. Only answers to tracked queries relayed through the DNS
+         *        proxy's listener are restored, with or without a server override (see
+         *        classify_dns_override_reply()); other traffic through the same proxy is unchanged.
          */
         template <typename AddrT>
         std::pair<dns_reply_restore, std::optional<net::ip_endpoint<AddrT>>> dns_udp_reply_origin(
             const uint16_t listener_port, const uint16_t client_port,
             const uint8_t* socks_payload, const size_t socks_payload_size)
         {
-            // Lock-free early exit for every listener reply in Direct mode and in Proxy mode
-            // without an override.
+            // Lock-free early exit for every listener reply in Direct mode and when no DNS proxy
+            // is usable.
             if (!dns_reply_restore_active_.load(std::memory_order_acquire))
                 return { dns_reply_restore::unchanged, std::nullopt };
 
+            // Only replies from the DNS proxy's own UDP listener can answer a tracked query. The
+            // server override, when one is configured for this family, is optional here: tracked
+            // answers are restored with or without it.
             std::optional<net::ip_endpoint<AddrT>> server_override;
             {
                 std::shared_lock lock(lock_);
-                if (dns_mode_ != dns_routing_mode::proxy || !dns_server_override_for<AddrT>())
+                if (dns_mode_ != dns_routing_mode::proxy)
                     return { dns_reply_restore::unchanged, std::nullopt };
 
                 if (dns_listener_port_locked<AddrT, dns_transport::udp>() != listener_port)
@@ -2618,11 +2624,17 @@ namespace proxy
 
             constexpr auto v4 = std::is_same_v<AddrT, net::ip_address_v4>;
             using raw_address_t = std::conditional_t<v4, in_addr, in6_addr>;
-            const raw_address_t& raw = server_override->ip;
+            const raw_address_t* raw = nullptr;
+            uint16_t override_port = 0;
+            if (server_override)
+            {
+                raw = &server_override->ip;
+                override_port = server_override->port;
+            }
 
             return classify_dns_override_reply(socks_payload, socks_payload_size,
-                static_cast<uint8_t>(v4 ? 1 : 4), reinterpret_cast<const uint8_t*>(&raw), sizeof(raw_address_t),
-                server_override->port, client_port, dns_udp_origins_for<AddrT>());
+                static_cast<uint8_t>(v4 ? 1 : 4), reinterpret_cast<const uint8_t*>(raw), sizeof(raw_address_t),
+                override_port, client_port, dns_udp_origins_for<AddrT>());
         }
 
         /**

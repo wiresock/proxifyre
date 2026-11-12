@@ -425,9 +425,8 @@ namespace proxy
     /// ProxiFyre's local proxy listeners.
     enum class listener_reply_action : uint8_t
     {
-        not_listener, ///< not sourced from a local listener: continue with the normal routing
-        revert,       ///< translated back to the original server/client: re-inject it to the stack
-        drop          ///< not translatable: drop it
+        revert, ///< translated back to the original server/client: re-inject it to the stack
+        drop    ///< not translatable: drop it
     };
 
     /**
@@ -438,12 +437,11 @@ namespace proxy
      * connection or endpoint, a fragmented or malformed datagram, a relay header of the wrong
      * address type), passing it would send the listener's bytes - for the DNS proxy, the SOCKS5
      * header and the DNS answer - toward the real server in clear, so it is dropped.
+     *
+     * @param translated The redirect translated the packet back to its client.
      */
-    [[nodiscard]] constexpr listener_reply_action decide_listener_reply(
-        const bool source_is_listener, const bool translated) noexcept
+    [[nodiscard]] constexpr listener_reply_action decide_listener_reply(const bool translated) noexcept
     {
-        if (!source_is_listener)
-            return listener_reply_action::not_listener;
         return translated ? listener_reply_action::revert : listener_reply_action::drop;
     }
 
@@ -641,12 +639,13 @@ namespace proxy
     }
 
     /**
-     * @brief Remembers, for UDP DNS queries rewritten to a server override, which server the
+     * @brief Remembers, for UDP DNS queries redirected to the DNS proxy, which server the
      *        application originally addressed.
      *
-     * When a server override is configured, the SOCKS5 relay answers from the override server
-     * while the requesting resolver only accepts an answer from the server it queried. Each
-     * rewritten query records (client source port, DNS message ID) -> original server endpoint;
+     * The requesting resolver only accepts an answer from the server it queried, but the SOCKS5
+     * relay may report another source: always when a server override is configured (it answers
+     * from the override server), and for some relays even without one. Each redirected query
+     * records (client source port, DNS message ID) -> original server endpoint;
      * the response carrying the same client port and message ID is restored to that endpoint
      * before it is delivered. Entries expire after @p ttl and the table is bounded, so it cannot
      * grow without limit under a flood of queries. Entries are not consumed by a lookup so that
@@ -935,13 +934,41 @@ namespace proxy
 
     /**
      * @brief Whether replies leaving the DNS proxy's UDP listener may need their source restored
-     *        (classify_dns_override_reply()): only in Proxy mode with a usable proxy and a server
-     *        override. Otherwise the reply path needs no DNS work at all.
+     *        (classify_dns_override_reply()): in Proxy mode with a usable proxy, with or without
+     *        a server override, because a relay can report a source other than the server the
+     *        resolver queried either way. In Direct mode, or without a usable proxy, no DNS is
+     *        redirected and the reply path needs no DNS work at all.
      */
-    [[nodiscard]] constexpr bool dns_reply_restore_needed(const dns_routing_mode mode, const bool proxy_selected,
-        const bool server_override_configured) noexcept
+    [[nodiscard]] constexpr bool dns_reply_restore_needed(const dns_routing_mode mode, const bool proxy_selected) noexcept
     {
-        return mode == dns_routing_mode::proxy && proxy_selected && server_override_configured;
+        return mode == dns_routing_mode::proxy && proxy_selected;
+    }
+
+    /// What the UDP handler does about remembering the server a redirected query was addressed to.
+    enum class dns_query_tracking : uint8_t
+    {
+        track,     ///< remember the queried server so the answer can be restored to it
+        untracked, ///< redirect without remembering: the answer keeps the source the relay reports
+        drop       ///< cannot be redirected usefully: drop it
+    };
+
+    /**
+     * @brief Decides whether a UDP datagram about to be redirected to the DNS proxy is tracked.
+     *
+     * A datagram that carries a DNS header is tracked by (client port, message ID), so its answer
+     * can be presented as coming from the server the resolver queried whatever source the relay
+     * reports. A datagram too short to carry a DNS header cannot be tracked. Without a server
+     * override it is still redirected: its answer, if any, carries the relay-reported source,
+     * which for an RFC 1928 relay is the server that was queried. With a server override the
+     * relay reports the override, the answer could never be matched to the queried server, and
+     * the resolver would discard it, so the datagram is dropped instead.
+     */
+    [[nodiscard]] constexpr dns_query_tracking decide_dns_query_tracking(const bool server_override_configured,
+        const bool has_message_id) noexcept
+    {
+        if (has_message_id)
+            return dns_query_tracking::track;
+        return server_override_configured ? dns_query_tracking::drop : dns_query_tracking::untracked;
     }
 
     /// How a datagram leaving a local UDP proxy listener is presented to the client.
@@ -965,26 +992,29 @@ namespace proxy
     {
         if (restore == dns_reply_restore::drop)
             return listener_reply_action::drop;
-        return decide_listener_reply(true, translated);
+        return decide_listener_reply(translated);
     }
 
     /**
-     * @brief Classifies a datagram relayed back by the DNS proxy while a server override is
-     *        configured, and finds the server the resolver originally queried.
+     * @brief Classifies a datagram relayed back by the DNS proxy, with or without a server
+     *        override, and finds the server the resolver originally queried.
      *
      * A datagram whose (@p client_port, DNS message ID) matches a tracked query is restored to
      * the original server whatever source its SOCKS5 header reports: RFC 1928 relays report the
-     * override server, but some report another address (for example their own), and an answer
-     * presented from any address other than the queried server is discarded by the resolver.
-     * A datagram that names the override server but matches no tracked query is dropped. Any
-     * other datagram relayed through the same proxy is left unchanged.
+     * server that answered (the override, when one is configured), but some report another
+     * address (for example their own), and an answer presented from any address other than the
+     * queried server is discarded by the resolver. With a server override, a datagram that names
+     * the override server but matches no tracked query is dropped. Any other datagram relayed
+     * through the same proxy is left unchanged.
      *
      * The datagram's ATYP must match the listener's family (@p expected_address_type): the
      * redirect strips a header of that family's size.
      *
      * @param socks_datagram The UDP payload as relayed: SOCKS5 UDP header followed by the data.
      * @param expected_address_type 1 for the IPv4 path, 4 for the IPv6 path.
-     * @param override_address The override address bytes (network byte order).
+     * @param override_address The override address bytes (network byte order), or nullptr when
+     *        no server override is configured for this family; @p override_address_size and
+     *        @p override_port are then ignored.
      */
     template <typename Endpoint>
     [[nodiscard]] std::pair<dns_reply_restore, std::optional<Endpoint>> classify_dns_override_reply(
@@ -1002,14 +1032,15 @@ namespace proxy
                 return { dns_reply_restore::restore, std::move(original) };
         }
 
-        const bool names_override = view->address_size == override_address_size && view->port == override_port &&
+        const bool names_override = override_address != nullptr &&
+            view->address_size == override_address_size && view->port == override_port &&
             std::equal(view->address, view->address + view->address_size, override_address);
 
         return { names_override ? dns_reply_restore::drop : dns_reply_restore::unchanged, std::nullopt };
     }
 
     // Compile-time checks of the decision table's key invariants.
-    static_assert(decide_listener_reply(true, false) == listener_reply_action::drop,
+    static_assert(decide_listener_reply(false) == listener_reply_action::drop,
         "An untranslatable listener reply must never be passed to the wire.");
     static_assert(decide_dns_route(dns_routing_mode::direct, 443, dns_upstream_guard::apply_policy, {}).action ==
         dns_route_action::not_dns, "Non-DNS traffic must keep its ordinary routing.");

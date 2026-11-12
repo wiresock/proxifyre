@@ -456,16 +456,14 @@ TEST(DnsUdpOriginTracker, IsSafeForConcurrentPacketAndMaintenanceThreads)
 }
 
 // 1. Packets sourced from a local proxy listener are re-injected when translated and dropped
-//    otherwise; they are never passed to the wire. Other packets continue with normal routing.
+//    otherwise; there is no outcome that passes them to the wire.
 TEST(ListenerReplyPolicy, UntranslatedListenerRepliesAreDroppedNeverPassed)
 {
     using proxy::decide_listener_reply;
     using proxy::listener_reply_action;
 
-    EXPECT_EQ(decide_listener_reply(true, true), listener_reply_action::revert);
-    EXPECT_EQ(decide_listener_reply(true, false), listener_reply_action::drop);
-    EXPECT_EQ(decide_listener_reply(false, false), listener_reply_action::not_listener);
-    EXPECT_EQ(decide_listener_reply(false, true), listener_reply_action::not_listener);
+    EXPECT_EQ(decide_listener_reply(true), listener_reply_action::revert);
+    EXPECT_EQ(decide_listener_reply(false), listener_reply_action::drop);
 }
 
 // 5. Fragments: only a first fragment carries ports. IPv4 later fragments are not classified;
@@ -627,15 +625,29 @@ TEST(DnsFilterPlan, ListenersThatAreNotRunningGetNoSourcePortFilter)
     EXPECT_EQ(proxy::plan_dns_filters(proxy_mode, {}).size(), 4u);
 }
 
-// 9. Listener replies need DNS work (and lock_) only in Proxy mode with a usable proxy and an override.
-TEST(DnsReplyRestore, NeededOnlyInProxyModeWithAnOverride)
+// 9. Listener replies need DNS work (and lock_) in Proxy mode with a usable proxy, whether or not
+//    a server override is configured: a relay can report another source either way. Direct mode
+//    and Proxy mode without a usable proxy redirect no DNS and need none.
+TEST(DnsReplyRestore, NeededInProxyModeWithAUsableProxy)
 {
     using proxy::dns_reply_restore_needed;
-    EXPECT_TRUE(dns_reply_restore_needed(proxy_mode, true, true));
-    EXPECT_FALSE(dns_reply_restore_needed(proxy_mode, true, false));
-    EXPECT_FALSE(dns_reply_restore_needed(proxy_mode, false, true));
-    EXPECT_FALSE(dns_reply_restore_needed(direct, true, true));
-    EXPECT_FALSE(dns_reply_restore_needed(direct, false, false));
+    EXPECT_TRUE(dns_reply_restore_needed(proxy_mode, true));
+    EXPECT_FALSE(dns_reply_restore_needed(proxy_mode, false));
+    EXPECT_FALSE(dns_reply_restore_needed(direct, true));
+    EXPECT_FALSE(dns_reply_restore_needed(direct, false));
+}
+
+// A redirected query is tracked whenever it carries a DNS header, with or without a server
+// override. One that is too short to carry a header is still redirected without an override
+// (as before), and dropped with one, because its answer could never be restored.
+TEST(DnsReplyRestore, QueriesAreTrackedWithOrWithoutAnOverride)
+{
+    using proxy::decide_dns_query_tracking;
+    using proxy::dns_query_tracking;
+    EXPECT_EQ(decide_dns_query_tracking(false, true), dns_query_tracking::track);
+    EXPECT_EQ(decide_dns_query_tracking(true, true), dns_query_tracking::track);
+    EXPECT_EQ(decide_dns_query_tracking(false, false), dns_query_tracking::untracked);
+    EXPECT_EQ(decide_dns_query_tracking(true, false), dns_query_tracking::drop);
 }
 
 // 10. Eviction uses insertion order: a refreshed key is not the oldest, the queue of insertion
