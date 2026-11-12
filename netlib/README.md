@@ -109,5 +109,6 @@ CXX=clang++ netlib/test/portable/run-portable-tests.sh
   router's DNS handlers do, and checks every rewritten field, the SOCKS5 UDP header sent to the
   relay, the restored answer source, and independently verified checksums. `winshim/` supplies
   the few Windows SDK declarations those headers need, and the script extracts the product
-  `CNdisApi` checksum routines verbatim from `ndisapi/ndisapi.cpp`. The Windows Packet Filter
+  `CNdisApi` checksum routines verbatim from `external/ndisapi/ndisapi/ndisapi.cpp` (the
+  `wiresock/ndisapi` submodule, which must be checked out). The Windows Packet Filter
   driver, sockets, and the router class itself are not involved.

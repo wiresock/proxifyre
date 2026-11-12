@@ -35,8 +35,8 @@
 #include <cassert>
 #include <gsl/gsl>
 
-#include "../include/common.h"
-#include "../include/ndisapi.h"
+#include "../external/ndisapi/include/Common.h"
+#include "../external/ndisapi/include/ndisapi.h"
 #include "../netlib/src/tools/generic.h"
 #include "../netlib/src/tools/strings.h"
 #include "../netlib/src/log/log.h"

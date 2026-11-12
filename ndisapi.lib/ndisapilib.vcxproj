@@ -248,18 +248,18 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="..\include\Common.h" />
-    <ClInclude Include="..\include\ndisapi.h" />
-    <ClInclude Include="..\ndisapi\inet_checksum.h" />
-    <ClInclude Include="..\ndisapi\iphlp.h" />
-    <ClInclude Include="..\ndisapi\precomp.h" />
-    <ClInclude Include="..\ndisapi\resource.h" />
+    <ClInclude Include="..\external\ndisapi\include\Common.h" />
+    <ClInclude Include="..\external\ndisapi\include\ndisapi.h" />
+    <ClInclude Include="..\external\ndisapi\ndisapi\inet_checksum.h" />
+    <ClInclude Include="..\external\ndisapi\ndisapi\iphlp.h" />
+    <ClInclude Include="..\external\ndisapi\ndisapi\precomp.h" />
+    <ClInclude Include="..\external\ndisapi\ndisapi\resource.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\ndisapi\ndisapi.cpp" />
+    <ClCompile Include="..\external\ndisapi\ndisapi\ndisapi.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="..\ndisapi\ndisapi.rc" />
+    <ResourceCompile Include="..\external\ndisapi\ndisapi\ndisapi.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

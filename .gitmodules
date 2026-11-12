@@ -1,0 +1,3 @@
+[submodule "external/ndisapi"]
+	path = external/ndisapi
+	url = https://github.com/wiresock/ndisapi.git

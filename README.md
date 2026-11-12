@@ -137,6 +137,8 @@ Set `socks5Transport` to `"TLS"` to protect the SOCKS5 TCP connection and UDP `A
 
 Development requires Visual Studio 2022 with the C++ and .NET desktop workloads, the v143 toolset, the .NET Framework 4.7.2 targeting pack, NuGet CLI, PowerShell 7, a .NET SDK, and the repository's vcpkg dependencies.
 
+The Windows Packet Filter user-mode API (`ndisapi`) is the [`wiresock/ndisapi`](https://github.com/wiresock/ndisapi) repository, included as a Git submodule in `external/ndisapi`. Clone with `git clone --recurse-submodules`, or run `git submodule update --init` in an existing clone. GitHub's "Download ZIP" source archives do not include it.
+
 The exact restore, Release build, test, and packaging commands are maintained in [docs/gui.md#build-and-test](docs/gui.md#build-and-test) and [docs/installer.md#building-installers](docs/installer.md#building-installers). The authoritative project version is `ProxiFyreReleaseVersion` in [Directory.Build.props](Directory.Build.props).
 
 ## License

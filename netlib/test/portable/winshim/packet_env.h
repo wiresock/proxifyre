@@ -3,7 +3,7 @@
 #pragma once
 
 #include "winshim.h"
-#include "../../../../include/Common.h"
+#include "../../../../external/ndisapi/include/Common.h"
 // iphlp.h declares tcp_seq as u_long, which is 32-bit on Windows but 64-bit on LP64 hosts (and
 // the host C library already declares its own u_long). Give iphlp.h a private u_long with the
 // Windows (LLP64) width so tcphdr has its on-wire size.
@@ -11,7 +11,7 @@
 #define long int
 #include "../../../src/iphlp.h"
 #undef long
-#include "../../../../ndisapi/inet_checksum.h"
+#include "../../../../external/ndisapi/ndisapi/inet_checksum.h"
 #include "../../../src/tools/generic.h"
 #include "../../../src/log/log.h"
 #include "../../../src/net/ip_address.h"
