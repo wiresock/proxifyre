@@ -209,7 +209,18 @@ namespace ProxiFyre
         /// </summary>
         private void ConfigureDnsRouting(ProxiFyreConfiguration settings, IntPtr[] proxyHandles)
         {
-            if (DnsConfiguration.GetMode(settings.Dns) == DnsRoutingMode.Direct)
+            // Validation rejects an unknown mode, but never let one fall back to Direct here:
+            // a typo in "Proxy" must not silently send DNS around the proxy.
+            DnsRoutingMode mode;
+            if (!DnsConfiguration.TryGetMode(settings.Dns == null ? null : settings.Dns.Mode, out mode))
+            {
+                var message = $"DNS routing: the DNS mode '{settings.Dns.Mode}' is not recognized; use Direct or Proxy. " +
+                              "ProxiFyre will not start with an unknown DNS mode.";
+                LoggerInstance.Error(message);
+                throw new InvalidOperationException(message);
+            }
+
+            if (mode == DnsRoutingMode.Direct)
             {
                 if (!_socksify.SetDnsRouting(DnsRoutingModeEnum.Direct, new IntPtr(-1), null))
                     LoggerInstance.Warn("Failed to apply Direct DNS routing.");
@@ -221,19 +232,24 @@ namespace ProxiFyre
             var dns = settings.Dns;
             var ruleIndex = DnsConfiguration.FindProxyRuleIndex(settings.Proxies, dns.ProxyId);
             var handle = ruleIndex >= 0 && ruleIndex < proxyHandles.Length ? proxyHandles[ruleIndex] : new IntPtr(-1);
+            var proxyUnavailable = handle.ToInt64() == -1;
 
-            if (handle.ToInt64() == -1)
+            if (proxyUnavailable)
             {
                 LoggerInstance.Error(
                     $"DNS routing: the selected DNS proxy '{dns.ProxyId}' is not available because its SOCKS5 proxy could not be created. " +
-                    "All DNS queries will be blocked instead of being sent directly or through another proxy.");
+                    "ALL DNS QUERIES ARE BLOCKED until the service is restarted after the cause is fixed; DNS is not sent " +
+                    "directly or through another proxy. See the preceding errors for why the proxy could not be created.");
             }
 
             if (!_socksify.SetDnsRouting(DnsRoutingModeEnum.Proxy, handle, dns.ServerOverride))
             {
-                LoggerInstance.Error(
-                    "DNS routing: the engine rejected the Proxy mode configuration; DNS queries will be blocked. " +
-                    "See the preceding engine log entries for the reason.");
+                if (!proxyUnavailable)
+                {
+                    LoggerInstance.Error(
+                        "DNS routing: the engine rejected the Proxy mode configuration. ALL DNS QUERIES ARE BLOCKED until the " +
+                        "configuration is corrected and the service is restarted. See the preceding engine log entries for the reason.");
+                }
                 return;
             }
 

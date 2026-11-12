@@ -161,6 +161,8 @@ ProxiFyre never falls back to sending DNS directly. DNS is dropped, and a warnin
 
 Windows retries a failed query and, for UDP answers marked truncated, retries over TCP; both go through the same proxy. ProxiFyre does not inspect payloads to decide what is DNS: only destination port 53 is classified.
 
+If the selected proxy cannot be created when the service starts (for example its host name does not resolve or its listeners cannot be opened), the service still starts but **all DNS is blocked until the service is restarted** after the cause is fixed. The engine log says so explicitly. An unknown `mode` value stops the service from starting instead of being treated as `Direct`.
+
 The selection is made by `proxyId`, never by position, so reordering rules does not change the DNS proxy. If the referenced rule is removed or renamed, validation fails with `DNS_PROXY_NOT_FOUND`; ProxiFyre never silently switches to another proxy. The GUI assigns an id such as `proxy-1` to a rule when it is selected as the DNS proxy, and clears the id on a duplicated copy.
 
 ### Server override
