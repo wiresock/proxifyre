@@ -130,9 +130,11 @@ namespace proxy
      *
      * ProxiFyre's TCP traffic to a SOCKS5 server goes to its configured port, so for TCP the
      * destination match (address and port 53) already implies a server configured on port 53.
-     * ProxiFyre's only UDP traffic to a SOCKS5 server's address goes to the relay endpoint
-     * returned by UDP ASSOCIATE, so for UDP the packet can be ProxiFyre's own only if a server
-     * has returned a relay on port 53. Otherwise it cannot be, and it follows the DNS policy
+     * The only ProxiFyre UDP traffic to a SOCKS5 server's address that can reach the recursion
+     * guard goes to the relay endpoint returned by UDP ASSOCIATE (the local listener's replies,
+     * which can also be addressed to a SOCKS5 host, are handled as listener replies before any
+     * DNS decision), so for UDP the packet can be ProxiFyre's own only if a server has returned
+     * a relay on port 53. Otherwise it cannot be, and it follows the DNS policy
      * with no sender lookup and no deferral, which also removes any dependence on the cached
      * connection table.
      *
@@ -493,6 +495,17 @@ namespace proxy
     };
 
     /**
+     * @brief Whether decide_ipv6_fragment() needs the DNS mode for @p first, so the caller reads
+     *        the mode (which takes the router's lock) only for a first fragment that is not a
+     *        listener reply and is addressed to port 53.
+     */
+    [[nodiscard]] constexpr bool ipv6_fragment_needs_dns_mode(const std::optional<ipv6_first_fragment>& first,
+        const bool source_is_listener) noexcept
+    {
+        return first.has_value() && !source_is_listener && first->destination_port == dns_port;
+    }
+
+    /**
      * @brief Decides what to do with an IPv6 packet whose transport header cannot be used
      *        (a fragment, or an unsupported extension chain).
      *
@@ -507,17 +520,6 @@ namespace proxy
      * @param source_is_listener The first fragment's source port is a local IPv6 proxy listener
      *        port of its protocol.
      */
-    /**
-     * @brief Whether decide_ipv6_fragment() needs the DNS mode for @p first, so the caller reads
-     *        the mode (which takes the router's lock) only for a first fragment that is not a
-     *        listener reply and is addressed to port 53.
-     */
-    [[nodiscard]] constexpr bool ipv6_fragment_needs_dns_mode(const std::optional<ipv6_first_fragment>& first,
-        const bool source_is_listener) noexcept
-    {
-        return first.has_value() && !source_is_listener && first->destination_port == dns_port;
-    }
-
     [[nodiscard]] constexpr ipv6_fragment_action decide_ipv6_fragment(const std::optional<ipv6_first_fragment>& first,
         const bool source_is_listener, const bool dns_proxy_mode) noexcept
     {

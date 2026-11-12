@@ -274,9 +274,9 @@ namespace proxy
 
         /**
          * @brief Set once any SOCKS5 server has returned a UDP relay endpoint on port 53, before
-         *        the relay socket sends anything. Only then can ProxiFyre's own UDP traffic to a
-         *        SOCKS5 server's address be addressed to port 53, so only then does the recursion
-         *        guard need a sender check for UDP (is_upstream_exemption_candidate()). Never
+         *        the relay socket sends anything. Only then can ProxiFyre's own UDP traffic that
+         *        reaches the recursion guard be addressed to port 53 of a SOCKS5 server, so only
+         *        then does the guard need a sender check for UDP (is_upstream_exemption_candidate()). Never
          *        cleared: relays already in use keep their port for the router's lifetime.
          */
         std::atomic_bool udp_relay_on_dns_port_{ false };
@@ -2359,7 +2359,8 @@ namespace proxy
          * reuses that local port before the next refresh. The check is therefore consulted only
          * when the packet can actually be ProxiFyre's own (is_upstream_exemption_candidate()):
          * for UDP, only after a SOCKS5 server has returned a relay on port 53, because the relay
-         * endpoint is the only UDP destination ProxiFyre sends to on a SOCKS5 server's address.
+         * endpoint is the only destination of ProxiFyre's UDP traffic to a SOCKS5 server's address
+         * that can reach the guard (listener replies are handled before any DNS decision).
          * The residual race is limited to that case (docs/configuration.md, "Recursion and
          * ProxiFyre's own traffic").
          */

@@ -88,9 +88,11 @@ namespace proxy
          * @brief Callback invoked with the UDP relay endpoint returned by a successful SOCKS5
          *        UDP ASSOCIATE, before the relay socket is created or sends anything.
          *
-         * The relay socket is connected to this endpoint and sends nothing else, so it is the
-         * only destination ProxiFyre's UDP traffic to a SOCKS5 server can have. The router uses
-         * it to know whether any of its own UDP traffic can be addressed to port 53.
+         * The relay socket is connected to this endpoint and sends nothing else. Apart from the
+         * local listener's replies, which the router handles as listener replies before any DNS
+         * decision, it is the only ProxiFyre UDP traffic to a SOCKS5 server's address. The router
+         * uses it to know whether any of its own UDP traffic that can reach the DNS recursion
+         * guard can be addressed to port 53.
          */
         using relay_endpoint_observed_t = void(const net::ip_endpoint<address_type_t>&);
 
