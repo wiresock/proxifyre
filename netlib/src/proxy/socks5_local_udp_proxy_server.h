@@ -84,6 +84,16 @@ namespace proxy
          */
         using commit_remote_peer_t = void(address_type_t, uint16_t);
 
+        /**
+         * @brief Callback invoked with the UDP relay endpoint returned by a successful SOCKS5
+         *        UDP ASSOCIATE, before the relay socket is created or sends anything.
+         *
+         * The relay socket is connected to this endpoint and sends nothing else, so it is the
+         * only destination ProxiFyre's UDP traffic to a SOCKS5 server can have. The router uses
+         * it to know whether any of its own UDP traffic can be addressed to port 53.
+         */
+        using relay_endpoint_observed_t = void(const net::ip_endpoint<address_type_t>&);
+
     private:
         /**
          * @brief Maximum number of simultaneous proxy connections.
@@ -210,6 +220,11 @@ namespace proxy
          * @brief Optional callback that commits a successfully established source-port mapping.
          */
         std::function<commit_remote_peer_t> commit_remote_peer_;
+
+        /**
+         * @brief Optional callback that observes each UDP relay endpoint before it is used.
+         */
+        std::function<relay_endpoint_observed_t> relay_endpoint_observed_;
 
         /**
          * @brief Completion key associated with the server socket in the I/O completion port.
@@ -520,11 +535,13 @@ namespace proxy
             const std::function<query_remote_peer_t>& query_remote_peer_fn,
             const log_level log_level = log_level::error,
             std::shared_ptr<std::ostream> log_stream = nullptr,
-            const std::function<commit_remote_peer_t>& commit_remote_peer_fn = {})
+            const std::function<commit_remote_peer_t>& commit_remote_peer_fn = {},
+            const std::function<relay_endpoint_observed_t>& relay_endpoint_observed_fn = {})
             : logger(log_level, std::move(log_stream)),
             completion_port_(completion_port),
             query_remote_peer_(query_remote_peer_fn),
             commit_remote_peer_(commit_remote_peer_fn),
+            relay_endpoint_observed_(relay_endpoint_observed_fn),
             proxy_port_(proxy_port)
         {
             if (!create_server_socket())
@@ -1808,6 +1825,11 @@ namespace proxy
                 "connect_to_remote_host: UDP connect: {}:{}",
                 udp_endpoint->ip,
                 udp_endpoint->port);
+
+            // Report the relay endpoint before the relay socket exists, so the router knows about
+            // it before any datagram can be sent to it.
+            if (relay_endpoint_observed_)
+                relay_endpoint_observed_(*udp_endpoint);
 
             auto remote_socket = WSASocket(address_type_t::af_type, SOCK_DGRAM, IPPROTO_UDP, nullptr, 0,
                 WSA_FLAG_OVERLAPPED);

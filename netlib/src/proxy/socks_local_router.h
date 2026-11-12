@@ -273,6 +273,15 @@ namespace proxy
         std::atomic_bool dns_reply_restore_active_{ false };
 
         /**
+         * @brief Set once any SOCKS5 server has returned a UDP relay endpoint on port 53, before
+         *        the relay socket sends anything. Only then can ProxiFyre's own UDP traffic to a
+         *        SOCKS5 server's address be addressed to port 53, so only then does the recursion
+         *        guard need a sender check for UDP (is_upstream_exemption_candidate()). Never
+         *        cleared: relays already in use keep their port for the router's lifetime.
+         */
+        std::atomic_bool udp_relay_on_dns_port_{ false };
+
+        /**
          * @brief Original server of each UDP DNS query rewritten to the server override, so the
          *        answer can be restored to the server the resolver actually queried.
          */
@@ -1331,6 +1340,10 @@ namespace proxy
                         auto& mapper = udp_mapper_for<AddrT>();
                         std::scoped_lock lock(udp_mapper_lock_for<AddrT>());
                         mapper.erase(port);
+                    },
+                    [this](const net::ip_endpoint<AddrT>& relay)
+                    {
+                        note_udp_relay_endpoint(relay.port);
                     })
                 : nullptr;
 
@@ -2317,6 +2330,18 @@ namespace proxy
             return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
         }
 
+        /// Records a UDP relay endpoint returned by a SOCKS5 server (see udp_relay_on_dns_port_).
+        void note_udp_relay_endpoint(const uint16_t relay_port)
+        {
+            if (relay_port == dns_port && !udp_relay_on_dns_port_.exchange(true, std::memory_order_seq_cst))
+            {
+                NETLIB_LOG(log_level::info,
+                    "A SOCKS5 server returned a UDP relay on port 53. UDP DNS addressed to a SOCKS5 server's own "
+                    "address is now exempted from the DNS policy only when it comes from ProxiFyre itself, as "
+                    "determined from the cached connection table.");
+            }
+        }
+
         /// True when DNS routing is in Proxy mode.
         bool dns_proxy_mode()
         {
@@ -2329,12 +2354,14 @@ namespace proxy
          *        (no owner, or the shared unresolved default owner).
          *
          * The owner comes from process_lookup's cached tables, which are replaced only by
-         * actualize() when the resolver thread processes deferred packets. A row for one of
-         * ProxiFyre's own sockets that has since closed can therefore still be found if another
-         * process reuses that local port before the next refresh (documented in
-         * docs/configuration.md, "Recursion and ProxiFyre's own traffic"). Closing the race exactly
-         * would mean tracking ProxiFyre's own upstream sockets through every close path of the
-         * proxy servers and sockets, which is not done here.
+         * actualize() when the resolver thread processes deferred packets, so a row for one of
+         * ProxiFyre's own sockets that has since closed can still be found if another process
+         * reuses that local port before the next refresh. The check is therefore consulted only
+         * when the packet can actually be ProxiFyre's own (is_upstream_exemption_candidate()):
+         * for UDP, only after a SOCKS5 server has returned a relay on port 53, because the relay
+         * endpoint is the only UDP destination ProxiFyre sends to on a SOCKS5 server's address.
+         * The residual race is limited to that case (docs/configuration.md, "Recursion and
+         * ProxiFyre's own traffic").
          */
         static std::optional<bool> sender_is_proxifyre(const std::shared_ptr<iphelper::network_process>& owner) noexcept
         {
@@ -2390,10 +2417,15 @@ namespace proxy
                 destination_matches_upstream = is_upstream_destination_locked<AddrT, Transport>(destination, destination_port);
             }
 
+            // Only a packet that can be ProxiFyre's own needs the sender check; for UDP that
+            // requires a SOCKS5 server to have returned a relay on port 53.
+            const bool exemption_candidate = is_upstream_exemption_candidate(Transport,
+                udp_relay_on_dns_port_.load(std::memory_order_seq_cst), destination_matches_upstream);
+
             // The DNS mode and proxy selection cannot change while the router runs
             // (set_dns_routing() refuses), so releasing lock_ before the process lookup is safe.
-            const auto guard = decide_dns_upstream_guard(destination_matches_upstream,
-                destination_matches_upstream ? sender_lookup(postponed) : std::optional<bool>{}, postponed);
+            const auto guard = decide_dns_upstream_guard(exemption_candidate,
+                exemption_candidate ? sender_lookup(postponed) : std::optional<bool>{}, postponed);
 
             const auto decision = decide_dns_route(dns_routing_mode::proxy, destination_port, guard, target);
             return { decision, decision.action == dns_route_action::proxy ? server_override : std::nullopt };

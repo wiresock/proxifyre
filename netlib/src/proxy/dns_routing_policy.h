@@ -124,6 +124,28 @@ namespace proxy
     }
 
     /**
+     * @brief Whether a port-53 packet addressed to a configured SOCKS5 server can be ProxiFyre's
+     *        own traffic, and so needs the sender check of decide_dns_upstream_guard().
+     *
+     * ProxiFyre's TCP traffic to a SOCKS5 server goes to its configured port, so for TCP the
+     * destination match (address and port 53) already implies a server configured on port 53.
+     * ProxiFyre's only UDP traffic to a SOCKS5 server's address goes to the relay endpoint
+     * returned by UDP ASSOCIATE, so for UDP the packet can be ProxiFyre's own only if a server
+     * has returned a relay on port 53. Otherwise it cannot be, and it follows the DNS policy
+     * with no sender lookup and no deferral, which also removes any dependence on the cached
+     * connection table.
+     *
+     * @param udp_relay_on_dns_port A SOCKS5 server has returned a UDP relay endpoint on port 53.
+     * @param destination_matches_upstream The destination is a configured SOCKS5 server (UDP: its
+     *        address; TCP: its address and port).
+     */
+    [[nodiscard]] constexpr bool is_upstream_exemption_candidate(const dns_transport transport,
+        const bool udp_relay_on_dns_port, const bool destination_matches_upstream) noexcept
+    {
+        return destination_matches_upstream && (transport == dns_transport::tcp || udp_relay_on_dns_port);
+    }
+
+    /**
      * @brief Decides how a captured outbound packet addressed to @p destination_port is routed.
      *
      * Apart from the recursion guard (see decide_dns_upstream_guard()), the decision depends

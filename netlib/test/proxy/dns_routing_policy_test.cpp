@@ -807,3 +807,49 @@ TEST(ListenerSegmentPolicy, OutcomesMapToRevertQuietDropAndReportedDrop)
     EXPECT_EQ(decide_tcp_listener_segment(listener_segment_outcome::recently_reset), listener_segment_action::drop_quietly);
     EXPECT_EQ(decide_tcp_listener_segment(listener_segment_outcome::unknown), listener_segment_action::drop_reported);
 }
+
+// Recursion guard and the UDP relay port: a UDP packet to a SOCKS5 server's address can be
+// ProxiFyre's own only if a server has returned a relay on port 53. Until then no sender lookup or
+// deferral happens for UDP, whatever the (possibly stale) table says. TCP is unchanged.
+TEST(DnsRoutingPolicy, UpstreamExemptionCandidatesDependOnTheUdpRelayPort)
+{
+    using proxy::decide_dns_upstream_guard;
+    using proxy::is_upstream_exemption_candidate;
+    using guard = proxy::dns_upstream_guard;
+
+    const std::optional<bool> senders[] = { std::optional<bool>{}, std::optional<bool>{ false }, std::optional<bool>{ true } };
+
+    // The guard as the router computes it: the sender is looked up only for candidates.
+    const auto route = [](const dns_transport transport, const bool relay_on_53, const bool matches,
+                          const std::optional<bool> sender, const bool lookup_final)
+    {
+        const bool candidate = is_upstream_exemption_candidate(transport, relay_on_53, matches);
+        return decide_dns_upstream_guard(candidate, candidate ? sender : std::optional<bool>{}, lookup_final);
+    };
+
+    for (const bool lookup_final : { false, true })
+    {
+        for (const auto& sender : senders)
+        {
+            // UDP, no relay on port 53: never exempt, never deferred or dropped by the guard.
+            EXPECT_EQ(route(dns_transport::udp, false, true, sender, lookup_final), guard::apply_policy);
+            EXPECT_EQ(route(dns_transport::udp, false, false, sender, lookup_final), guard::apply_policy);
+
+            // Not addressed to a SOCKS5 server: the sender is irrelevant in every state.
+            EXPECT_EQ(route(dns_transport::udp, true, false, sender, lookup_final), guard::apply_policy);
+            EXPECT_EQ(route(dns_transport::tcp, false, false, sender, lookup_final), guard::apply_policy);
+            EXPECT_EQ(route(dns_transport::tcp, true, false, sender, lookup_final), guard::apply_policy);
+        }
+
+        // UDP with a relay on port 53, and TCP whatever the flag: the sender decides.
+        for (const auto& [transport, relay_on_53] : { std::pair{ dns_transport::udp, true },
+                                                      std::pair{ dns_transport::tcp, false },
+                                                      std::pair{ dns_transport::tcp, true } })
+        {
+            EXPECT_EQ(route(transport, relay_on_53, true, true, lookup_final), guard::exempt);
+            EXPECT_EQ(route(transport, relay_on_53, true, false, lookup_final), guard::apply_policy);
+            EXPECT_EQ(route(transport, relay_on_53, true, std::nullopt, lookup_final),
+                lookup_final ? guard::drop : guard::defer);
+        }
+    }
+}
