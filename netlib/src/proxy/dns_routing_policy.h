@@ -639,6 +639,7 @@ namespace proxy
             std::scoped_lock lock(lock_);
             for (auto it = entries_.begin(); it != entries_.end();)
             {
+                ++visits_;
                 if (now - it->second.created_at > ttl_)
                     it = entries_.erase(it);
                 else
@@ -666,6 +667,19 @@ namespace proxy
         {
             std::scoped_lock lock(lock_);
             return order_.size();
+        }
+
+        /**
+         * @brief Total number of table entries and queue records examined by expiry, eviction,
+         *        compaction, and sweeps since construction.
+         *
+         * Every loop over the table or the queue counts here, so tests can assert that the work
+         * done by remember() stays bounded per call when the table is full, without measuring time.
+         */
+        [[nodiscard]] std::uint64_t visits() const
+        {
+            std::scoped_lock lock(lock_);
+            return visits_;
         }
 
     private:
@@ -698,6 +712,7 @@ namespace proxy
         {
             while (!order_.empty() && now - order_.front().created_at > ttl_)
             {
+                ++visits_;
                 if (is_current_locked(order_.front()))
                     entries_.erase(order_.front().key);
                 order_.pop_front();
@@ -709,6 +724,7 @@ namespace proxy
         {
             while (!order_.empty())
             {
+                ++visits_;
                 const auto front = order_.front();
                 order_.pop_front();
                 if (is_current_locked(front))
@@ -729,7 +745,10 @@ namespace proxy
             std::vector<record> live;
             live.reserve(entries_.size());
             for (const auto& [key, value] : entries_)
+            {
+                ++visits_;
                 live.push_back({ key, value.created_at });
+            }
             std::sort(live.begin(), live.end(),
                 [](const record& left, const record& right) { return left.created_at < right.created_at; });
             order_.assign(live.begin(), live.end());
@@ -738,6 +757,7 @@ namespace proxy
         mutable std::mutex lock_;
         std::unordered_map<uint32_t, entry> entries_;
         std::deque<record> order_;
+        std::uint64_t visits_{};
         std::chrono::seconds ttl_;
         std::size_t capacity_;
     };

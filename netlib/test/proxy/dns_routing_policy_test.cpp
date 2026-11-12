@@ -670,29 +670,53 @@ TEST(DnsUdpOriginTracker, InsertionRecordsStayBoundedUnderRepeatedRefreshes)
         EXPECT_TRUE(origins.resolve(port, 7, start + std::chrono::seconds{ 1 }).has_value());
 }
 
-TEST(DnsUdpOriginTracker, InsertingIntoAFullTableOfLiveEntriesIsCheap)
+TEST(DnsUdpOriginTracker, InsertingIntoAFullTableOfLiveEntriesDoesBoundedWorkPerInsert)
 {
     constexpr std::size_t capacity = 8192;
+    constexpr uint32_t inserts = 100000;
     tracker origins{ std::chrono::seconds{ 30 }, capacity };
     const auto start = clock::now();
-
-    // 200k inserts with the table permanently full of live entries. With a linear scan per
-    // insert this is ~1.6e9 entry visits; with insertion-order eviction it is linear overall.
-    const auto timer = std::chrono::steady_clock::now();
-    for (uint32_t i = 0; i < 200000; ++i)
+    const auto remember = [&](const uint32_t i)
+    {
         origins.remember(static_cast<uint16_t>(i >> 16), static_cast<uint16_t>(i), { "s", 53 },
             start + std::chrono::microseconds{ i });
-    const auto elapsed = std::chrono::steady_clock::now() - timer;
+    };
+
+    // Fill the table with live entries (nothing expires within the test's time span).
+    for (uint32_t i = 0; i < capacity; ++i)
+        remember(i);
+    ASSERT_EQ(origins.size(), capacity);
+
+    // Every further insert must evict one live entry. Count the entries and records examined:
+    // insertion-order eviction examines a constant amortized number per insert, while a sweep or
+    // a search for the oldest entry examines the whole table (8192) on every insert.
+    const auto before = origins.visits();
+    for (uint32_t i = capacity; i < capacity + inserts; ++i)
+        remember(i);
+    const auto work = origins.visits() - before;
 
     EXPECT_EQ(origins.size(), capacity);
+    EXPECT_LE(work, 4ull * inserts) << "entries/records examined per insert: " << double(work) / inserts;
     EXPECT_LE(origins.order_records(), 2 * capacity + 16);
     // The newest entries survive, the oldest are evicted.
-    EXPECT_TRUE(origins.resolve(3, static_cast<uint16_t>(199999 & 0xffff), start + std::chrono::seconds{ 1 }).has_value());
+    const auto newest = capacity + inserts - 1;
+    EXPECT_TRUE(origins.resolve(static_cast<uint16_t>(newest >> 16), static_cast<uint16_t>(newest), start + std::chrono::seconds{ 1 }).has_value());
     EXPECT_FALSE(origins.resolve(0, 0, start + std::chrono::seconds{ 1 }).has_value());
-    // Measured on the portable runner: ~10 ms with insertion-order eviction, ~6.7 s with the
-    // earlier per-insert sweep and linear search for the oldest entry. The bound leaves two
-    // orders of magnitude of headroom for slow or sanitized builds and still fails the latter.
-    EXPECT_LT(elapsed, std::chrono::seconds{ 2 });
+}
+
+TEST(DnsUdpOriginTracker, RepeatedRefreshesDoBoundedWork)
+{
+    constexpr std::size_t capacity = 64;
+    constexpr int refreshes = 100000;
+    tracker origins{ std::chrono::seconds{ 30 }, capacity };
+    const auto start = clock::now();
+    const auto before = origins.visits();
+    for (int i = 0; i < refreshes; ++i)
+        origins.remember(static_cast<uint16_t>(i % 8), 7, { "x", 53 }, start + std::chrono::microseconds{ i });
+
+    // Compaction rebuilds the queue from the 8 live entries only after at least `capacity`
+    // stale records have accumulated, so its cost is amortized to well under one visit per call.
+    EXPECT_LE(origins.visits() - before, static_cast<std::uint64_t>(refreshes));
 }
 
 // ------------------------------------------------------------------ listener replies and fragments
