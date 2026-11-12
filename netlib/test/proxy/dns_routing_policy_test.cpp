@@ -402,3 +402,16 @@ TEST(DnsUdpOriginTracker, IsSafeForConcurrentPacketAndMaintenanceThreads)
 
     EXPECT_LE(origins.size(), 4096u);
 }
+
+// 1. Packets sourced from a local proxy listener are re-injected when translated and dropped
+//    otherwise; they are never passed to the wire. Other packets continue with normal routing.
+TEST(ListenerReplyPolicy, UntranslatedListenerRepliesAreDroppedNeverPassed)
+{
+    using proxy::decide_listener_reply;
+    using proxy::listener_reply_action;
+
+    EXPECT_EQ(decide_listener_reply(true, true), listener_reply_action::revert);
+    EXPECT_EQ(decide_listener_reply(true, false), listener_reply_action::drop);
+    EXPECT_EQ(decide_listener_reply(false, false), listener_reply_action::not_listener);
+    EXPECT_EQ(decide_listener_reply(false, true), listener_reply_action::not_listener);
+}

@@ -437,3 +437,194 @@ TEST(DnsPacketRedirect, TcpSegmentOfAnUnknownConnectionIsRejectedSoTheRouterDrop
     auto data = frame::tcp4("192.168.1.10", "192.168.1.1", client_port, 53, TH_ACK | TH_PSH);
     EXPECT_FALSE(redirect.process_client_to_server_packet(data.buffer, htons(tcp_listener)));
 }
+
+// ------------------------------------------------------------------ TCP close tracking
+//
+// tcp_local_redirect keeps a connection's entry through the whole close. Every segment of an
+// ordinary close is translated in both directions, so nothing is left for the router to drop
+// (and count as blocked DNS) or, on the application path, to pass toward the real server.
+
+namespace
+{
+    using tcp_redirect4 = ndisapi::tcp_local_redirect<v4>;
+    constexpr const char* tcp_client = "192.168.1.10";
+    constexpr const char* tcp_server = "192.168.1.1";
+
+    /// A client-to-server segment, before redirection.
+    frame client_segment(const uint8_t flags, const uint16_t dport = 53)
+    {
+        return frame::tcp4(tcp_client, tcp_server, client_port, dport, flags);
+    }
+
+    /// A segment from the local listener to the (swapped) original server address.
+    frame listener_segment(const uint8_t flags)
+    {
+        return frame::tcp4(tcp_client, tcp_server, tcp_listener, client_port, flags);
+    }
+
+    bool send_client(tcp_redirect4& redirect, const uint8_t flags, const uint16_t dport = 53)
+    {
+        auto segment = client_segment(flags, dport);
+        return redirect.process_client_to_server_packet(segment.buffer, htons(tcp_listener));
+    }
+
+    /// Sends a listener segment and returns the source port the client sees, if translated.
+    std::optional<uint16_t> send_listener(tcp_redirect4& redirect, const uint8_t flags)
+    {
+        auto segment = listener_segment(flags);
+        if (!redirect.process_server_to_client_packet(segment.buffer))
+            return std::nullopt;
+        EXPECT_EQ(v4{ segment.ip4()->ip_src }, v4{ std::string{ tcp_server } });
+        EXPECT_TRUE(segment.ip4_checksum_valid());
+        EXPECT_TRUE(segment.l4_checksum_valid());
+        return ntohs(segment.tcp()->th_sport);
+    }
+
+    std::optional<tcp_redirect4::connection_state> state_of(tcp_redirect4& redirect)
+    {
+        return redirect.find_connection(v4{ std::string{ tcp_server } }, htons(client_port));
+    }
+
+    void establish(tcp_redirect4& redirect)
+    {
+        ASSERT_TRUE(send_client(redirect, TH_SYN));
+        ASSERT_EQ(send_listener(redirect, TH_SYN | TH_ACK), uint16_t{ 53 });
+        ASSERT_TRUE(send_client(redirect, TH_ACK));
+    }
+}
+
+TEST(DnsTcpCloseTracking, ClientInitiatedCloseIsTranslatedToTheEnd)
+{
+    tcp_redirect4 redirect{ log_level::error };
+    establish(redirect);
+
+    EXPECT_TRUE(send_client(redirect, TH_FIN | TH_ACK));
+    ASSERT_TRUE(state_of(redirect).has_value());
+    EXPECT_TRUE(state_of(redirect)->client_fin);
+    EXPECT_FALSE(state_of(redirect)->server_fin);
+
+    // The listener's ACK and FIN still reach the client as coming from the server's port 53.
+    EXPECT_EQ(send_listener(redirect, TH_ACK), uint16_t{ 53 });
+    EXPECT_EQ(send_listener(redirect, TH_FIN | TH_ACK), uint16_t{ 53 });
+    ASSERT_TRUE(state_of(redirect).has_value());
+    EXPECT_TRUE(state_of(redirect)->server_fin);
+
+    // The client's final ACK is translated too.
+    EXPECT_TRUE(send_client(redirect, TH_ACK));
+
+    // The entry lingers briefly after the close completes, then expires.
+    const auto now = std::chrono::steady_clock::now();
+    redirect.remove_expired(now);
+    EXPECT_TRUE(state_of(redirect).has_value());
+    redirect.remove_expired(now + tcp_redirect4::closed_linger + std::chrono::seconds{ 1 });
+    EXPECT_FALSE(state_of(redirect).has_value());
+
+    // A listener segment after expiry is not translated (the router then drops it).
+    EXPECT_FALSE(send_listener(redirect, TH_ACK).has_value());
+}
+
+TEST(DnsTcpCloseTracking, ListenerInitiatedCloseAllowsTheHalfClosedSideToFinish)
+{
+    tcp_redirect4 redirect{ log_level::error };
+    establish(redirect);
+
+    EXPECT_EQ(send_listener(redirect, TH_FIN | TH_ACK), uint16_t{ 53 });
+    EXPECT_TRUE(state_of(redirect)->server_fin);
+
+    // Half-closed: the client may still send data before its own FIN.
+    EXPECT_TRUE(send_client(redirect, TH_ACK));
+    EXPECT_TRUE(send_client(redirect, TH_PSH | TH_ACK));
+    EXPECT_TRUE(send_client(redirect, TH_FIN | TH_ACK));
+    EXPECT_EQ(send_listener(redirect, TH_ACK), uint16_t{ 53 });
+}
+
+TEST(DnsTcpCloseTracking, FinRetransmissionsAreTranslated)
+{
+    tcp_redirect4 redirect{ log_level::error };
+    establish(redirect);
+
+    EXPECT_TRUE(send_client(redirect, TH_FIN | TH_ACK));
+    EXPECT_TRUE(send_client(redirect, TH_FIN | TH_ACK));
+    EXPECT_EQ(send_listener(redirect, TH_FIN | TH_ACK), uint16_t{ 53 });
+    EXPECT_EQ(send_listener(redirect, TH_FIN | TH_ACK), uint16_t{ 53 });
+    EXPECT_TRUE(send_client(redirect, TH_FIN | TH_ACK));
+    EXPECT_TRUE(send_client(redirect, TH_ACK));
+}
+
+TEST(DnsTcpCloseTracking, RstFromEitherSideIsTranslatedAndEndsTrackingImmediately)
+{
+    {
+        tcp_redirect4 redirect{ log_level::error };
+        establish(redirect);
+        EXPECT_TRUE(send_client(redirect, TH_RST | TH_ACK));
+        EXPECT_FALSE(state_of(redirect).has_value());
+        EXPECT_FALSE(send_client(redirect, TH_ACK));
+    }
+    {
+        tcp_redirect4 redirect{ log_level::error };
+        establish(redirect);
+        EXPECT_TRUE(send_client(redirect, TH_FIN | TH_ACK));
+        EXPECT_EQ(send_listener(redirect, TH_RST), uint16_t{ 53 });
+        EXPECT_FALSE(state_of(redirect).has_value());
+        EXPECT_FALSE(send_listener(redirect, TH_ACK).has_value());
+    }
+}
+
+TEST(DnsTcpCloseTracking, IdleTimeoutsDependOnTheCloseState)
+{
+    const auto now = std::chrono::steady_clock::now();
+
+    tcp_redirect4 open{ log_level::error };
+    establish(open);
+    open.remove_expired(now + tcp_redirect4::open_timeout - std::chrono::seconds{ 5 });
+    EXPECT_TRUE(state_of(open).has_value());
+    open.remove_expired(now + tcp_redirect4::open_timeout + std::chrono::seconds{ 5 });
+    EXPECT_FALSE(state_of(open).has_value());
+
+    tcp_redirect4 half_closed{ log_level::error };
+    establish(half_closed);
+    EXPECT_TRUE(send_client(half_closed, TH_FIN | TH_ACK));
+    half_closed.remove_expired(now + tcp_redirect4::half_closed_timeout - std::chrono::seconds{ 5 });
+    EXPECT_TRUE(state_of(half_closed).has_value());
+    half_closed.remove_expired(now + tcp_redirect4::half_closed_timeout + std::chrono::seconds{ 5 });
+    EXPECT_FALSE(state_of(half_closed).has_value());
+
+    static_assert(tcp_redirect4::closed_linger < tcp_redirect4::half_closed_timeout);
+    static_assert(tcp_redirect4::half_closed_timeout < tcp_redirect4::open_timeout);
+}
+
+TEST(DnsTcpCloseTracking, NewSynOnAClosingKeyStartsANewConnection)
+{
+    tcp_redirect4 redirect{ log_level::error };
+    establish(redirect);
+    EXPECT_TRUE(send_client(redirect, TH_FIN | TH_ACK));
+    EXPECT_EQ(send_listener(redirect, TH_FIN | TH_ACK), uint16_t{ 53 });
+
+    // The client reuses its source port for a connection to another destination port.
+    ASSERT_TRUE(send_client(redirect, TH_SYN, 853));
+    ASSERT_TRUE(state_of(redirect).has_value());
+    EXPECT_FALSE(state_of(redirect)->client_fin);
+    EXPECT_FALSE(state_of(redirect)->server_fin);
+    EXPECT_EQ(send_listener(redirect, TH_SYN | TH_ACK), uint16_t{ 853 });
+
+    // A retransmitted SYN of a connection being set up refreshes it and is still redirected.
+    EXPECT_TRUE(send_client(redirect, TH_SYN, 853));
+    EXPECT_EQ(send_listener(redirect, TH_SYN | TH_ACK), uint16_t{ 853 });
+}
+
+// 1. A listener segment that cannot be translated is dropped by the router rather than passed:
+//    the decision the four handlers apply to process_server_to_client_packet's result.
+TEST(DnsTcpCloseTracking, UntranslatableListenerSegmentIsDropped)
+{
+    tcp_redirect4 redirect{ log_level::error };
+    auto stray = listener_segment(TH_ACK);
+    const bool translated = redirect.process_server_to_client_packet(stray.buffer);
+    EXPECT_FALSE(translated);
+    EXPECT_EQ(proxy::decide_listener_reply(true, translated), proxy::listener_reply_action::drop);
+
+    ndisapi::socks5_udp_local_redirect<v4> udp{ log_level::error };
+    auto unknown = local_proxy_reply("192.168.1.10", "192.168.1.1", v4{ std::string{ "192.168.1.1" } }, 53, dns_message(1));
+    const bool udp_translated = udp.process_server_to_client_packet(unknown.buffer);
+    EXPECT_FALSE(udp_translated);
+    EXPECT_EQ(proxy::decide_listener_reply(true, udp_translated), proxy::listener_reply_action::drop);
+}

@@ -146,6 +146,32 @@ namespace proxy
         }
     }
 
+    /// What a packet handler does with an outbound packet whose source port is the port of one of
+    /// ProxiFyre's local proxy listeners.
+    enum class listener_reply_action : uint8_t
+    {
+        not_listener, ///< not sourced from a local listener: continue with the normal routing
+        revert,       ///< translated back to the original server/client: re-inject it to the stack
+        drop          ///< not translatable: drop it
+    };
+
+    /**
+     * @brief Decides what to do with a packet sourced from a local proxy listener.
+     *
+     * A listener reply is addressed to the original server only because redirection swapped the
+     * addresses; it never belongs on the wire. When it cannot be translated back (no tracked
+     * connection or endpoint, a fragmented or malformed datagram, a relay header of the wrong
+     * address type), passing it would send the listener's bytes - for the DNS proxy, the SOCKS5
+     * header and the DNS answer - toward the real server in clear, so it is dropped.
+     */
+    [[nodiscard]] constexpr listener_reply_action decide_listener_reply(
+        const bool source_is_listener, const bool translated) noexcept
+    {
+        if (!source_is_listener)
+            return listener_reply_action::not_listener;
+        return translated ? listener_reply_action::revert : listener_reply_action::drop;
+    }
+
     /// A DNS server override split into its literal address text and port.
     struct dns_server_override_text
     {
@@ -466,6 +492,8 @@ namespace proxy
     }
 
     // Compile-time checks of the decision table's key invariants.
+    static_assert(decide_listener_reply(true, false) == listener_reply_action::drop,
+        "An untranslatable listener reply must never be passed to the wire.");
     static_assert(decide_dns_route(dns_routing_mode::direct, 443, false, {}).action == dns_route_action::not_dns,
         "Non-DNS traffic must keep its ordinary routing.");
     static_assert(decide_dns_route(dns_routing_mode::direct, dns_port, false, {}).action == dns_route_action::pass,

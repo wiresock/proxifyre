@@ -285,6 +285,13 @@ namespace proxy
         std::atomic<std::uint64_t> dns_blocked_packets_{ 0 };
 
         /**
+         * @brief Count of packets sourced from a local proxy listener that could not be
+         *        translated back and were dropped instead of being passed to the wire. Reported
+         *        at a throttled rate by the resolver thread.
+         */
+        std::atomic<std::uint64_t> untranslated_listener_replies_{ 0 };
+
+        /**
          * @brief One-shot flags so that each (family, transport, reason) block cause is
          *        described once in the log instead of once per packet.
          */
@@ -961,6 +968,7 @@ namespace proxy
             dns_udp_origins_v4_.clear();
             dns_udp_origins_v6_.clear();
             dns_blocked_packets_.store(0, std::memory_order_relaxed);
+            untranslated_listener_replies_.store(0, std::memory_order_relaxed);
             for (auto& flag : dns_block_reason_logged_)
                 flag.clear(std::memory_order_relaxed);
             install_dns_filters();
@@ -2561,11 +2569,16 @@ namespace proxy
                 if (restore == dns_reply_restore::drop)
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
 
-                if (udp_redirect_->process_server_to_client_packet(buffer, origin))
+                // A listener reply never belongs on the wire: drop it when it cannot be translated.
+                if (decide_listener_reply(true, udp_redirect_->process_server_to_client_packet(buffer, origin)) ==
+                    listener_reply_action::revert)
                 {
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
+
+                untranslated_listener_replies_.fetch_add(1, std::memory_order_relaxed);
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
             }
 
             // Conventional DNS (destination port 53) follows the global DNS policy, before and
@@ -2675,11 +2688,19 @@ namespace proxy
             // If the packet is from a known proxy port, process for server-to-client redirection
             if (is_tcp_proxy_port(ntohs(tcp_header->th_sport)))
             {
-                if (tcp_redirect_->process_server_to_client_packet(buffer))
+                // A listener segment never belongs on the wire: drop it when it cannot be
+                // translated (for example after its connection entry expired), instead of letting
+                // it reach the real server. tcp_local_redirect tracks the whole close, so ordinary
+                // FIN/ACK exchanges are translated.
+                if (decide_listener_reply(true, tcp_redirect_->process_server_to_client_packet(buffer)) ==
+                    listener_reply_action::revert)
                 {
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
+
+                untranslated_listener_replies_.fetch_add(1, std::memory_order_relaxed);
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
             }
 
             // Conventional DNS over TCP follows the global DNS policy. In Direct mode TCP/53 is
@@ -2856,11 +2877,16 @@ namespace proxy
                 if (restore == dns_reply_restore::drop)
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
 
-                if (udp_redirect_v6_->process_server_to_client_packet(buffer, origin))
+                // A listener reply never belongs on the wire: drop it when it cannot be translated.
+                if (decide_listener_reply(true, udp_redirect_v6_->process_server_to_client_packet(buffer, origin)) ==
+                    listener_reply_action::revert)
                 {
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
+
+                untranslated_listener_replies_.fetch_add(1, std::memory_order_relaxed);
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
             }
 
             // Conventional DNS follows the global DNS policy (mirrors the IPv4 path).
@@ -2964,11 +2990,19 @@ namespace proxy
             // If the packet is from a known proxy port, process for server-to-client redirection
             if (is_tcp_proxy_port_v6(ntohs(tcp_header->th_sport)))
             {
-                if (tcp_redirect_v6_->process_server_to_client_packet(buffer))
+                // A listener segment never belongs on the wire: drop it when it cannot be
+                // translated (for example after its connection entry expired), instead of letting
+                // it reach the real server. tcp_local_redirect tracks the whole close, so ordinary
+                // FIN/ACK exchanges are translated.
+                if (decide_listener_reply(true, tcp_redirect_v6_->process_server_to_client_packet(buffer)) ==
+                    listener_reply_action::revert)
                 {
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
+
+                untranslated_listener_replies_.fetch_add(1, std::memory_order_relaxed);
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
             }
 
             // Conventional DNS over TCP follows the global DNS policy (mirrors the IPv4 path).
@@ -3252,11 +3286,13 @@ namespace proxy
                     dns_udp_origins_v6_.sweep(now);
                 }
 
-                // Report Proxy-mode DNS drops at the same throttled rate as the queue drops so
-                // a resolver retrying against an unreachable proxy cannot flood the log.
+                // Report Proxy-mode DNS drops and untranslatable listener replies at the same
+                // throttled rate as the queue drops so a resolver retrying against an
+                // unreachable proxy cannot flood the log.
                 if (const auto now = std::chrono::steady_clock::now();
                     now - last_dns_block_log >= drop_log_throttle_interval_ &&
-                    dns_blocked_packets_.load(std::memory_order_relaxed) != 0)
+                    (dns_blocked_packets_.load(std::memory_order_relaxed) != 0 ||
+                        untranslated_listener_replies_.load(std::memory_order_relaxed) != 0))
                 {
                     last_dns_block_log = now;
                     if (const auto blocked = dns_blocked_packets_.exchange(0, std::memory_order_relaxed); blocked != 0)
@@ -3264,6 +3300,13 @@ namespace proxy
                         NETLIB_LOG(log_level::warning,
                             "DNS routing: dropped {} DNS packet(s) that could not be sent through the DNS proxy "
                             "(they were not sent directly).", blocked);
+                    }
+                    if (const auto untranslated = untranslated_listener_replies_.exchange(0, std::memory_order_relaxed);
+                        untranslated != 0)
+                    {
+                        NETLIB_LOG(log_level::debug,
+                            "Dropped {} packet(s) from local proxy listeners that could not be translated back "
+                            "(no tracked connection, fragmented, or malformed).", untranslated);
                     }
                 }
 

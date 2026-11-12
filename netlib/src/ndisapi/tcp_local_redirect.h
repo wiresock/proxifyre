@@ -18,13 +18,51 @@ namespace ndisapi
     {
         using log_level = netlib::log::log_level;
         using logger = netlib::log::logger<tcp_local_redirect>;
-        using timestamp_endpoint = std::pair<uint16_t, std::chrono::steady_clock::time_point>;
+
+    public:
+        using clock = std::chrono::steady_clock;
+
+        /// Idle lifetime of a redirected connection that has not started closing.
+        static constexpr std::chrono::seconds open_timeout{ 5 * 60 };
+
+        /// Idle lifetime once one side has sent FIN (half-closed). Data may still flow the other way.
+        static constexpr std::chrono::seconds half_closed_timeout{ 2 * 60 };
+
+        /// Lifetime once both sides have sent FIN, so the final ACK and FIN retransmissions of
+        /// either side are still translated instead of reaching the real server.
+        static constexpr std::chrono::seconds closed_linger{ 10 };
 
         /**
-         * @brief Maps client TCP endpoint to a pair of (proxy port, last activity timestamp).
-         * Used for tracking active TCP connections.
+         * @brief Tracking state of one redirected connection.
+         *
+         * The entry is kept through the whole close: removing it on the first FIN (as earlier
+         * versions did) left the rest of the close untranslated, so the peer's ACK/FIN and FIN
+         * retransmissions were passed toward the real server. An RST removes the entry at once.
          */
-        std::unordered_map<net::ip_endpoint<T>, timestamp_endpoint> redirected_connections_;
+        struct connection_state
+        {
+            u_short original_port{};         ///< original destination port (network byte order)
+            clock::time_point last_activity;
+            bool client_fin{};               ///< the client sent FIN
+            bool server_fin{};               ///< the local proxy sent FIN
+
+            /// The time after which the entry may be removed.
+            [[nodiscard]] clock::time_point expires_at() const noexcept
+            {
+                if (client_fin && server_fin)
+                    return last_activity + closed_linger;
+                if (client_fin || server_fin)
+                    return last_activity + half_closed_timeout;
+                return last_activity + open_timeout;
+            }
+        };
+
+    private:
+        /**
+         * @brief Maps the client TCP endpoint (original destination address, client source port)
+         *        to its tracking state.
+         */
+        std::unordered_map<net::ip_endpoint<T>, connection_state> redirected_connections_;
 
         /**
          * @brief Mutex for synchronizing access to redirected_connections_.
@@ -49,8 +87,8 @@ namespace ndisapi
         /**
          * @brief Starts the background cleanup thread.
          *
-         * The thread periodically scans the redirected_connections_ map and removes entries
-         * that have been inactive for more than 5 minutes.
+         * The thread periodically removes entries whose lifetime has elapsed (see
+         * connection_state::expires_at()).
          */
         void start_cleanup_thread()
         {
@@ -58,27 +96,7 @@ namespace ndisapi
                 {
                     while (!terminate_)
                     {
-                        {
-                            auto current_time = std::chrono::steady_clock::now();
-                            std::lock_guard lock(lock_);
-
-                            tools::generic::erase_if(redirected_connections_, redirected_connections_.begin(),
-                                redirected_connections_.end(),
-                                [&current_time, this](auto&& a)
-                                {
-                                    using namespace std::chrono_literals;
-                                    if (current_time - a.second.second > 5min)
-                                    {
-                                        NETLIB_DEBUG(
-                                            "DELETE TCP (timeout): {} -> {} : {}",
-                                            ntohs(a.first.port),
-                                            std::string{ a.first.ip },
-                                            ntohs(a.second.first));
-                                        return true;
-                                    }
-                                    return false;
-                                });
-                        }
+                        remove_expired(clock::now());
 
                         // Check terminate_ more frequently during sleep to allow faster shutdown
                         using namespace std::chrono_literals;
@@ -177,6 +195,133 @@ namespace ndisapi
         }
 
         /**
+         * @brief Removes connection entries whose lifetime has elapsed at @p now.
+         *
+         * Called periodically by the cleanup thread; public so the timeouts can be exercised
+         * deterministically.
+         */
+        void remove_expired(const clock::time_point now)
+        {
+            std::lock_guard lock(lock_);
+
+            tools::generic::erase_if(redirected_connections_, redirected_connections_.begin(),
+                redirected_connections_.end(),
+                [&now, this](auto&& a)
+                {
+                    if (now < a.second.expires_at())
+                        return false;
+
+                    NETLIB_DEBUG(
+                        "DELETE TCP (timeout): {} -> {} : {}",
+                        ntohs(a.first.port),
+                        std::string{ a.first.ip },
+                        ntohs(a.second.original_port));
+                    return true;
+                });
+        }
+
+        /**
+         * @brief Returns a copy of the tracking state for client endpoint
+         *        (@p original_destination, @p client_port), where @p client_port is in network
+         *        byte order. For diagnostics and tests.
+         */
+        [[nodiscard]] std::optional<connection_state> find_connection(const T& original_destination,
+            const u_short client_port)
+        {
+            std::lock_guard lock(lock_);
+            const auto it = redirected_connections_.find(net::ip_endpoint<T>{ original_destination, client_port });
+            if (it == redirected_connections_.cend())
+                return std::nullopt;
+            return it->second;
+        }
+
+    private:
+        /**
+         * @brief Updates the tracking state for a client-to-server segment. The caller holds lock_.
+         *
+         * A SYN (without ACK) starts or restarts tracking: a retransmitted SYN refreshes the entry,
+         * and a SYN on a key whose previous connection is closing starts a new connection. Any
+         * other segment must belong to a tracked connection.
+         *
+         * @return false when the segment belongs to no tracked connection and must not be rewritten.
+         */
+        bool track_client_segment(const net::ip_endpoint<T>& key, const u_char flags, const u_short destination_port,
+            const T& source, const T& destination)
+        {
+            const auto now = clock::now();
+
+            if ((flags & (TH_SYN | TH_ACK)) == TH_SYN)
+            {
+                const auto [it, inserted] = redirected_connections_.try_emplace(key);
+                if (inserted)
+                {
+                    NETLIB_DEBUG(
+                        "NEW TCP: {}:{} -> {}:{}",
+                        std::string{ source },
+                        ntohs(key.port),
+                        std::string{ destination },
+                        ntohs(destination_port));
+                }
+
+                // A SYN whose key already exists is either a retransmission for a connection that
+                // is still being set up (the local listener has not completed the handshake) or a
+                // new connection reusing the key after the previous one closed. Both are rewritten
+                // to the local proxy: returning false would pass the SYN to the real destination,
+                // an unproxied leak of a connection we own.
+                it->second = connection_state{ destination_port, now, false, false };
+                return true;
+            }
+
+            const auto it = redirected_connections_.find(key);
+            if (it == redirected_connections_.cend())
+                return false;
+
+            if (flags & TH_RST)
+            {
+                NETLIB_DEBUG("DELETE TCP (client RST): {} -> {} : {}",
+                    ntohs(it->first.port), std::string{ it->first.ip }, ntohs(it->second.original_port));
+                redirected_connections_.erase(it);
+                return true;
+            }
+
+            if (flags & TH_FIN)
+                it->second.client_fin = true;
+
+            it->second.last_activity = now;
+            return true;
+        }
+
+        /**
+         * @brief Updates the tracking state for a segment from the local proxy to the client.
+         *        The caller holds lock_.
+         * @return the original destination port (network byte order) to present as the source
+         *         port, or std::nullopt when the segment belongs to no tracked connection.
+         */
+        std::optional<u_short> track_server_segment(const net::ip_endpoint<T>& key, const u_char flags)
+        {
+            const auto it = redirected_connections_.find(key);
+            if (it == redirected_connections_.cend())
+                return std::nullopt;
+
+            const auto original_port = it->second.original_port;
+
+            if (flags & TH_RST)
+            {
+                NETLIB_DEBUG("DELETE TCP (proxy RST): {} -> {} : {}",
+                    ntohs(it->first.port), std::string{ it->first.ip }, ntohs(original_port));
+                redirected_connections_.erase(it);
+                return original_port;
+            }
+
+            if (flags & TH_FIN)
+                it->second.server_fin = true;
+
+            it->second.last_activity = clock::now();
+            return original_port;
+        }
+
+    public:
+        /**
         * @brief Redirects a C2S TCP packet to the local proxy and applies NAT to the source port.
         *
         * Modifies the packet in-place, updates the source/destination addresses and ports as needed,
@@ -215,58 +360,9 @@ namespace ndisapi
 
                 std::lock_guard lock(lock_);
 
-                if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
-                {
-                    if (const auto [it, result] = redirected_connections_.emplace(
-                        net::ip_endpoint<T>{T{ ip_header->ip_dst }, tcp_header->th_sport},
-                        timestamp_endpoint{
-                            tcp_header->th_dport,
-                            std::chrono::steady_clock::now()
-                        }); result)
-                    {
-                        NETLIB_DEBUG(
-                            "NEW TCP: {}:{} -> {}:{}",
-                            std::string{ T{ip_header->ip_src} },
-                            ntohs(tcp_header->th_sport),
-                            std::string{ T{ip_header->ip_dst} },
-                            ntohs(tcp_header->th_dport));
-                    }
-                    else
-                    {
-                        // A SYN whose {dst, src-port} key already exists is a SYN RETRANSMISSION
-                        // for a connection we are already redirecting (the local listener has not
-                        // finished the handshake yet, so the client retransmits). Returning false
-                        // here would make the caller PASS the retransmit to the real destination --
-                        // an unproxied leak of a connection we own. Refresh the timestamp and fall
-                        // through to rewrite this SYN to the local proxy, exactly like the first one.
-                        it->second.second = std::chrono::steady_clock::now();
-                    }
-                }
-                else
-                {
-                    // existing connection
-                    const auto it = redirected_connections_.find(net::ip_endpoint<T>{
-                        T{ ip_header->ip_dst }, tcp_header->th_sport
-                    });
-                    if (it == redirected_connections_.cend())
-                        return false;
-
-                    if (tcp_header->th_flags & TH_RST || tcp_header->th_flags & TH_FIN)
-                    {
-                        // pass through but erase the corresponding entry
-                        NETLIB_DEBUG(
-                            "DELETE TCP: {} -> {} : {}",
-                            ntohs(it->first.port),
-                            std::string{ it->first.ip },
-                            ntohs(it->second.first));
-
-                        redirected_connections_.erase(it);
-                    }
-                    else
-                    {
-                        it->second.second = std::chrono::steady_clock::now();
-                    }
-                }
+                if (!track_client_segment(net::ip_endpoint<T>{ T{ ip_header->ip_dst }, tcp_header->th_sport },
+                        tcp_header->th_flags, tcp_header->th_dport, T{ ip_header->ip_src }, T{ ip_header->ip_dst }))
+                    return false;
 
                 // Swap Ethernet addresses
                 std::swap(eth_header->h_dest, eth_header->h_source);
@@ -297,56 +393,9 @@ namespace ndisapi
 
                 std::lock_guard lock(lock_);
 
-                if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
-                {
-                    if (const auto [it, result] = redirected_connections_.emplace(
-                        net::ip_endpoint<T>{T{ ip_header->ip6_dst }, tcp_header->th_sport},
-                        timestamp_endpoint{
-                            tcp_header->th_dport,
-                            std::chrono::steady_clock::now()
-                        }); result)
-                    {
-                        NETLIB_DEBUG(
-                            "NEW TCP: {}:{} -> {}:{}",
-                            std::string{ T{ip_header->ip6_src} },
-                            ntohs(tcp_header->th_sport),
-                            std::string{ T{ip_header->ip6_dst} },
-                            ntohs(tcp_header->th_dport));
-                    }
-                    else
-                    {
-                        // SYN retransmission for a connection we already redirect (see the IPv4
-                        // path): refresh the timestamp and rewrite it to the local proxy instead
-                        // of leaking the retransmit to the real destination.
-                        it->second.second = std::chrono::steady_clock::now();
-                    }
-                }
-                else
-                {
-                    // existing connection
-                    const auto it = redirected_connections_.find(net::ip_endpoint<T>{
-                        T{ ip_header->ip6_dst }, tcp_header->th_sport
-                    });
-                    if (it == redirected_connections_.cend())
-                        return false;
-
-                    if (tcp_header->th_flags & TH_RST || tcp_header->th_flags & TH_FIN)
-                    {
-                        // pass through but erase the corresponding entry
-                        NETLIB_DEBUG(
-                            "DELETE TCP: {}:{} -> {}:{}",
-                            std::string{ it->first.ip },
-                            ntohs(it->first.port),
-                            std::string{ it->first.ip },
-                            ntohs(it->second.first));
-
-                        redirected_connections_.erase(it);
-                    }
-                    else
-                    {
-                        it->second.second = std::chrono::steady_clock::now();
-                    }
-                }
+                if (!track_client_segment(net::ip_endpoint<T>{ T{ ip_header->ip6_dst }, tcp_header->th_sport },
+                        tcp_header->th_flags, tcp_header->th_dport, T{ ip_header->ip6_src }, T{ ip_header->ip6_dst }))
+                    return false;
 
                 //Swap Ethernet addresses
                 std::swap(eth_header->h_dest, eth_header->h_source);
@@ -399,29 +448,12 @@ namespace ndisapi
 
                 std::lock_guard lock(lock_);
 
-                const auto it = redirected_connections_.find(net::ip_endpoint<T>{
-                    T{ ip_header->ip_dst }, tcp_header->th_dport
-                });
-                if (it == redirected_connections_.cend())
+                const auto original_port = track_server_segment(
+                    net::ip_endpoint<T>{ T{ ip_header->ip_dst }, tcp_header->th_dport }, tcp_header->th_flags);
+                if (!original_port)
                     return false;
 
-                tcp_header->th_sport = it->second.first;
-
-                if (tcp_header->th_flags & TH_RST || tcp_header->th_flags & TH_FIN)
-                {
-                    // pass through but erase the corresponding entry
-                    NETLIB_DEBUG(
-                        "DELETE TCP: {} -> {} : {}",
-                        ntohs(it->first.port),
-                        std::string{ it->first.ip },
-                        ntohs(it->second.first));
-
-                    redirected_connections_.erase(it);
-                }
-                else
-                {
-                    it->second.second = std::chrono::steady_clock::now();
-                }
+                tcp_header->th_sport = *original_port;
 
                 // Swap Ethernet addresses
                 std::swap(eth_header->h_dest, eth_header->h_source);
@@ -450,29 +482,12 @@ namespace ndisapi
 
                 std::lock_guard lock(lock_);
 
-                const auto it = redirected_connections_.find(net::ip_endpoint<T>{
-                    T{ ip_header->ip6_dst }, tcp_header->th_dport
-                });
-                if (it == redirected_connections_.cend())
+                const auto original_port = track_server_segment(
+                    net::ip_endpoint<T>{ T{ ip_header->ip6_dst }, tcp_header->th_dport }, tcp_header->th_flags);
+                if (!original_port)
                     return false;
 
-                tcp_header->th_sport = it->second.first;
-
-                if (tcp_header->th_flags & TH_RST || tcp_header->th_flags & TH_FIN)
-                {
-                    // pass through but erase the corresponding entry
-                    NETLIB_DEBUG(
-                        "DELETE TCP: {} -> {} : {}",
-                        ntohs(it->first.port),
-                        std::string{ it->first.ip },
-                        ntohs(it->second.first));
-
-                    redirected_connections_.erase(it);
-                }
-                else
-                {
-                    it->second.second = std::chrono::steady_clock::now();
-                }
+                tcp_header->th_sport = *original_port;
 
                 // Swap Ethernet addresses
                 std::swap(eth_header->h_dest, eth_header->h_source);
