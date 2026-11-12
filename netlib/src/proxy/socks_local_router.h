@@ -2902,6 +2902,13 @@ namespace proxy
                 // translated (for example after its connection entry expired), instead of letting
                 // it reach the real server. tcp_local_redirect tracks the whole close, so ordinary
                 // FIN/ACK exchanges are translated.
+                // A first fragment cannot be translated on its own (the TCP redirect does not check).
+                if (!ipv4_listener_packet_translatable(fragment))
+                {
+                    note_untranslated_listener_reply();
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+                }
+
                 return handle_tcp_listener_segment(buffer, tcp_redirect_->process_server_to_client_segment(buffer));
             }
 
@@ -3030,7 +3037,8 @@ namespace proxy
                         (first->protocol == IPPROTO_UDP ? is_udp_proxy_port_v6(first->source_port)
                                                         : is_tcp_proxy_port_v6(first->source_port));
 
-                    switch (decide_ipv6_fragment(first, source_is_listener, first && dns_proxy_mode()))
+                    const bool proxy_mode = ipv6_fragment_needs_dns_mode(first, source_is_listener) && dns_proxy_mode();
+                    switch (decide_ipv6_fragment(first, source_is_listener, proxy_mode))
                     {
                     case ipv6_fragment_action::drop_listener_reply:
                         note_untranslated_listener_reply();

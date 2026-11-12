@@ -857,3 +857,43 @@ TEST(DnsRoutingPolicy, UpstreamExemptionCandidatesDependOnTheUdpRelayPort)
         }
     }
 }
+
+// The DNS mode (which takes the router's lock) is needed only for a non-listener IPv6 first
+// fragment addressed to port 53; the fragment decision itself does not change.
+TEST(ListenerFragmentPolicy, DnsModeIsReadOnlyForNonListenerFirstFragmentsToPort53)
+{
+    using proxy::decide_ipv6_fragment;
+    using proxy::ipv6_fragment_needs_dns_mode;
+
+    const auto dns_query = parse(ipv6_packet(fragment_proto, concat({ fragment_header(udp_proto, 0, true), ports(50001, 53) })));
+    const auto listener_reply = parse(ipv6_packet(fragment_proto, concat({ fragment_header(udp_proto, 0, true), ports(41004, 53) })));
+    const auto unrelated = parse(ipv6_packet(fragment_proto, concat({ fragment_header(udp_proto, 0, true), ports(50001, 443) })));
+
+    EXPECT_TRUE(ipv6_fragment_needs_dns_mode(dns_query, false));
+    EXPECT_FALSE(ipv6_fragment_needs_dns_mode(listener_reply, true));
+    EXPECT_FALSE(ipv6_fragment_needs_dns_mode(unrelated, false));
+    EXPECT_FALSE(ipv6_fragment_needs_dns_mode(std::nullopt, false));
+
+    // Whenever the mode is not read, the decision is the same in both modes.
+    for (const auto& [first, listener] : { std::pair{ listener_reply, true }, std::pair{ unrelated, false },
+                                           std::pair{ std::optional<proxy::ipv6_first_fragment>{}, false } })
+    {
+        if (!ipv6_fragment_needs_dns_mode(first, listener))
+        {
+            EXPECT_EQ(decide_ipv6_fragment(first, listener, false), decide_ipv6_fragment(first, listener, true));
+        }
+    }
+}
+
+// An IPv4 listener packet is translated only when it is not fragmented: a first fragment carries
+// only part of the reply and is dropped and reported (the TCP redirect does not check fragments).
+TEST(ListenerFragmentPolicy, Ipv4ListenerFirstFragmentsAreNotTranslated)
+{
+    using proxy::classify_ipv4_fragment;
+    using proxy::ipv4_listener_packet_translatable;
+
+    EXPECT_TRUE(ipv4_listener_packet_translatable(classify_ipv4_fragment(0x0000)));
+    EXPECT_TRUE(ipv4_listener_packet_translatable(classify_ipv4_fragment(0x4000)));
+    EXPECT_FALSE(ipv4_listener_packet_translatable(classify_ipv4_fragment(0x2000)));
+    EXPECT_FALSE(ipv4_listener_packet_translatable(classify_ipv4_fragment(0x2001)));
+}

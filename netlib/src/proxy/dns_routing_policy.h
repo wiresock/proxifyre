@@ -324,6 +324,20 @@ namespace proxy
     }
 
     /**
+     * @brief Whether a packet sourced from a local listener can be translated back to its client.
+     *
+     * A first fragment carries the listener's port but only part of the datagram or segment;
+     * rewriting it alone would deliver a partial packet whose later fragments are not
+     * translated. It is dropped and reported like any other untranslatable listener packet.
+     * (The UDP redirect already rejects fragments; the TCP redirect does not check, so the TCP
+     * handler applies this first.)
+     */
+    [[nodiscard]] constexpr bool ipv4_listener_packet_translatable(const ipv4_fragment fragment) noexcept
+    {
+        return fragment == ipv4_fragment::none;
+    }
+
+    /**
      * @brief Applies fragmentation to a DNS routing decision: a datagram that would be redirected
      *        but is fragmented cannot be, so it is blocked instead of being passed.
      */
@@ -493,6 +507,17 @@ namespace proxy
      * @param source_is_listener The first fragment's source port is a local IPv6 proxy listener
      *        port of its protocol.
      */
+    /**
+     * @brief Whether decide_ipv6_fragment() needs the DNS mode for @p first, so the caller reads
+     *        the mode (which takes the router's lock) only for a first fragment that is not a
+     *        listener reply and is addressed to port 53.
+     */
+    [[nodiscard]] constexpr bool ipv6_fragment_needs_dns_mode(const std::optional<ipv6_first_fragment>& first,
+        const bool source_is_listener) noexcept
+    {
+        return first.has_value() && !source_is_listener && first->destination_port == dns_port;
+    }
+
     [[nodiscard]] constexpr ipv6_fragment_action decide_ipv6_fragment(const std::optional<ipv6_first_fragment>& first,
         const bool source_is_listener, const bool dns_proxy_mode) noexcept
     {
