@@ -709,3 +709,21 @@ TEST(DnsPacketRedirect, TruncatedUdpAnswerAndTcpRetryBothGoThroughTheDnsProxy)
     auto final_ack = frame::tcp4("192.168.1.10", "192.168.1.1", retry_port, 53, TH_FIN | TH_ACK);
     EXPECT_TRUE(tcp.process_client_to_server_packet(final_ack.buffer, htons(tcp_listener)));
 }
+
+// 5. RST takes precedence over SYN: a segment carrying both ends tracking instead of starting it.
+TEST(DnsTcpCloseTracking, SynWithRstEndsTrackingInsteadOfStartingIt)
+{
+    {
+        tcp_redirect4 redirect{ log_level::error };
+        establish(redirect);
+        EXPECT_TRUE(send_client(redirect, TH_SYN | TH_RST));
+        EXPECT_FALSE(state_of(redirect).has_value());
+        EXPECT_FALSE(send_listener(redirect, TH_ACK).has_value());
+    }
+    {
+        // On an untracked key it neither creates an entry nor is rewritten.
+        tcp_redirect4 redirect{ log_level::error };
+        EXPECT_FALSE(send_client(redirect, TH_SYN | TH_RST));
+        EXPECT_FALSE(state_of(redirect).has_value());
+    }
+}

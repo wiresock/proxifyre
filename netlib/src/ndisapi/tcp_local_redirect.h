@@ -239,9 +239,10 @@ namespace ndisapi
         /**
          * @brief Updates the tracking state for a client-to-server segment. The caller holds lock_.
          *
-         * A SYN (without ACK) starts or restarts tracking: a retransmitted SYN refreshes the entry,
-         * and a SYN on a key whose previous connection is closing starts a new connection. Any
-         * other segment must belong to a tracked connection.
+         * An RST ends tracking at once, even when SYN is also set. A SYN (without ACK) starts or
+         * restarts tracking: a retransmitted SYN refreshes the entry, and a SYN on a key whose
+         * previous connection is closing starts a new connection. Any other segment must belong
+         * to a tracked connection.
          *
          * @return false when the segment belongs to no tracked connection and must not be rewritten.
          */
@@ -249,6 +250,19 @@ namespace ndisapi
             const T& source, const T& destination)
         {
             const auto now = clock::now();
+
+            // RST takes precedence over SYN: a segment carrying both must not (re)start tracking.
+            if (flags & TH_RST)
+            {
+                const auto it = redirected_connections_.find(key);
+                if (it == redirected_connections_.cend())
+                    return false;
+
+                NETLIB_DEBUG("DELETE TCP (client RST): {} -> {} : {}",
+                    ntohs(it->first.port), std::string{ it->first.ip }, ntohs(it->second.original_port));
+                redirected_connections_.erase(it);
+                return true;
+            }
 
             if ((flags & (TH_SYN | TH_ACK)) == TH_SYN)
             {
@@ -275,14 +289,6 @@ namespace ndisapi
             const auto it = redirected_connections_.find(key);
             if (it == redirected_connections_.cend())
                 return false;
-
-            if (flags & TH_RST)
-            {
-                NETLIB_DEBUG("DELETE TCP (client RST): {} -> {} : {}",
-                    ntohs(it->first.port), std::string{ it->first.ip }, ntohs(it->second.original_port));
-                redirected_connections_.erase(it);
-                return true;
-            }
 
             if (flags & TH_FIN)
                 it->second.client_fin = true;
