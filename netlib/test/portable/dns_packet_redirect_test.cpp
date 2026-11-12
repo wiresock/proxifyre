@@ -218,18 +218,21 @@ namespace
         const net::ip_endpoint<Addr>& server_override, proxy::dns_udp_origin_tracker<net::ip_endpoint<Addr>>& origins)
     {
         const Raw& raw = server_override.ip;
-        return proxy::classify_dns_override_reply(reply.udp_payload(), reply.udp_payload_size(),
+        return proxy::classify_dns_reply(reply.udp_payload(), reply.udp_payload_size(),
             static_cast<uint8_t>(std::is_same_v<Addr, v4> ? 1 : 4), reinterpret_cast<const uint8_t*>(&raw), sizeof(Raw),
             server_override.port, ntohs(reply.udp()->th_dport), origins);
     }
 
-    /// classify() for a DNS proxy without a server override, as the router calls it then.
+    /// classify() for a DNS proxy without a server override, with the arguments the router
+    /// passes then: no override address, but still the family's address size, and port 0.
     template <typename Addr>
     std::pair<proxy::dns_reply_restore, std::optional<net::ip_endpoint<Addr>>> classify_without_override(frame& reply,
         proxy::dns_udp_origin_tracker<net::ip_endpoint<Addr>>& origins)
     {
-        return proxy::classify_dns_override_reply(reply.udp_payload(), reply.udp_payload_size(),
-            static_cast<uint8_t>(std::is_same_v<Addr, v4> ? 1 : 4), nullptr, 0, 0, ntohs(reply.udp()->th_dport), origins);
+        constexpr bool is_v4 = std::is_same_v<Addr, v4>;
+        return proxy::classify_dns_reply(reply.udp_payload(), reply.udp_payload_size(),
+            static_cast<uint8_t>(is_v4 ? 1 : 4), nullptr, is_v4 ? sizeof(in_addr) : sizeof(in6_addr), 0,
+            ntohs(reply.udp()->th_dport), origins);
     }
 }
 
@@ -389,14 +392,23 @@ TEST(DnsPacketRedirect, AnswersToTrackedQueriesAreRestoredWhateverSourceTheRelay
     auto other_port = local_proxy_reply("192.168.1.10", "192.168.1.1", server_override.ip, 5353, dns_message(0x2222));
     EXPECT_EQ((classify<v4, in_addr>(other_port, server_override, origins).first), proxy::dns_reply_restore::unchanged);
 
-    // A malformed SOCKS5 header (non-zero FRAG) or the other family's ATYP is not restored; the
-    // redirect then fails to translate it and the router drops it.
+    // A malformed SOCKS5 header (non-zero FRAG) is not restored, and neither is a header of the
+    // other family that matches no tracked query; the redirect then fails to translate either
+    // and the router drops it.
     auto fragmented = local_proxy_reply("192.168.1.10", "192.168.1.1", server_override.ip, 53, dns_message(0x1111));
     fragmented.udp_payload()[2] = 1;
     EXPECT_EQ((classify<v4, in_addr>(fragmented, server_override, origins).first), proxy::dns_reply_restore::unchanged);
     auto wrong_family = frame::udp4("192.168.1.10", "192.168.1.1", udp_listener, client_port,
-        socks5_udp_datagram(v6{ std::string{ "2001:db8::1" } }, 53, dns_message(0x1111)));
+        socks5_udp_datagram(v6{ std::string{ "2001:db8::1" } }, 53, dns_message(0x2222)));
     EXPECT_EQ((classify<v4, in_addr>(wrong_family, server_override, origins).first), proxy::dns_reply_restore::unchanged);
+
+    // A tracked answer is restored even when the relay's header has the other address family.
+    auto tracked_other_family = frame::udp4("192.168.1.10", "192.168.1.1", udp_listener, client_port,
+        socks5_udp_datagram(v6{ std::string{ "2001:db8::1" } }, 53, dns_message(0x1111)));
+    const auto [other_family_restore, other_family_origin] = classify<v4, in_addr>(tracked_other_family, server_override, origins);
+    EXPECT_EQ(other_family_restore, proxy::dns_reply_restore::restore);
+    ASSERT_TRUE(other_family_origin.has_value());
+    EXPECT_EQ(other_family_origin->ip, v4{ std::string{ "192.168.1.1" } });
 }
 
 // 8. End to end: a relay that reports its own address as the answer's source still produces an
@@ -465,6 +477,120 @@ TEST(DnsPacketRedirect, WithoutAnOverrideARelayReportingAnotherSourceIsStillRest
     EXPECT_EQ(classify_without_override<v4>(unknown_id, origins).first, proxy::dns_reply_restore::unchanged);
     auto short_payload = local_proxy_reply("192.168.1.10", "8.8.8.8", v4{ std::string{ "8.8.8.8" } }, 53, std::vector<uint8_t>{ 0x61, 0x61 });
     EXPECT_EQ(classify_without_override<v4>(short_payload, origins).first, proxy::dns_reply_restore::unchanged);
+}
+
+// 8. IPv6 without an override: the same restoration on the IPv6 path, with the arguments the
+//    router passes, including a relay-reported port of 0 that must not be compared with anything.
+TEST(DnsPacketRedirect, Ipv6WithoutAnOverrideIsRestoredAndUnmatchedRepliesAreUnchanged)
+{
+    ndisapi::socks5_udp_local_redirect<v6> redirect{ log_level::error };
+    proxy::dns_udp_origin_tracker<net::ip_endpoint<v6>> origins;
+
+    auto query = frame::udp6("fd00::10", "2001:4860:4860::8888", client_port, 53, dns_message(0x6262));
+    origins.remember(client_port, 0x6262, net::ip_endpoint<v6>{ v6{ query.ip6()->ip6_dst }, 53 });
+    ASSERT_TRUE(redirect.is_new_endpoint(query.buffer));
+    ASSERT_TRUE(redirect.process_client_to_server_packet(query.buffer, htons(udp_listener)));
+
+    const auto answer = dns_message(0x6262, 40);
+    auto reply = local_proxy_reply("fd00::10", "2001:4860:4860::8888", v6{ std::string{ "2001:db8::7" } }, 1080, answer);
+    const auto [restore, origin] = classify_without_override<v6>(reply, origins);
+    ASSERT_EQ(restore, proxy::dns_reply_restore::restore);
+    ASSERT_TRUE(redirect.process_server_to_client_packet(reply.buffer, origin));
+    EXPECT_EQ(v6{ reply.ip6()->ip6_src }, v6{ std::string{ "2001:4860:4860::8888" } });
+    EXPECT_EQ(ntohs(reply.udp()->th_sport), 53);
+    EXPECT_EQ(reply.payload(), answer);
+    EXPECT_TRUE(reply.l4_checksum_valid());
+
+    // Unmatched, with a reported source of all zeroes and port 0: unchanged, never dropped.
+    auto zero_source = local_proxy_reply("fd00::10", "2001:4860:4860::8888", v6{}, 0, dns_message(0x7777));
+    EXPECT_EQ(classify_without_override<v6>(zero_source, origins).first, proxy::dns_reply_restore::unchanged);
+    auto zero_source_v4 = local_proxy_reply("192.168.1.10", "8.8.8.8", v4{}, 0, dns_message(0x7777));
+    proxy::dns_udp_origin_tracker<net::ip_endpoint<v4>> origins_v4;
+    EXPECT_EQ(classify_without_override<v4>(zero_source_v4, origins_v4).first, proxy::dns_reply_restore::unchanged);
+}
+
+// 8. A relay that reports a source of the other address family. Its own address is IPv4 even
+//    for an IPv6 query, because SOCKS5 servers are reached over IPv4. A tracked answer is
+//    restored anyway, and the redirect strips the relay's header by its real size.
+TEST(DnsPacketRedirect, TrackedAnswerIsRestoredWhenTheRelayHeaderHasTheOtherAddressFamily)
+{
+    const auto answer = dns_message(0x6363, 48);
+
+    // IPv6 query, IPv4 relay header (10 bytes instead of 22).
+    {
+        ndisapi::socks5_udp_local_redirect<v6> redirect{ log_level::error };
+        proxy::dns_udp_origin_tracker<net::ip_endpoint<v6>> origins;
+        auto query = frame::udp6("fd00::10", "2001:4860:4860::8888", client_port, 53, dns_message(0x6363));
+        origins.remember(client_port, 0x6363, net::ip_endpoint<v6>{ v6{ query.ip6()->ip6_dst }, 53 });
+        ASSERT_TRUE(redirect.is_new_endpoint(query.buffer));
+        ASSERT_TRUE(redirect.process_client_to_server_packet(query.buffer, htons(udp_listener)));
+
+        auto reply = frame::udp6("fd00::10", "2001:4860:4860::8888", udp_listener, client_port,
+            socks5_udp_datagram(v4{ std::string{ "198.51.100.7" } }, 1080, answer));
+        const auto [restore, origin] = classify_without_override<v6>(reply, origins);
+        ASSERT_EQ(restore, proxy::dns_reply_restore::restore);
+        ASSERT_TRUE(redirect.process_server_to_client_packet(reply.buffer, origin));
+        EXPECT_EQ(v6{ reply.ip6()->ip6_src }, v6{ std::string{ "2001:4860:4860::8888" } });
+        EXPECT_EQ(v6{ reply.ip6()->ip6_dst }, v6{ std::string{ "fd00::10" } });
+        EXPECT_EQ(ntohs(reply.udp()->th_sport), 53);
+        EXPECT_EQ(ntohs(reply.udp()->th_dport), client_port);
+        EXPECT_EQ(reply.payload(), answer);
+        EXPECT_TRUE(reply.l4_checksum_valid());
+    }
+
+    // IPv4 query, IPv6 relay header (22 bytes instead of 10).
+    {
+        ndisapi::socks5_udp_local_redirect<v4> redirect{ log_level::error };
+        proxy::dns_udp_origin_tracker<net::ip_endpoint<v4>> origins;
+        auto query = frame::udp4("192.168.1.10", "8.8.8.8", client_port, 53, dns_message(0x6363));
+        origins.remember(client_port, 0x6363, net::ip_endpoint<v4>{ v4{ query.ip4()->ip_dst }, 53 });
+        ASSERT_TRUE(redirect.is_new_endpoint(query.buffer));
+        ASSERT_TRUE(redirect.process_client_to_server_packet(query.buffer, htons(udp_listener)));
+
+        auto reply = frame::udp4("192.168.1.10", "8.8.8.8", udp_listener, client_port,
+            socks5_udp_datagram(v6{ std::string{ "2001:db8::7" } }, 1080, answer));
+        const auto [restore, origin] = classify_without_override<v4>(reply, origins);
+        ASSERT_EQ(restore, proxy::dns_reply_restore::restore);
+        ASSERT_TRUE(redirect.process_server_to_client_packet(reply.buffer, origin));
+        EXPECT_EQ(v4{ reply.ip4()->ip_src }, v4{ std::string{ "8.8.8.8" } });
+        EXPECT_EQ(ntohs(reply.udp()->th_sport), 53);
+        EXPECT_EQ(reply.payload(), answer);
+        EXPECT_TRUE(reply.ip4_checksum_valid());
+        EXPECT_TRUE(reply.l4_checksum_valid());
+    }
+}
+
+// A header of the other family is stripped only when the caller supplies the source to present.
+// Without it, or when the header is not fully captured, the packet is rejected and left untouched.
+TEST(DnsPacketRedirect, OtherFamilyRelayHeaderIsRejectedWithoutASuppliedSourceOrWhenTruncated)
+{
+    ndisapi::socks5_udp_local_redirect<v4> redirect{ log_level::error };
+    auto query = frame::udp4("192.168.1.10", "8.8.8.8", client_port, 53, dns_message(0x6464));
+    ASSERT_TRUE(redirect.is_new_endpoint(query.buffer));
+    ASSERT_TRUE(redirect.process_client_to_server_packet(query.buffer, htons(udp_listener)));
+    const std::optional<net::ip_endpoint<v4>> queried{ net::ip_endpoint<v4>{ v4{ std::string{ "8.8.8.8" } }, 53 } };
+
+    // Not tracked, so no source is supplied: rejected, as before.
+    auto unsupplied = frame::udp4("192.168.1.10", "8.8.8.8", udp_listener, client_port,
+        socks5_udp_datagram(v6{ std::string{ "2001:db8::7" } }, 1080, dns_message(0x6464)));
+    const auto unsupplied_before = unsupplied.payload();
+    EXPECT_FALSE(redirect.process_server_to_client_packet(unsupplied.buffer));
+    EXPECT_EQ(unsupplied.payload(), unsupplied_before);
+
+    // An IPv6 header announced by ATYP but cut short after the 4-byte prefix: rejected even
+    // with a supplied source, without reading or moving anything past the datagram.
+    auto truncated = frame::udp4("192.168.1.10", "8.8.8.8", udp_listener, client_port,
+        std::vector<uint8_t>{ 0x00, 0x00, 0x00, 0x04, 0x20, 0x01, 0x0d, 0xb8 });
+    const auto truncated_before = truncated.payload();
+    EXPECT_FALSE(redirect.process_server_to_client_packet(truncated.buffer, queried));
+    EXPECT_EQ(truncated.payload(), truncated_before);
+
+    // Fewer bytes than the prefix, and an address type that is neither IPv4 nor IPv6.
+    auto tiny = frame::udp4("192.168.1.10", "8.8.8.8", udp_listener, client_port, std::vector<uint8_t>{ 0x00, 0x00 });
+    EXPECT_FALSE(redirect.process_server_to_client_packet(tiny.buffer, queried));
+    auto domain = frame::udp4("192.168.1.10", "8.8.8.8", udp_listener, client_port,
+        std::vector<uint8_t>{ 0x00, 0x00, 0x00, 0x03, 0x01, 'a', 0x00, 0x35, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    EXPECT_FALSE(redirect.process_server_to_client_packet(domain.buffer, queried));
 }
 
 // 8. A datagram that cannot be redirected is reported as such (the router then drops it rather

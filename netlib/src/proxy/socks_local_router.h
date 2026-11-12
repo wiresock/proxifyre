@@ -2595,7 +2595,7 @@ namespace proxy
          *        client port @p client_port is presented, given the relayed SOCKS5 UDP datagram
          *        in @p socks_payload. Only answers to tracked queries relayed through the DNS
          *        proxy's listener are restored, with or without a server override (see
-         *        classify_dns_override_reply()); other traffic through the same proxy is unchanged.
+         *        classify_dns_reply()); other traffic through the same proxy is unchanged.
          */
         template <typename AddrT>
         std::pair<dns_reply_restore, std::optional<net::ip_endpoint<AddrT>>> dns_udp_reply_origin(
@@ -2632,7 +2632,7 @@ namespace proxy
                 override_port = server_override->port;
             }
 
-            return classify_dns_override_reply(socks_payload, socks_payload_size,
+            return classify_dns_reply(socks_payload, socks_payload_size,
                 static_cast<uint8_t>(v4 ? 1 : 4), reinterpret_cast<const uint8_t*>(raw), sizeof(raw_address_t),
                 override_port, client_port, dns_udp_origins_for<AddrT>());
         }
@@ -2764,8 +2764,8 @@ namespace proxy
             const bool has_ports = ipv4_transport_header_present(fragment);
 
             // If the packet is from a known proxy port, process for server-to-client redirection.
-            // Answers relayed from a DNS server override are presented as coming from the server
-            // the resolver originally queried.
+            // Answers to tracked DNS queries are presented as coming from the server the resolver
+            // originally queried.
             if (has_ports && is_udp_proxy_port(ntohs(udp_header->th_sport)))
             {
                 const auto [restore, origin] = dns_udp_reply_origin<net::ip_address_v4>(
@@ -3134,7 +3134,7 @@ namespace proxy
             const auto* const udp_header = static_cast<udphdr_ptr>(transport);
 
             // If the packet is from a known proxy port, process for server-to-client redirection
-            // (restoring the original server of DNS override answers, as on the IPv4 path).
+            // (restoring the original server of answers to tracked DNS queries, as on the IPv4 path).
             if (is_udp_proxy_port_v6(ntohs(udp_header->th_sport)))
             {
                 const auto [restore, origin] = dns_udp_reply_origin<net::ip_address_v6>(
@@ -3557,7 +3557,7 @@ namespace proxy
                         }
                     }
 
-                    // Expire DNS override response mappings for queries that were never answered.
+                    // Expire DNS answer-origin mappings for queries that were never answered.
                     dns_udp_origins_v4_.sweep(now);
                     dns_udp_origins_v6_.sweep(now);
                 }

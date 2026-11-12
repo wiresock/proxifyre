@@ -629,7 +629,7 @@ namespace proxy
     /// Minimum size of a DNS message header (RFC 1035 section 4.1.1).
     inline constexpr std::size_t dns_header_size = 12;
 
-    /// Reads the DNS message ID used to map override responses back to their original server.
+    /// Reads the DNS message ID used to map answers back to the server the resolver queried.
     /// The payload is not used to classify traffic: classification is by port 53 only.
     [[nodiscard]] constexpr std::optional<uint16_t> dns_message_id(const uint8_t* payload, const std::size_t size) noexcept
     {
@@ -934,7 +934,7 @@ namespace proxy
 
     /**
      * @brief Whether replies leaving the DNS proxy's UDP listener may need their source restored
-     *        (classify_dns_override_reply()): in Proxy mode with a usable proxy, with or without
+     *        (classify_dns_reply()): in Proxy mode with a usable proxy, with or without
      *        a server override, because a relay can report a source other than the server the
      *        resolver queried either way. In Direct mode, or without a usable proxy, no DNS is
      *        redirected and the reply path needs no DNS work at all.
@@ -1000,15 +1000,20 @@ namespace proxy
      *        override, and finds the server the resolver originally queried.
      *
      * A datagram whose (@p client_port, DNS message ID) matches a tracked query is restored to
-     * the original server whatever source its SOCKS5 header reports: RFC 1928 relays report the
-     * server that answered (the override, when one is configured), but some report another
-     * address (for example their own), and an answer presented from any address other than the
-     * queried server is discarded by the resolver. With a server override, a datagram that names
-     * the override server but matches no tracked query is dropped. Any other datagram relayed
-     * through the same proxy is left unchanged.
+     * the original server whatever source its SOCKS5 header reports, of either address family:
+     * RFC 1928 relays report the server that answered (the override, when one is configured),
+     * but some report another address (for example their own, which is IPv4 even for an IPv6
+     * query), and an answer presented from any address other than the queried server is
+     * discarded by the resolver. The redirect strips such a header by its real size when it is
+     * given the source to present. With a server override, a datagram that names the override
+     * server but matches no tracked query is dropped. Any other datagram relayed through the
+     * same proxy is left unchanged; if its ATYP is not the listener's family
+     * (@p expected_address_type), the redirect then rejects it and it is dropped.
      *
-     * The datagram's ATYP must match the listener's family (@p expected_address_type): the
-     * redirect strips a header of that family's size.
+     * The match is on the client port and the first two bytes of the relayed data only. A
+     * datagram that is not a DNS answer is restored by mistake only if it arrives for a client
+     * port that sent a port-53 datagram within the tracker's lifetime and begins with that
+     * datagram's ID.
      *
      * @param socks_datagram The UDP payload as relayed: SOCKS5 UDP header followed by the data.
      * @param expected_address_type 1 for the IPv4 path, 4 for the IPv6 path.
@@ -1017,13 +1022,13 @@ namespace proxy
      *        @p override_port are then ignored.
      */
     template <typename Endpoint>
-    [[nodiscard]] std::pair<dns_reply_restore, std::optional<Endpoint>> classify_dns_override_reply(
+    [[nodiscard]] std::pair<dns_reply_restore, std::optional<Endpoint>> classify_dns_reply(
         const uint8_t* socks_datagram, const std::size_t size, const uint8_t expected_address_type,
         const uint8_t* override_address, const std::size_t override_address_size, const uint16_t override_port,
         const uint16_t client_port, dns_udp_origin_tracker<Endpoint>& origins)
     {
         const auto view = parse_socks5_udp_datagram(socks_datagram, size);
-        if (!view || view->address_type != expected_address_type)
+        if (!view)
             return { dns_reply_restore::unchanged, std::nullopt };
 
         if (const auto message_id = dns_message_id(view->data, view->data_size))
@@ -1031,6 +1036,9 @@ namespace proxy
             if (auto original = origins.resolve(client_port, *message_id))
                 return { dns_reply_restore::restore, std::move(original) };
         }
+
+        if (view->address_type != expected_address_type)
+            return { dns_reply_restore::unchanged, std::nullopt };
 
         const bool names_override = override_address != nullptr &&
             view->address_size == override_address_size && view->port == override_port &&
