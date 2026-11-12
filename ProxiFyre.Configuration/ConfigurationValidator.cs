@@ -655,7 +655,8 @@ namespace ProxiFyre.Configuration
                 issues.Add(Warning(
                     "DNS_SERVER_OVERRIDE_OTHER_FAMILY_BLOCKED",
                     "DNS queries addressed to " + (serverOverride.IsIpv6 ? "IPv4" : "IPv6") + " servers are blocked because the " +
-                    "server override is " + (serverOverride.IsIpv6 ? "IPv6" : "IPv4") + ". Windows falls back to its other configured DNS servers.",
+                    "server override is " + (serverOverride.IsIpv6 ? "IPv6" : "IPv4") + ". Name resolution then relies on Windows " +
+                    "querying a DNS server of the override's address family.",
                     "dns.serverOverride"));
             }
             else if (families != ProxyAddressFamilySelection.Both)

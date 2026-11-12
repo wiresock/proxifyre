@@ -378,6 +378,41 @@ namespace ProxiFyre.Tests
             Assert.That(_normalizer.Normalize(TestModels.ValidConfiguration()).Dns, Is.Null);
         }
 
+        [TestCase("   ")]
+        [TestCase("")]
+        [TestCase("\t")]
+        public void NormalizationTurnsABlankProxyIdIntoNoId(string id)
+        {
+            var configuration = TwoProxyConfiguration();
+            configuration.Proxies[0].Id = id;
+
+            var normalized = _normalizer.Normalize(configuration);
+
+            Assert.That(normalized.Proxies[0].Id, Is.Null);
+            Assert.That(((JObject)JObject.Parse(_serializer.Serialize(normalized))["proxies"][0]).Property("id"), Is.Null);
+        }
+
+        [Test]
+        public void OtherFamilyWarningDoesNotPromiseAFallback()
+        {
+            var configuration = TwoProxyConfiguration();
+            configuration.Dns.ServerOverride = "2606:4700:4700::1111";
+
+            var warning = _validator.Validate(configuration).Warnings
+                .Single(issue => issue.Code == "DNS_SERVER_OVERRIDE_OTHER_FAMILY_BLOCKED");
+            StringAssert.Contains("IPv4 servers are blocked", warning.Message);
+            StringAssert.DoesNotContain("falls back", warning.Message);
+        }
+
+        [Test]
+        public void UnknownModeIsNotAcceptedByTryGetMode()
+        {
+            DnsRoutingMode mode;
+            Assert.That(DnsConfiguration.TryGetMode("Tunnel", out mode), Is.False);
+            Assert.That(DnsConfiguration.TryGetMode("Proxy", out mode), Is.True);
+            Assert.That(mode, Is.EqualTo(DnsRoutingMode.Proxy));
+        }
+
         [Test]
         public void NormalizationKeepsAnUnknownModeVisibleForValidation()
         {

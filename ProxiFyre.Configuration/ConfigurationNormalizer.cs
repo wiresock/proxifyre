@@ -92,7 +92,7 @@ namespace ProxiFyre.Configuration
             var hasCanonicalTransport = TryGetCanonicalTransport(rule.Socks5Transport, out transport);
             return new ProxyRule
             {
-                Id = rule.Id == null ? null : rule.Id.Trim(),
+                Id = EmptyToNull(rule.Id),
                 AppNames = appNames,
                 Socks5ProxyEndpoint = rule.Socks5ProxyEndpoint == null ? null : rule.Socks5ProxyEndpoint.Trim(),
                 Username = rule.Username,
