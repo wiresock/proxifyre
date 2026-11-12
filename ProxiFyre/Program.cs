@@ -192,6 +192,11 @@ namespace ProxiFyre
                       "Administrator console."
                     : "Failed to start the ProxiFyre proxy engine. Ensure the Windows Packet Filter " +
                       "(NDIS lightweight filter) driver is installed and running, then restart the service.";
+                if (DnsConfiguration.GetMode(serviceSettings.Dns) == DnsRoutingMode.Proxy)
+                {
+                    message += " In DNS Proxy mode the engine also refuses to start when a driver filter needed " +
+                               "to keep DNS inside the DNS proxy cannot be installed; the engine log above has the cause.";
+                }
                 LoggerInstance.Error(message);
                 throw new InvalidOperationException(message);
             }
