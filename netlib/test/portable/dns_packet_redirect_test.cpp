@@ -662,3 +662,50 @@ TEST(DnsTcpCloseTracking, UntranslatableListenerSegmentIsDropped)
     EXPECT_FALSE(udp_translated);
     EXPECT_EQ(proxy::decide_listener_reply(true, udp_translated), proxy::listener_reply_action::drop);
 }
+
+// 14. Truncation fallback end to end: the truncated UDP answer reaches the resolver unchanged
+//     (TC bit intact, source = the server it queried), and the TCP retry to that same server is
+//     redirected to the DNS proxy's TCP listener, with the listener's replies presented as the
+//     server's port 53 through the end of the connection.
+TEST(DnsPacketRedirect, TruncatedUdpAnswerAndTcpRetryBothGoThroughTheDnsProxy)
+{
+    ndisapi::socks5_udp_local_redirect<v4> udp{ log_level::error };
+    ndisapi::tcp_local_redirect<v4> tcp{ log_level::error };
+    proxy::dns_udp_origin_tracker<net::ip_endpoint<v4>> origins;
+    const net::ip_endpoint<v4> server_override{ v4{ std::string{ "1.1.1.1" } }, 53 };
+
+    // UDP query, redirected with the override.
+    auto query = frame::udp4("192.168.1.10", "192.168.1.1", client_port, 53, dns_message(0x5151));
+    origins.remember(client_port, 0x5151, net::ip_endpoint<v4>{ v4{ query.ip4()->ip_dst }, 53 });
+    ASSERT_TRUE(udp.is_new_endpoint(query.buffer));
+    ASSERT_TRUE(udp.process_client_to_server_packet(query.buffer, htons(udp_listener), server_override));
+
+    // Truncated answer (TC bit, byte 2 bit 0x02) relayed from the override.
+    auto truncated_answer = dns_message(0x5151, 20);
+    truncated_answer[2] = static_cast<uint8_t>(0x80 | 0x02);
+    auto reply = local_proxy_reply("192.168.1.10", "192.168.1.1", server_override.ip, 53, truncated_answer);
+    const auto [restore, origin] = classify<v4, in_addr>(reply, server_override, origins);
+    ASSERT_EQ(restore, proxy::dns_reply_restore::restore);
+    ASSERT_TRUE(udp.process_server_to_client_packet(reply.buffer, origin));
+    EXPECT_EQ(v4{ reply.ip4()->ip_src }, v4{ std::string{ "192.168.1.1" } });
+    EXPECT_EQ(reply.payload(), truncated_answer);
+    EXPECT_EQ(reply.payload()[2] & 0x02, 0x02);
+    EXPECT_TRUE(reply.l4_checksum_valid());
+
+    // The resolver retries over TCP to the same server from a new port.
+    constexpr uint16_t retry_port = client_port + 1;
+    auto syn = frame::tcp4("192.168.1.10", "192.168.1.1", retry_port, 53, TH_SYN);
+    ASSERT_TRUE(tcp.process_client_to_server_packet(syn.buffer, htons(tcp_listener)));
+    EXPECT_EQ(ntohs(syn.tcp()->th_dport), tcp_listener);
+
+    for (const uint8_t flags : { uint8_t{ TH_SYN | TH_ACK }, uint8_t{ TH_PSH | TH_ACK }, uint8_t{ TH_FIN | TH_ACK } })
+    {
+        auto segment = frame::tcp4("192.168.1.10", "192.168.1.1", tcp_listener, retry_port, flags);
+        ASSERT_TRUE(tcp.process_server_to_client_packet(segment.buffer));
+        EXPECT_EQ(v4{ segment.ip4()->ip_src }, v4{ std::string{ "192.168.1.1" } });
+        EXPECT_EQ(ntohs(segment.tcp()->th_sport), 53);
+        EXPECT_TRUE(segment.l4_checksum_valid());
+    }
+    auto final_ack = frame::tcp4("192.168.1.10", "192.168.1.1", retry_port, 53, TH_FIN | TH_ACK);
+    EXPECT_TRUE(tcp.process_client_to_server_packet(final_ack.buffer, htons(tcp_listener)));
+}

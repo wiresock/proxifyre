@@ -113,22 +113,30 @@ TEST(DnsRoutingPolicy, ProxyModeRedirectsToTheListenerOfTheTransportAndFamily)
     EXPECT_EQ(tcp6.listener_port, p.tcp6);
 }
 
-// 3./4. The decision has no process input: queries from the Windows DNS Client service
-//       (svchost.exe), from an application with its own resolver, from an excluded application,
-//       or from an owner that cannot be resolved are all decided by port 53 and the global mode.
-TEST(DnsRoutingPolicy, DecisionDoesNotDependOnTheSendingProcess)
+// 3./4. Queries from the Windows DNS Client service, from applications with their own resolver,
+//       and from owners that cannot be resolved are routed identically: the sender is consulted
+//       only for packets addressed to a configured SOCKS5 server. This fails if the recursion
+//       guard's sender check is ever applied to ordinary DNS (Dnscache's owner can be
+//       unresolved, which would then defer or drop every query).
+TEST(DnsRoutingPolicy, SenderNeverAffectsQueriesToOrdinaryResolvers)
 {
     const dns_proxy p{};
-    const auto target = p.target(dns_transport::udp, dns_family::ipv4);
-    const auto expected = decide_dns_route(proxy_mode, dns_port, apply, target);
-
-    // The only inputs are the mode, the destination port, the upstream guard, and the proxy.
-    // Calling the decision repeatedly (as each sender would) yields the same result.
-    for (int sender = 0; sender < 4; ++sender)
+    for (const auto& c : all_cases)
     {
-        const auto decision = decide_dns_route(proxy_mode, dns_port, apply, target);
-        EXPECT_EQ(decision.action, expected.action);
-        EXPECT_EQ(decision.listener_port, expected.listener_port);
+        const auto target = p.target(c.transport, c.family);
+        const auto expected = decide_dns_route(proxy_mode, dns_port, apply, target);
+        ASSERT_EQ(expected.action, dns_route_action::proxy);
+
+        for (const std::optional<bool> sender : { std::optional<bool>{}, std::optional<bool>{ false }, std::optional<bool>{ true } })
+        {
+            for (const bool lookup_final : { false, true })
+            {
+                const auto guard = proxy::decide_dns_upstream_guard(false, sender, lookup_final);
+                const auto decision = decide_dns_route(proxy_mode, dns_port, guard, target);
+                EXPECT_EQ(decision.action, dns_route_action::proxy);
+                EXPECT_EQ(decision.listener_port, expected.listener_port);
+            }
+        }
     }
 }
 
@@ -261,19 +269,26 @@ TEST(DnsRoutingPolicy, NonDnsTrafficIsNotClassified)
     }
 }
 
-// 14. A resolver that receives a truncated UDP answer retries over TCP to the same server. Both
-//     queries are routed through the same proxy, each through its own transport's listener.
-TEST(DnsRoutingPolicy, TruncatedUdpAnswerTcpRetryUsesTheSameProxy)
+// 14. The TCP retry after a truncated UDP answer must take the same path as the UDP query: in
+//     Proxy mode TCP/53 is redirected to the same proxy (its TCP listener), never passed, and a
+//     proxy that cannot carry TCP blocks the retry instead of letting it leak. (The packet-level
+//     retry is in netlib/test/portable/dns_packet_redirect_test.cpp.)
+TEST(DnsRoutingPolicy, TcpRetryIsRedirectedOrBlockedNeverPassed)
 {
-    dns_proxy p{};
-    p.server_override = dns_family::ipv4;
+    for (const auto family : { dns_family::ipv4, dns_family::ipv6 })
+    {
+        dns_proxy p{};
+        p.server_override = family;
+        const auto tcp = decide_dns_route(proxy_mode, dns_port, apply, p.target(dns_transport::tcp, family));
+        EXPECT_EQ(tcp.action, dns_route_action::proxy);
+        EXPECT_EQ(tcp.listener_port, family == dns_family::ipv4 ? p.tcp4 : p.tcp6);
 
-    const auto udp = decide_dns_route(proxy_mode, dns_port, apply, p.target(dns_transport::udp, dns_family::ipv4));
-    const auto tcp = decide_dns_route(proxy_mode, dns_port, apply, p.target(dns_transport::tcp, dns_family::ipv4));
-    EXPECT_EQ(udp.action, dns_route_action::proxy);
-    EXPECT_EQ(tcp.action, dns_route_action::proxy);
-    EXPECT_EQ(udp.listener_port, p.udp4);
-    EXPECT_EQ(tcp.listener_port, p.tcp4);
+        dns_proxy udp_only{};
+        udp_only.tcp = false;
+        const auto blocked = decide_dns_route(proxy_mode, dns_port, apply, udp_only.target(dns_transport::tcp, family));
+        EXPECT_EQ(blocked.action, dns_route_action::block);
+        EXPECT_EQ(blocked.reason, dns_block_reason::transport_unsupported);
+    }
 }
 
 TEST(DnsRoutingPolicy, BlockReasonsHaveDiagnostics)
