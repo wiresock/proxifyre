@@ -805,6 +805,16 @@ TEST(DnsTcpResetTracking, ResetRecordExpiresAfterTheLinger)
     establish(redirect);
     ASSERT_TRUE(send_client(redirect, TH_RST | TH_ACK));
 
+    // Nothing on a reset key refreshes the record: neither the proxy's in-flight segments nor
+    // the client's later segments move its expiry, so it ends closed_linger after the RST.
+    const auto expiry = redirect.reset_record_expiry(v4{ std::string{ tcp_server } }, htons(client_port));
+    ASSERT_TRUE(expiry.has_value());
+    EXPECT_EQ(listener_segment_result(redirect, TH_PSH | TH_ACK), segment_result::recently_reset);
+    EXPECT_EQ(listener_segment_result(redirect, TH_RST), segment_result::recently_reset);
+    EXPECT_FALSE(send_client(redirect, TH_ACK));
+    EXPECT_FALSE(send_client(redirect, TH_RST));
+    EXPECT_EQ(redirect.reset_record_expiry(v4{ std::string{ tcp_server } }, htons(client_port)), expiry);
+
     const auto now = std::chrono::steady_clock::now();
     redirect.remove_expired(now);
     EXPECT_TRUE(recently_reset(redirect));

@@ -256,6 +256,22 @@ namespace ndisapi
             return it != redirected_connections_.cend() && it->second.reset;
         }
 
+        /**
+         * @brief When the reset record for client endpoint (@p original_destination,
+         *        @p client_port) expires, or std::nullopt when there is none. A reset record is
+         *        never refreshed, so this does not change until the record is removed. For
+         *        diagnostics and tests.
+         */
+        [[nodiscard]] std::optional<clock::time_point> reset_record_expiry(const T& original_destination,
+            const u_short client_port)
+        {
+            std::lock_guard lock(lock_);
+            const auto it = redirected_connections_.find(net::ip_endpoint<T>{ original_destination, client_port });
+            if (it == redirected_connections_.cend() || !it->second.reset)
+                return std::nullopt;
+            return it->second.expires_at();
+        }
+
     private:
         /**
          * @brief Updates the tracking state for a client-to-server segment. The caller holds lock_.
