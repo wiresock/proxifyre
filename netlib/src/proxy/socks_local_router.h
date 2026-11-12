@@ -293,6 +293,12 @@ namespace proxy
         std::atomic<std::uint64_t> untranslated_listener_replies_{ 0 };
 
         /**
+         * @brief Set once the first untranslatable listener reply of this run has been reported
+         *        at warning level; later ones are only counted. Reset by start().
+         */
+        std::atomic_flag untranslated_listener_reply_logged_{};
+
+        /**
          * @brief One-shot flags so that each (family, transport, reason) block cause is
          *        described once in the log instead of once per packet.
          */
@@ -971,6 +977,7 @@ namespace proxy
             dns_udp_origins_v6_.clear();
             dns_blocked_packets_.store(0, std::memory_order_relaxed);
             untranslated_listener_replies_.store(0, std::memory_order_relaxed);
+            untranslated_listener_reply_logged_.clear(std::memory_order_relaxed);
             for (auto& flag : dns_block_reason_logged_)
                 flag.clear(std::memory_order_relaxed);
             if (!install_dns_filters())
@@ -2245,6 +2252,23 @@ namespace proxy
             std::optional<net::ip_endpoint<AddrT>> server_override; ///< set when the destination is rewritten
         };
 
+        /**
+         * @brief Accounts for a packet from a local proxy listener that could not be translated
+         *        back and was dropped. The first one per run is reported at warning level; the
+         *        running count is reported by the resolver thread at a throttled rate.
+         */
+        void note_untranslated_listener_reply()
+        {
+            untranslated_listener_replies_.fetch_add(1, std::memory_order_relaxed);
+            if (!untranslated_listener_reply_logged_.test_and_set(std::memory_order_relaxed))
+            {
+                NETLIB_LOG(log_level::warning,
+                    "A packet from a local proxy listener could not be translated back to its client and was dropped "
+                    "rather than sent to the network (for example a fragmented or malformed reply, or one for a "
+                    "connection that is no longer tracked). Further occurrences are counted.");
+            }
+        }
+
         /// True when DNS routing is in Proxy mode.
         bool dns_proxy_mode()
         {
@@ -2633,35 +2657,37 @@ namespace proxy
             const auto* const udp_header = reinterpret_cast<udphdr_ptr>(reinterpret_cast<PUCHAR>(ip_header)
                 + sizeof(DWORD) * ip_header->ip_hl);
 
+            // A later IPv4 fragment carries no UDP header: its "ports" are payload, so neither the
+            // listener check nor DNS classification may use them (ipv4_transport_header_present()).
+            const auto fragment = classify_ipv4_fragment(ntohs(ip_header->ip_off));
+            const bool has_ports = ipv4_transport_header_present(fragment);
+
             // If the packet is from a known proxy port, process for server-to-client redirection.
             // Answers relayed from a DNS server override are presented as coming from the server
             // the resolver originally queried.
-            if (is_udp_proxy_port(ntohs(udp_header->th_sport)))
+            if (has_ports && is_udp_proxy_port(ntohs(udp_header->th_sport)))
             {
                 const auto [restore, origin] = dns_udp_reply_origin<net::ip_address_v4>(
                     ntohs(udp_header->th_sport), ntohs(udp_header->th_dport),
                     reinterpret_cast<const uint8_t*>(udp_header + 1), captured_udp_payload_size(buffer, udp_header));
 
-                if (restore == dns_reply_restore::drop)
-                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
-
                 // A listener reply never belongs on the wire: drop it when it cannot be translated.
-                if (decide_listener_reply(true, udp_redirect_->process_server_to_client_packet(buffer, origin)) ==
-                    listener_reply_action::revert)
+                const bool translated = restore != dns_reply_restore::drop &&
+                    udp_redirect_->process_server_to_client_packet(buffer, origin);
+                if (decide_udp_listener_reply(restore, translated) == listener_reply_action::revert)
                 {
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
 
-                untranslated_listener_replies_.fetch_add(1, std::memory_order_relaxed);
+                note_untranslated_listener_reply();
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
             }
 
             // Conventional DNS (destination port 53) follows the global DNS policy, before and
             // independently of process attribution and application rules: Direct passes it,
-            // Proxy redirects it to the DNS proxy or drops it. A later IPv4 fragment carries no
-            // UDP header, so its "port" is payload and it is not classified.
-            if (const auto fragment = classify_ipv4_fragment(ntohs(ip_header->ip_off)); fragment != ipv4_fragment::later)
+            // Proxy redirects it to the DNS proxy or drops it. Later fragments are not classified.
+            if (has_ports)
             {
                 if (auto dns = decide_dns<net::ip_address_v4, dns_transport::udp>(
                         net::ip_address_v4{ ip_header->ip_dst }, ntohs(udp_header->th_dport), postponed,
@@ -2776,8 +2802,13 @@ namespace proxy
                 ip_header) +
                 sizeof(DWORD) * ip_header->ip_hl);
 
+            // A later IPv4 fragment carries no TCP header: its "ports" are payload, so neither the
+            // listener check nor DNS classification may use them (see the UDP path).
+            const auto fragment = classify_ipv4_fragment(ntohs(ip_header->ip_off));
+            const bool has_ports = ipv4_transport_header_present(fragment);
+
             // If the packet is from a known proxy port, process for server-to-client redirection
-            if (is_tcp_proxy_port(ntohs(tcp_header->th_sport)))
+            if (has_ports && is_tcp_proxy_port(ntohs(tcp_header->th_sport)))
             {
                 // A listener segment never belongs on the wire: drop it when it cannot be
                 // translated (for example after its connection entry expired), instead of letting
@@ -2790,15 +2821,14 @@ namespace proxy
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
 
-                untranslated_listener_replies_.fetch_add(1, std::memory_order_relaxed);
+                note_untranslated_listener_reply();
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
             }
 
             // Conventional DNS over TCP follows the global DNS policy. In Direct mode TCP/53 is
             // now unconditionally direct (previously it was routed like any other TCP traffic of
-            // the owning process).
-            // A later IPv4 fragment carries no TCP header and is not classified (see the UDP path).
-            if (const auto fragment = classify_ipv4_fragment(ntohs(ip_header->ip_off)); fragment != ipv4_fragment::later)
+            // the owning process). Later fragments are not classified.
+            if (has_ports)
             {
                 if (auto dns = decide_dns<net::ip_address_v4, dns_transport::tcp>(
                         net::ip_address_v4{ ip_header->ip_dst }, ntohs(tcp_header->th_dport), postponed,
@@ -2907,21 +2937,32 @@ namespace proxy
 
             if (transport == nullptr)
             {
-                // In DNS Proxy mode, the first fragment of a fragmented UDP/TCP datagram addressed
-                // to port 53 is dropped: the datagram cannot be redirected, and passing it would
-                // send DNS directly. Later fragments carry no ports and cannot be classified, so
-                // they are left alone and unrelated fragmented traffic is unaffected.
+                // First fragments carry the transport header (decide_ipv6_fragment()): a local
+                // listener's fragmented reply is dropped in every mode, and in DNS Proxy mode a
+                // fragmented datagram addressed to port 53 is dropped so DNS is never sent
+                // directly. Later fragments carry no ports and cannot be classified, so they are
+                // left alone and unrelated fragmented traffic is unaffected.
                 if (buffer.m_Length > ETHER_HEADER_LENGTH)
                 {
-                    if (const auto first = parse_ipv6_first_fragment(reinterpret_cast<const uint8_t*>(ip_header),
-                            buffer.m_Length - ETHER_HEADER_LENGTH);
-                        first && first->destination_port == dns_port && dns_proxy_mode())
+                    const auto first = parse_ipv6_first_fragment(reinterpret_cast<const uint8_t*>(ip_header),
+                        buffer.m_Length - ETHER_HEADER_LENGTH);
+                    const bool source_is_listener = first &&
+                        (first->protocol == IPPROTO_UDP ? is_udp_proxy_port_v6(first->source_port)
+                                                        : is_tcp_proxy_port_v6(first->source_port));
+
+                    switch (decide_ipv6_fragment(first, source_is_listener, first && dns_proxy_mode()))
                     {
+                    case ipv6_fragment_action::drop_listener_reply:
+                        note_untranslated_listener_reply();
+                        return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+                    case ipv6_fragment_action::drop_dns:
                         if (first->protocol == IPPROTO_UDP)
                             note_dns_block<net::ip_address_v6, dns_transport::udp>(dns_block_reason::fragmented);
                         else
                             note_dns_block<net::ip_address_v6, dns_transport::tcp>(dns_block_reason::fragmented);
                         return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+                    case ipv6_fragment_action::pass:
+                        break;
                     }
                 }
 
@@ -2999,18 +3040,16 @@ namespace proxy
                     ntohs(udp_header->th_sport), ntohs(udp_header->th_dport),
                     reinterpret_cast<const uint8_t*>(udp_header + 1), captured_udp_payload_size(buffer, udp_header));
 
-                if (restore == dns_reply_restore::drop)
-                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
-
                 // A listener reply never belongs on the wire: drop it when it cannot be translated.
-                if (decide_listener_reply(true, udp_redirect_v6_->process_server_to_client_packet(buffer, origin)) ==
-                    listener_reply_action::revert)
+                const bool translated = restore != dns_reply_restore::drop &&
+                    udp_redirect_v6_->process_server_to_client_packet(buffer, origin);
+                if (decide_udp_listener_reply(restore, translated) == listener_reply_action::revert)
                 {
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
 
-                untranslated_listener_replies_.fetch_add(1, std::memory_order_relaxed);
+                note_untranslated_listener_reply();
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
             }
 
@@ -3135,7 +3174,7 @@ namespace proxy
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
 
-                untranslated_listener_replies_.fetch_add(1, std::memory_order_relaxed);
+                note_untranslated_listener_reply();
                 return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
             }
 
@@ -3448,9 +3487,10 @@ namespace proxy
                     if (const auto untranslated = untranslated_listener_replies_.exchange(0, std::memory_order_relaxed);
                         untranslated != 0)
                     {
-                        NETLIB_LOG(log_level::debug,
+                        NETLIB_LOG(log_level::info,
                             "Dropped {} packet(s) from local proxy listeners that could not be translated back "
-                            "(no tracked connection, fragmented, or malformed).", untranslated);
+                            "(no tracked connection, fragmented, or malformed); they were not sent to the network.",
+                            untranslated);
                     }
                 }
 

@@ -694,3 +694,79 @@ TEST(DnsUdpOriginTracker, InsertingIntoAFullTableOfLiveEntriesIsCheap)
     // orders of magnitude of headroom for slow or sanitized builds and still fails the latter.
     EXPECT_LT(elapsed, std::chrono::seconds{ 2 });
 }
+
+// ------------------------------------------------------------------ listener replies and fragments
+//
+// A fragmented listener reply must not reach the wire, and a later fragment's payload must never
+// be read as ports.
+
+TEST(ListenerFragmentPolicy, Ipv6FirstFragmentExposesTheSourcePort)
+{
+    constexpr uint16_t listener = 41004;
+    const auto first = parse(ipv6_packet(fragment_proto, concat({ fragment_header(udp_proto, 0, true), ports(listener, 50001) })));
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(first->source_port, listener);
+    EXPECT_EQ(first->destination_port, 50001);
+}
+
+TEST(ListenerFragmentPolicy, FragmentedListenerReplyIsDroppedInEveryMode)
+{
+    using proxy::decide_ipv6_fragment;
+    using proxy::ipv6_fragment_action;
+    constexpr uint16_t listener = 41004;
+
+    // A large DNS answer from the UDP listener to client port 50001, fragmented by the stack.
+    const auto reply = parse(ipv6_packet(fragment_proto, concat({ fragment_header(udp_proto, 0, true), ports(listener, 50001) })));
+    ASSERT_TRUE(reply.has_value());
+    for (const bool proxy_mode_active : { false, true })
+        EXPECT_EQ(decide_ipv6_fragment(reply, true, proxy_mode_active), ipv6_fragment_action::drop_listener_reply);
+
+    // A listener reply to client port 53 is still a listener reply, not DNS.
+    const auto to_port_53 = parse(ipv6_packet(fragment_proto, concat({ fragment_header(tcp_proto, 0, true), ports(listener, 53) })));
+    EXPECT_EQ(decide_ipv6_fragment(to_port_53, true, true), ipv6_fragment_action::drop_listener_reply);
+}
+
+TEST(ListenerFragmentPolicy, OtherIpv6FragmentsKeepTheirBehaviour)
+{
+    using proxy::decide_ipv6_fragment;
+    using proxy::ipv6_fragment_action;
+
+    const auto dns_query = parse(ipv6_packet(fragment_proto, concat({ fragment_header(udp_proto, 0, true), ports(50001, 53) })));
+    EXPECT_EQ(decide_ipv6_fragment(dns_query, false, true), ipv6_fragment_action::drop_dns);
+    EXPECT_EQ(decide_ipv6_fragment(dns_query, false, false), ipv6_fragment_action::pass);
+
+    const auto unrelated = parse(ipv6_packet(fragment_proto, concat({ fragment_header(udp_proto, 0, true), ports(50001, 443) })));
+    EXPECT_EQ(decide_ipv6_fragment(unrelated, false, true), ipv6_fragment_action::pass);
+
+    // Later fragments and unparsable chains carry no ports: passed in every mode.
+    const auto later = parse(ipv6_packet(fragment_proto, concat({ fragment_header(udp_proto, 185, false), ports(41004, 53) })));
+    ASSERT_FALSE(later.has_value());
+    EXPECT_EQ(decide_ipv6_fragment(later, true, true), ipv6_fragment_action::pass);
+}
+
+TEST(ListenerFragmentPolicy, LaterIpv4FragmentsAreNeverReadForPorts)
+{
+    using proxy::classify_ipv4_fragment;
+    using proxy::ipv4_transport_header_present;
+
+    // A later fragment of an unrelated datagram whose payload happens to start with a listener port.
+    EXPECT_FALSE(ipv4_transport_header_present(classify_ipv4_fragment(0x00b9)));
+    EXPECT_FALSE(ipv4_transport_header_present(classify_ipv4_fragment(0x2001)));
+    EXPECT_TRUE(ipv4_transport_header_present(classify_ipv4_fragment(0x2000)));
+    EXPECT_TRUE(ipv4_transport_header_present(classify_ipv4_fragment(0x4000)));
+    EXPECT_TRUE(ipv4_transport_header_present(classify_ipv4_fragment(0x0000)));
+}
+
+TEST(ListenerFragmentPolicy, UdpListenerRepliesAreDroppedOnBothPaths)
+{
+    using proxy::decide_udp_listener_reply;
+    using proxy::dns_reply_restore;
+    using proxy::listener_reply_action;
+
+    EXPECT_EQ(decide_udp_listener_reply(dns_reply_restore::unchanged, true), listener_reply_action::revert);
+    EXPECT_EQ(decide_udp_listener_reply(dns_reply_restore::restore, true), listener_reply_action::revert);
+    EXPECT_EQ(decide_udp_listener_reply(dns_reply_restore::unchanged, false), listener_reply_action::drop);
+    // An override answer to no tracked query is dropped even if it could be translated.
+    EXPECT_EQ(decide_udp_listener_reply(dns_reply_restore::drop, true), listener_reply_action::drop);
+    EXPECT_EQ(decide_udp_listener_reply(dns_reply_restore::drop, false), listener_reply_action::drop);
+}

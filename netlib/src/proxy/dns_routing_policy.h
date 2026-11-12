@@ -287,6 +287,20 @@ namespace proxy
     }
 
     /**
+     * @brief Whether an IPv4 packet carries a transport header, so its "ports" are ports.
+     *
+     * A later fragment's first payload bytes are application data. Nothing that keys on ports,
+     * neither the local-listener check nor DNS classification, may use them: a later fragment
+     * of an unrelated datagram whose data happens to equal a listener port would otherwise be
+     * dropped as an untranslatable listener reply. Later fragments are left to the ordinary
+     * path and passed.
+     */
+    [[nodiscard]] constexpr bool ipv4_transport_header_present(const ipv4_fragment fragment) noexcept
+    {
+        return fragment != ipv4_fragment::later;
+    }
+
+    /**
      * @brief Applies fragmentation to a DNS routing decision: a datagram that would be redirected
      *        but is fragmented cannot be, so it is blocked instead of being passed.
      */
@@ -303,6 +317,7 @@ namespace proxy
     {
         uint8_t protocol{};          ///< IPPROTO_UDP (17) or IPPROTO_TCP (6)
         uint16_t destination_port{}; ///< host byte order
+        uint16_t source_port{};      ///< host byte order
     };
 
     /**
@@ -360,7 +375,8 @@ namespace proxy
                 return std::nullopt;
 
             return ipv6_first_fragment{ next,
-                static_cast<uint16_t>((ipv6_packet[offset + 2] << 8) | ipv6_packet[offset + 3]) };
+                static_cast<uint16_t>((ipv6_packet[offset + 2] << 8) | ipv6_packet[offset + 3]),
+                static_cast<uint16_t>((ipv6_packet[offset] << 8) | ipv6_packet[offset + 1]) };
         }
 
         return std::nullopt;
@@ -390,6 +406,41 @@ namespace proxy
         if (!source_is_listener)
             return listener_reply_action::not_listener;
         return translated ? listener_reply_action::revert : listener_reply_action::drop;
+    }
+
+    /// What the IPv6 handler does with a packet that has no usable transport header.
+    enum class ipv6_fragment_action : uint8_t
+    {
+        pass,                ///< not classifiable, or nothing to enforce: pass it (existing behaviour)
+        drop_listener_reply, ///< first fragment of a local listener's reply: never send it to the wire
+        drop_dns             ///< first fragment of a DNS datagram in Proxy mode: never send it direct
+    };
+
+    /**
+     * @brief Decides what to do with an IPv6 packet whose transport header cannot be used
+     *        (a fragment, or an unsupported extension chain).
+     *
+     * A large listener reply (for example a DNS answer over about 1430 bytes) is fragmented by
+     * the stack, so its first fragment carries the SOCKS5 header and the start of the answer.
+     * It cannot be translated, so it is dropped in every mode, like an unfragmented listener
+     * reply that cannot be translated. In Proxy mode the first fragment of a datagram addressed
+     * to port 53 is dropped so DNS is never sent directly. Everything else, including later
+     * fragments, which carry no ports, is passed as before.
+     *
+     * @param first The parsed first fragment (parse_ipv6_first_fragment()), or nullopt.
+     * @param source_is_listener The first fragment's source port is a local IPv6 proxy listener
+     *        port of its protocol.
+     */
+    [[nodiscard]] constexpr ipv6_fragment_action decide_ipv6_fragment(const std::optional<ipv6_first_fragment>& first,
+        const bool source_is_listener, const bool dns_proxy_mode) noexcept
+    {
+        if (!first)
+            return ipv6_fragment_action::pass;
+        if (source_is_listener)
+            return ipv6_fragment_action::drop_listener_reply;
+        if (dns_proxy_mode && first->destination_port == dns_port)
+            return ipv6_fragment_action::drop_dns;
+        return ipv6_fragment_action::pass;
     }
 
     /// A DNS server override split into its literal address text and port.
@@ -752,6 +803,22 @@ namespace proxy
         restore,   ///< answer to a tracked query: present it as coming from the original server
         drop       ///< names the override server but answers no tracked query: drop it
     };
+
+    /**
+     * @brief Decides what to do with a reply leaving a local UDP proxy listener.
+     *
+     * An override answer that matches no tracked query (@p restore == drop) is dropped without
+     * being translated; otherwise the reply is re-injected when translated and dropped when not.
+     * Both drops are listener replies that are not sent to the network and are reported the same
+     * way.
+     */
+    [[nodiscard]] constexpr listener_reply_action decide_udp_listener_reply(const dns_reply_restore restore,
+        const bool translated) noexcept
+    {
+        if (restore == dns_reply_restore::drop)
+            return listener_reply_action::drop;
+        return decide_listener_reply(true, translated);
+    }
 
     /**
      * @brief Classifies a datagram relayed back by the DNS proxy while a server override is
