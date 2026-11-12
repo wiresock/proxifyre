@@ -299,6 +299,12 @@ namespace proxy
         std::atomic_flag untranslated_listener_reply_logged_{};
 
         /**
+         * @brief Count of listener segments dropped because their connection had just been
+         *        aborted with RST. Expected during aborts, so reported at debug level only.
+         */
+        std::atomic<std::uint64_t> listener_segments_after_reset_{ 0 };
+
+        /**
          * @brief One-shot flags so that each (family, transport, reason) block cause is
          *        described once in the log instead of once per packet.
          */
@@ -978,6 +984,7 @@ namespace proxy
             dns_blocked_packets_.store(0, std::memory_order_relaxed);
             untranslated_listener_replies_.store(0, std::memory_order_relaxed);
             untranslated_listener_reply_logged_.clear(std::memory_order_relaxed);
+            listener_segments_after_reset_.store(0, std::memory_order_relaxed);
             for (auto& flag : dns_block_reason_logged_)
                 flag.clear(std::memory_order_relaxed);
             if (!install_dns_filters())
@@ -2269,6 +2276,47 @@ namespace proxy
             }
         }
 
+        /// Maps tcp_local_redirect's result for a listener segment to the policy's outcome.
+        template <typename Result>
+        static listener_segment_outcome to_listener_segment_outcome(const Result result) noexcept
+        {
+            switch (result)
+            {
+            case Result::translated:
+                return listener_segment_outcome::translated;
+            case Result::recently_reset:
+                return listener_segment_outcome::recently_reset;
+            case Result::unknown:
+                break;
+            }
+            return listener_segment_outcome::unknown;
+        }
+
+        /**
+         * @brief Applies decide_tcp_listener_segment() to a segment from a local TCP listener:
+         *        re-inject it when translated, otherwise drop it, quietly when it belongs to a
+         *        connection that was just aborted with RST.
+         */
+        template <typename Result>
+        packet_filter::packet_action handle_tcp_listener_segment(netlib::ndisapi::intermediate_buffer& buffer,
+            const Result result)
+        {
+            switch (decide_tcp_listener_segment(to_listener_segment_outcome(result)))
+            {
+            case listener_segment_action::revert:
+                log_packet_to_pcap(buffer);
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
+            case listener_segment_action::drop_quietly:
+                listener_segments_after_reset_.fetch_add(1, std::memory_order_relaxed);
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+            case listener_segment_action::drop_reported:
+                break;
+            }
+
+            note_untranslated_listener_reply();
+            return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+        }
+
         /// True when DNS routing is in Proxy mode.
         bool dns_proxy_mode()
         {
@@ -2822,15 +2870,7 @@ namespace proxy
                 // translated (for example after its connection entry expired), instead of letting
                 // it reach the real server. tcp_local_redirect tracks the whole close, so ordinary
                 // FIN/ACK exchanges are translated.
-                if (decide_listener_reply(true, tcp_redirect_->process_server_to_client_packet(buffer)) ==
-                    listener_reply_action::revert)
-                {
-                    log_packet_to_pcap(buffer);
-                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
-                }
-
-                note_untranslated_listener_reply();
-                return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+                return handle_tcp_listener_segment(buffer, tcp_redirect_->process_server_to_client_segment(buffer));
             }
 
             // Conventional DNS over TCP follows the global DNS policy. In Direct mode TCP/53 is
@@ -3175,15 +3215,7 @@ namespace proxy
                 // translated (for example after its connection entry expired), instead of letting
                 // it reach the real server. tcp_local_redirect tracks the whole close, so ordinary
                 // FIN/ACK exchanges are translated.
-                if (decide_listener_reply(true, tcp_redirect_v6_->process_server_to_client_packet(buffer)) ==
-                    listener_reply_action::revert)
-                {
-                    log_packet_to_pcap(buffer);
-                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
-                }
-
-                note_untranslated_listener_reply();
-                return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+                return handle_tcp_listener_segment(buffer, tcp_redirect_v6_->process_server_to_client_segment(buffer));
             }
 
             // Conventional DNS over TCP follows the global DNS policy (mirrors the IPv4 path).
@@ -3483,7 +3515,8 @@ namespace proxy
                 if (const auto now = std::chrono::steady_clock::now();
                     now - last_dns_block_log >= drop_log_throttle_interval_ &&
                     (dns_blocked_packets_.load(std::memory_order_relaxed) != 0 ||
-                        untranslated_listener_replies_.load(std::memory_order_relaxed) != 0))
+                        untranslated_listener_replies_.load(std::memory_order_relaxed) != 0 ||
+                        listener_segments_after_reset_.load(std::memory_order_relaxed) != 0))
                 {
                     last_dns_block_log = now;
                     if (const auto blocked = dns_blocked_packets_.exchange(0, std::memory_order_relaxed); blocked != 0)
@@ -3499,6 +3532,13 @@ namespace proxy
                             "Dropped {} packet(s) from local proxy listeners that could not be translated back "
                             "(no tracked connection, fragmented, or malformed); they were not sent to the network.",
                             untranslated);
+                    }
+                    if (const auto after_reset = listener_segments_after_reset_.exchange(0, std::memory_order_relaxed);
+                        after_reset != 0)
+                    {
+                        NETLIB_LOG(log_level::debug,
+                            "Dropped {} segment(s) from local TCP listeners for connections that had just been reset "
+                            "(expected during aborts).", after_reset);
                     }
                 }
 

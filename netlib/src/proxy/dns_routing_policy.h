@@ -408,6 +408,45 @@ namespace proxy
         return translated ? listener_reply_action::revert : listener_reply_action::drop;
     }
 
+    /// What tcp_local_redirect reported for a segment from a local TCP listener.
+    enum class listener_segment_outcome : uint8_t
+    {
+        translated,     ///< rewritten for the client
+        recently_reset, ///< belongs to a connection the client or the proxy just aborted with RST
+        unknown         ///< belongs to no known connection
+    };
+
+    /// What a handler does with a segment from a local TCP listener.
+    enum class listener_segment_action : uint8_t
+    {
+        revert,        ///< re-inject the translated segment to the client
+        drop_quietly,  ///< drop it; an expected part of an abort, counted at debug level only
+        drop_reported  ///< drop it and report it as an untranslatable listener reply
+    };
+
+    /**
+     * @brief Decides what to do with a segment from a local TCP listener.
+     *
+     * When a connection is aborted with RST while the local proxy is still sending, the segments
+     * the proxy emitted before its stack saw the RST arrive after the redirect has ended the
+     * connection. They are dropped like any untranslatable listener segment (they must never reach
+     * the wire), but they are an expected part of an abort, so they are not reported as faults.
+     */
+    [[nodiscard]] constexpr listener_segment_action decide_tcp_listener_segment(
+        const listener_segment_outcome outcome) noexcept
+    {
+        switch (outcome)
+        {
+        case listener_segment_outcome::translated:
+            return listener_segment_action::revert;
+        case listener_segment_outcome::recently_reset:
+            return listener_segment_action::drop_quietly;
+        case listener_segment_outcome::unknown:
+            break;
+        }
+        return listener_segment_action::drop_reported;
+    }
+
     /// What the IPv6 handler does with a packet that has no usable transport header.
     enum class ipv6_fragment_action : uint8_t
     {

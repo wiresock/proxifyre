@@ -794,3 +794,16 @@ TEST(ListenerFragmentPolicy, UdpListenerRepliesAreDroppedOnBothPaths)
     EXPECT_EQ(decide_udp_listener_reply(dns_reply_restore::drop, true), listener_reply_action::drop);
     EXPECT_EQ(decide_udp_listener_reply(dns_reply_restore::drop, false), listener_reply_action::drop);
 }
+
+// Listener segments: translated ones are re-injected; those of a connection that was just reset
+// are dropped quietly (an expected part of an abort); others are dropped and reported.
+TEST(ListenerSegmentPolicy, OutcomesMapToRevertQuietDropAndReportedDrop)
+{
+    using proxy::decide_tcp_listener_segment;
+    using proxy::listener_segment_action;
+    using proxy::listener_segment_outcome;
+
+    EXPECT_EQ(decide_tcp_listener_segment(listener_segment_outcome::translated), listener_segment_action::revert);
+    EXPECT_EQ(decide_tcp_listener_segment(listener_segment_outcome::recently_reset), listener_segment_action::drop_quietly);
+    EXPECT_EQ(decide_tcp_listener_segment(listener_segment_outcome::unknown), listener_segment_action::drop_reported);
+}

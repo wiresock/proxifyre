@@ -727,3 +727,106 @@ TEST(DnsTcpCloseTracking, SynWithRstEndsTrackingInsteadOfStartingIt)
         EXPECT_FALSE(state_of(redirect).has_value());
     }
 }
+
+// ------------------------------------------------------------------ segments after a reset
+//
+// After an RST, the proxy's segments still in flight are not translated (the connection is over)
+// but are recognized as part of the abort, so the router drops them without reporting a fault.
+
+namespace
+{
+    using segment_result = tcp_redirect4::server_segment_result;
+
+    segment_result listener_segment_result(tcp_redirect4& redirect, const uint8_t flags)
+    {
+        auto segment = listener_segment(flags);
+        const auto before = std::vector<uint8_t>(segment.buffer.m_IBuffer, segment.buffer.m_IBuffer + segment.buffer.m_Length);
+        const auto result = redirect.process_server_to_client_segment(segment.buffer);
+        if (result != segment_result::translated)
+        {
+            // Untranslated segments are left untouched.
+            EXPECT_EQ(std::vector<uint8_t>(segment.buffer.m_IBuffer, segment.buffer.m_IBuffer + segment.buffer.m_Length), before);
+        }
+        return result;
+    }
+
+    bool recently_reset(tcp_redirect4& redirect)
+    {
+        return redirect.is_recently_reset(v4{ std::string{ tcp_server } }, htons(client_port));
+    }
+}
+
+TEST(DnsTcpResetTracking, ListenerSegmentAfterClientRstIsRecognizedAsPartOfTheAbort)
+{
+    tcp_redirect4 redirect{ log_level::error };
+    establish(redirect);
+    ASSERT_TRUE(send_client(redirect, TH_RST | TH_ACK));
+
+    EXPECT_TRUE(recently_reset(redirect));
+    EXPECT_FALSE(state_of(redirect).has_value());
+    EXPECT_EQ(listener_segment_result(redirect, TH_PSH | TH_ACK), segment_result::recently_reset);
+    EXPECT_EQ(listener_segment_result(redirect, TH_FIN | TH_ACK), segment_result::recently_reset);
+    // The bool entry point still reports "not translated".
+    auto segment = listener_segment(TH_ACK);
+    EXPECT_FALSE(redirect.process_server_to_client_packet(segment.buffer));
+}
+
+TEST(DnsTcpResetTracking, ListenerSegmentAfterListenerRstIsRecognizedAsPartOfTheAbort)
+{
+    tcp_redirect4 redirect{ log_level::error };
+    establish(redirect);
+    // The proxy's RST itself is still translated to the client.
+    ASSERT_EQ(send_listener(redirect, TH_RST | TH_ACK), uint16_t{ 53 });
+
+    EXPECT_TRUE(recently_reset(redirect));
+    EXPECT_EQ(listener_segment_result(redirect, TH_ACK), segment_result::recently_reset);
+    // A further RST from the proxy is not translated again.
+    EXPECT_EQ(listener_segment_result(redirect, TH_RST), segment_result::recently_reset);
+}
+
+TEST(DnsTcpResetTracking, ClientSegmentsOnAResetKeyBehaveAsUntracked)
+{
+    tcp_redirect4 redirect{ log_level::error };
+    establish(redirect);
+    ASSERT_TRUE(send_client(redirect, TH_RST | TH_ACK));
+
+    EXPECT_FALSE(send_client(redirect, TH_ACK));
+    EXPECT_FALSE(send_client(redirect, TH_FIN | TH_ACK));
+    EXPECT_FALSE(send_client(redirect, TH_RST));
+    EXPECT_FALSE(send_client(redirect, TH_SYN | TH_RST));
+    // None of these revived or refreshed the connection.
+    EXPECT_FALSE(state_of(redirect).has_value());
+    EXPECT_TRUE(recently_reset(redirect));
+}
+
+TEST(DnsTcpResetTracking, ResetRecordExpiresAfterTheLinger)
+{
+    tcp_redirect4 redirect{ log_level::error };
+    establish(redirect);
+    ASSERT_TRUE(send_client(redirect, TH_RST | TH_ACK));
+
+    const auto now = std::chrono::steady_clock::now();
+    redirect.remove_expired(now);
+    EXPECT_TRUE(recently_reset(redirect));
+    redirect.remove_expired(now + tcp_redirect4::closed_linger + std::chrono::seconds{ 1 });
+    EXPECT_FALSE(recently_reset(redirect));
+    EXPECT_EQ(listener_segment_result(redirect, TH_ACK), segment_result::unknown);
+}
+
+TEST(DnsTcpResetTracking, NewSynOnAResetKeyStartsANewConnection)
+{
+    tcp_redirect4 redirect{ log_level::error };
+    establish(redirect);
+    ASSERT_TRUE(send_client(redirect, TH_RST | TH_ACK));
+
+    ASSERT_TRUE(send_client(redirect, TH_SYN, 853));
+    EXPECT_FALSE(recently_reset(redirect));
+    ASSERT_TRUE(state_of(redirect).has_value());
+    EXPECT_EQ(send_listener(redirect, TH_SYN | TH_ACK), uint16_t{ 853 });
+}
+
+TEST(DnsTcpResetTracking, UnknownConnectionsStillReportUnknown)
+{
+    tcp_redirect4 redirect{ log_level::error };
+    EXPECT_EQ(listener_segment_result(redirect, TH_ACK), segment_result::unknown);
+}
