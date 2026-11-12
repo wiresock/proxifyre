@@ -2279,6 +2279,14 @@ namespace proxy
         /**
          * @brief Whether a resolved owner is ProxiFyre itself; nullopt when the owner is unknown
          *        (no owner, or the shared unresolved default owner).
+         *
+         * The owner comes from process_lookup's cached tables, which are replaced only by
+         * actualize() when the resolver thread processes deferred packets. A row for one of
+         * ProxiFyre's own sockets that has since closed can therefore still be found if another
+         * process reuses that local port before the next refresh (documented in
+         * docs/configuration.md, "Recursion and ProxiFyre's own traffic"). Closing the race exactly
+         * would mean tracking ProxiFyre's own upstream sockets through every close path of the
+         * proxy servers and sockets, which is not done here.
          */
         static std::optional<bool> sender_is_proxifyre(const std::shared_ptr<iphelper::network_process>& owner) noexcept
         {
