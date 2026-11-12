@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -698,14 +699,10 @@ namespace proxy
         void sweep(const clock::time_point now = clock::now())
         {
             std::scoped_lock lock(lock_);
-            for (auto it = entries_.begin(); it != entries_.end();)
+            for_each_entry_locked([this, now](const auto it)
             {
-                ++visits_;
-                if (now - it->second.created_at > ttl_)
-                    it = entries_.erase(it);
-                else
-                    ++it;
-            }
+                return now - it->second.created_at > ttl_ ? entries_.erase(it) : std::next(it);
+            });
             expire_front_locked(now);
         }
 
@@ -768,32 +765,75 @@ namespace proxy
             return it != entries_.end() && it->second.created_at == r.created_at;
         }
 
-        /// Pops expired records from the front, erasing the entries they still describe.
-        void expire_front_locked(const clock::time_point now)
+        // Every iteration over entries_ or order_ goes through one of the two helpers below,
+        // which count each element examined in visits_. Do not add raw loops over either
+        // container: visits() is how tests bound the work done on the packet thread.
+
+        /**
+         * @brief Visits table entries, counting each. @p step receives an iterator to the current
+         *        entry and returns the iterator to continue from (the erase() result or the next).
+         */
+        template <typename Step>
+        void for_each_entry_locked(Step&& step)
         {
-            while (!order_.empty() && now - order_.front().created_at > ttl_)
+            for (auto it = entries_.begin(); it != entries_.end();)
             {
                 ++visits_;
-                if (is_current_locked(order_.front()))
-                    entries_.erase(order_.front().key);
-                order_.pop_front();
+                it = step(it);
             }
         }
 
-        /// Erases the oldest live entry, skipping stale records.
-        void evict_oldest_locked()
+        /// What consume_front_locked() does after examining the front record.
+        enum class front_step : uint8_t
+        {
+            pop_and_continue,
+            pop_and_stop,
+            stop
+        };
+
+        /**
+         * @brief Examines records at the front of the queue, counting each, and pops them as
+         *        @p step decides.
+         */
+        template <typename Step>
+        void consume_front_locked(Step&& step)
         {
             while (!order_.empty())
             {
                 ++visits_;
                 const auto front = order_.front();
-                order_.pop_front();
-                if (is_current_locked(front))
-                {
-                    entries_.erase(front.key);
+                const front_step next = step(front);
+                if (next == front_step::stop)
                     return;
-                }
+                order_.pop_front();
+                if (next == front_step::pop_and_stop)
+                    return;
             }
+        }
+
+        /// Pops expired records from the front, erasing the entries they still describe.
+        void expire_front_locked(const clock::time_point now)
+        {
+            consume_front_locked([this, now](const record& front)
+            {
+                if (!(now - front.created_at > ttl_))
+                    return front_step::stop;
+                if (is_current_locked(front))
+                    entries_.erase(front.key);
+                return front_step::pop_and_continue;
+            });
+        }
+
+        /// Erases the oldest live entry, skipping stale records.
+        void evict_oldest_locked()
+        {
+            consume_front_locked([this](const record& front)
+            {
+                if (!is_current_locked(front))
+                    return front_step::pop_and_continue;
+                entries_.erase(front.key);
+                return front_step::pop_and_stop;
+            });
         }
 
         /// Keeps the queue bounded when keys are refreshed repeatedly: rebuilds it from the
@@ -805,11 +845,11 @@ namespace proxy
 
             std::vector<record> live;
             live.reserve(entries_.size());
-            for (const auto& [key, value] : entries_)
+            for_each_entry_locked([&live](const auto it)
             {
-                ++visits_;
-                live.push_back({ key, value.created_at });
-            }
+                live.push_back({ it->first, it->second.created_at });
+                return std::next(it);
+            });
             std::sort(live.begin(), live.end(),
                 [](const record& left, const record& right) { return left.created_at < right.created_at; });
             order_.assign(live.begin(), live.end());

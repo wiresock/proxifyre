@@ -690,6 +690,10 @@ TEST(DnsUdpOriginTracker, InsertingIntoAFullTableOfLiveEntriesDoesBoundedWorkPer
     // Every further insert must evict one live entry. Count the entries and records examined:
     // insertion-order eviction examines a constant amortized number per insert, while a sweep or
     // a search for the oldest entry examines the whole table (8192) on every insert.
+    //
+    // Limitation: visits() counts work done through the tracker's two iteration helpers, which
+    // every loop over its table and queue uses. The test bounds that counted work; it cannot see a
+    // raw loop added later that bypasses the helpers.
     const auto before = origins.visits();
     for (uint32_t i = capacity; i < capacity + inserts; ++i)
         remember(i);
