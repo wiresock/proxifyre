@@ -345,40 +345,74 @@ TEST(DnsPacketRedirect, Ipv6UdpOverrideRewritesTheSocksDestinationAndRestoresThe
     EXPECT_TRUE(reply.l4_checksum_valid());
 }
 
-// 7. Answers that are not override answers (other traffic through the same proxy) are left to
-//    the relay's header; override answers to an unknown query are dropped.
-TEST(DnsPacketRedirect, OnlyOverrideAnswersToKnownQueriesAreRestored)
+// 7./8. Answers to tracked queries are restored whatever source the relay reports; answers
+//       naming the override that match no query are dropped; other traffic is unchanged.
+TEST(DnsPacketRedirect, AnswersToTrackedQueriesAreRestoredWhateverSourceTheRelayReports)
 {
     proxy::dns_udp_origin_tracker<net::ip_endpoint<v4>> origins;
     const net::ip_endpoint<v4> server_override{ v4{ std::string{ "1.1.1.1" } }, 53 };
     origins.remember(client_port, 0x1111, net::ip_endpoint<v4>{ v4{ std::string{ "192.168.1.1" } }, 53 });
 
-    // A different relay source (application traffic sharing the proxy): unchanged.
-    auto other = local_proxy_reply("192.168.1.10", "203.0.113.5", v4{ std::string{ "203.0.113.5" } }, 443, dns_message(0x1111));
-    EXPECT_EQ((classify<v4, in_addr>(other, server_override, origins).first), proxy::dns_reply_restore::unchanged);
-
-    // The override address on another port: unchanged.
-    auto other_port = local_proxy_reply("192.168.1.10", "192.168.1.1", server_override.ip, 5353, dns_message(0x1111));
-    EXPECT_EQ((classify<v4, in_addr>(other_port, server_override, origins).first), proxy::dns_reply_restore::unchanged);
-
-    // An override answer to a query that was never sent: dropped.
-    auto unknown = local_proxy_reply("192.168.1.10", "192.168.1.1", server_override.ip, 53, dns_message(0x2222));
-    EXPECT_EQ((classify<v4, in_addr>(unknown, server_override, origins).first), proxy::dns_reply_restore::drop);
-
-    // A truncated DNS message from the override: dropped.
-    auto truncated = local_proxy_reply("192.168.1.10", "192.168.1.1", server_override.ip, 53, std::vector<uint8_t>{ 0x11, 0x11, 0x01 });
-    EXPECT_EQ((classify<v4, in_addr>(truncated, server_override, origins).first), proxy::dns_reply_restore::drop);
-
-    // A malformed SOCKS5 header (non-zero FRAG) is not parsed.
-    auto fragmented = local_proxy_reply("192.168.1.10", "192.168.1.1", server_override.ip, 53, dns_message(0x1111));
-    fragmented.udp_payload()[2] = 1;
-    EXPECT_EQ((classify<v4, in_addr>(fragmented, server_override, origins).first), proxy::dns_reply_restore::unchanged);
-
+    // Tracked query, relay reports the override: restored.
     auto known = local_proxy_reply("192.168.1.10", "192.168.1.1", server_override.ip, 53, dns_message(0x1111));
     const auto [restore, origin] = classify<v4, in_addr>(known, server_override, origins);
     EXPECT_EQ(restore, proxy::dns_reply_restore::restore);
     ASSERT_TRUE(origin.has_value());
     EXPECT_EQ(origin->ip, v4{ std::string{ "192.168.1.1" } });
+    EXPECT_EQ(origin->port, 53);
+
+    // Tracked query, relay reports another source (its own address, another port): restored too.
+    auto relay_source = local_proxy_reply("192.168.1.10", "192.168.1.1", v4{ std::string{ "203.0.113.5" } }, 40000, dns_message(0x1111));
+    const auto [relay_restore, relay_origin] = classify<v4, in_addr>(relay_source, server_override, origins);
+    EXPECT_EQ(relay_restore, proxy::dns_reply_restore::restore);
+    ASSERT_TRUE(relay_origin.has_value());
+    EXPECT_EQ(relay_origin->ip, v4{ std::string{ "192.168.1.1" } });
+
+    // Names the override but answers no tracked query: dropped.
+    auto unknown = local_proxy_reply("192.168.1.10", "192.168.1.1", server_override.ip, 53, dns_message(0x2222));
+    EXPECT_EQ((classify<v4, in_addr>(unknown, server_override, origins).first), proxy::dns_reply_restore::drop);
+    auto truncated = local_proxy_reply("192.168.1.10", "192.168.1.1", server_override.ip, 53, std::vector<uint8_t>{ 0x11, 0x11, 0x01 });
+    EXPECT_EQ((classify<v4, in_addr>(truncated, server_override, origins).first), proxy::dns_reply_restore::drop);
+
+    // Other traffic through the same proxy that matches no tracked query: unchanged.
+    auto other = local_proxy_reply("192.168.1.10", "203.0.113.5", v4{ std::string{ "203.0.113.5" } }, 443, dns_message(0x2222));
+    EXPECT_EQ((classify<v4, in_addr>(other, server_override, origins).first), proxy::dns_reply_restore::unchanged);
+    auto other_port = local_proxy_reply("192.168.1.10", "192.168.1.1", server_override.ip, 5353, dns_message(0x2222));
+    EXPECT_EQ((classify<v4, in_addr>(other_port, server_override, origins).first), proxy::dns_reply_restore::unchanged);
+
+    // A malformed SOCKS5 header (non-zero FRAG) or the other family's ATYP is not restored; the
+    // redirect then fails to translate it and the router drops it.
+    auto fragmented = local_proxy_reply("192.168.1.10", "192.168.1.1", server_override.ip, 53, dns_message(0x1111));
+    fragmented.udp_payload()[2] = 1;
+    EXPECT_EQ((classify<v4, in_addr>(fragmented, server_override, origins).first), proxy::dns_reply_restore::unchanged);
+    auto wrong_family = frame::udp4("192.168.1.10", "192.168.1.1", udp_listener, client_port,
+        socks5_udp_datagram(v6{ std::string{ "2001:db8::1" } }, 53, dns_message(0x1111)));
+    EXPECT_EQ((classify<v4, in_addr>(wrong_family, server_override, origins).first), proxy::dns_reply_restore::unchanged);
+}
+
+// 8. End to end: a relay that reports its own address as the answer's source still produces an
+//    answer the resolver accepts (source = the server it queried).
+TEST(DnsPacketRedirect, RelayReportingAnotherSourceStillRestoresTheQueriedServer)
+{
+    ndisapi::socks5_udp_local_redirect<v4> redirect{ log_level::error };
+    proxy::dns_udp_origin_tracker<net::ip_endpoint<v4>> origins;
+    const net::ip_endpoint<v4> server_override{ v4{ std::string{ "1.1.1.1" } }, 53 };
+
+    auto query = frame::udp4("192.168.1.10", "192.168.1.1", client_port, 53, dns_message(0x4242));
+    origins.remember(client_port, 0x4242, net::ip_endpoint<v4>{ v4{ query.ip4()->ip_dst }, 53 });
+    ASSERT_TRUE(redirect.is_new_endpoint(query.buffer));
+    ASSERT_TRUE(redirect.process_client_to_server_packet(query.buffer, htons(udp_listener), server_override));
+
+    const auto answer = dns_message(0x4242, 30);
+    auto reply = local_proxy_reply("192.168.1.10", "192.168.1.1", v4{ std::string{ "198.51.100.7" } }, 1080, answer);
+    const auto [restore, origin] = classify<v4, in_addr>(reply, server_override, origins);
+    ASSERT_EQ(restore, proxy::dns_reply_restore::restore);
+    ASSERT_TRUE(redirect.process_server_to_client_packet(reply.buffer, origin));
+    EXPECT_EQ(v4{ reply.ip4()->ip_src }, v4{ std::string{ "192.168.1.1" } });
+    EXPECT_EQ(ntohs(reply.udp()->th_sport), 53);
+    EXPECT_EQ(reply.payload(), answer);
+    EXPECT_TRUE(reply.ip4_checksum_valid());
+    EXPECT_TRUE(reply.l4_checksum_valid());
 }
 
 // 8. A datagram that cannot be redirected is reported as such (the router then drops it rather

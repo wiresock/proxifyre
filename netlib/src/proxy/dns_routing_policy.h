@@ -669,22 +669,26 @@ namespace proxy
     /// How a datagram leaving a local UDP proxy listener is presented to the client.
     enum class dns_reply_restore : uint8_t
     {
-        unchanged, ///< not a DNS override answer: present the relay's SOCKS5 header source
-        restore,   ///< DNS override answer: present it as coming from the original server
-        drop       ///< DNS override answer to no known query: drop it
+        unchanged, ///< not an answer to a tracked query: present the relay's SOCKS5 header source
+        restore,   ///< answer to a tracked query: present it as coming from the original server
+        drop       ///< names the override server but answers no tracked query: drop it
     };
 
     /**
      * @brief Classifies a datagram relayed back by the DNS proxy while a server override is
      *        configured, and finds the server the resolver originally queried.
      *
-     * Only an answer whose SOCKS5 header names the override server (address and port) is
-     * treated as a DNS override answer; anything else relayed through the same proxy is left
-     * unchanged. An override answer is restored to the original server recorded for
-     * (@p client_port, DNS message ID), or dropped when there is no such query: delivering it
-     * from the override address would only be rejected by the resolver.
+     * A datagram whose (@p client_port, DNS message ID) matches a tracked query is restored to
+     * the original server whatever source its SOCKS5 header reports: RFC 1928 relays report the
+     * override server, but some report another address (for example their own), and an answer
+     * presented from any address other than the queried server is discarded by the resolver.
+     * A datagram that names the override server but matches no tracked query is dropped. Any
+     * other datagram relayed through the same proxy is left unchanged.
      *
-     * @param socks_datagram The UDP payload as relayed: SOCKS5 UDP header followed by the DNS message.
+     * The datagram's ATYP must match the listener's family (@p expected_address_type): the
+     * redirect strips a header of that family's size.
+     *
+     * @param socks_datagram The UDP payload as relayed: SOCKS5 UDP header followed by the data.
      * @param expected_address_type 1 for the IPv4 path, 4 for the IPv6 path.
      * @param override_address The override address bytes (network byte order).
      */
@@ -695,19 +699,19 @@ namespace proxy
         const uint16_t client_port, dns_udp_origin_tracker<Endpoint>& origins)
     {
         const auto view = parse_socks5_udp_datagram(socks_datagram, size);
-        if (!view || view->address_type != expected_address_type || view->address_size != override_address_size ||
-            view->port != override_port ||
-            !std::equal(view->address, view->address + view->address_size, override_address))
+        if (!view || view->address_type != expected_address_type)
             return { dns_reply_restore::unchanged, std::nullopt };
 
-        const auto message_id = dns_message_id(view->data, view->data_size);
-        if (!message_id)
-            return { dns_reply_restore::drop, std::nullopt };
+        if (const auto message_id = dns_message_id(view->data, view->data_size))
+        {
+            if (auto original = origins.resolve(client_port, *message_id))
+                return { dns_reply_restore::restore, std::move(original) };
+        }
 
-        if (auto original = origins.resolve(client_port, *message_id))
-            return { dns_reply_restore::restore, std::move(original) };
+        const bool names_override = view->address_size == override_address_size && view->port == override_port &&
+            std::equal(view->address, view->address + view->address_size, override_address);
 
-        return { dns_reply_restore::drop, std::nullopt };
+        return { names_override ? dns_reply_restore::drop : dns_reply_restore::unchanged, std::nullopt };
     }
 
     // Compile-time checks of the decision table's key invariants.
