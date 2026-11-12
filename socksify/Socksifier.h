@@ -110,6 +110,17 @@ namespace Socksifier
     };
 
     /// <summary>
+    /// Specifies the global DNS routing mode.
+    /// </summary>
+    public enum class DnsRoutingModeEnum
+    {
+        /// <summary>Conventional DNS (UDP/TCP port 53) bypasses the SOCKS5 proxies.</summary>
+        Direct,
+        /// <summary>Conventional DNS is sent through one selected SOCKS5 proxy, or dropped.</summary>
+        Proxy
+    };
+
+    /// <summary>
     /// Represents a single log entry for Socksifier events.
     /// </summary>
     public ref class LogEntry sealed
@@ -339,6 +350,17 @@ namespace Socksifier
         /// <param name="excludedEntry">The process name to exclude.</param>
         /// <returns>True if exclusion was successful, otherwise false.</returns>
         bool ExcludeProcessName(String^ excludedEntry);
+
+        /// <summary>
+        /// Configures global DNS routing. Must be called before Start().
+        /// </summary>
+        /// <param name="mode">Direct or Proxy.</param>
+        /// <param name="proxy">Handle of the proxy that carries DNS in Proxy mode, or -1 when the
+        /// selected proxy could not be created (DNS is then blocked rather than sent directly).</param>
+        /// <param name="serverOverride">Optional IPv4/IPv6 literal (with optional port) used as the
+        /// upstream DNS server; null or empty keeps the original destination.</param>
+        /// <returns>True when the configuration was applied as requested.</returns>
+        bool SetDnsRouting(DnsRoutingModeEnum mode, IntPtr proxy, String^ serverOverride);
 
         /// <summary>
         /// Gets or sets the interval (in milliseconds) for log event notifications.

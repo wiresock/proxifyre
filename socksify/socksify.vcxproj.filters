@@ -141,6 +141,9 @@
     <ClInclude Include="..\netlib\src\proxy\process_routing_policy.h">
       <Filter>Header Files\netlib\proxy</Filter>
     </ClInclude>
+    <ClInclude Include="..\netlib\src\proxy\dns_routing_policy.h">
+      <Filter>Header Files\netlib\proxy</Filter>
+    </ClInclude>
     <ClInclude Include="..\netlib\src\proxy\socks5_common.h">
       <Filter>Header Files\netlib\proxy</Filter>
     </ClInclude>

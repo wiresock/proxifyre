@@ -58,6 +58,10 @@ The current engine reaches its upstream SOCKS5 server over IPv4, so an IPv6-lite
 
 SOCKS5-over-TLS protects the TCP control connection (including the UDP `ASSOCIATE` negotiation); it does not mean the SOCKS5 UDP relay payload is wrapped in that TLS stream. `tlsServerName` defaults to the endpoint host. Certificate fingerprints are normalized by removing whitespace, colons, and hyphens and must contain exactly 64 hexadecimal characters. A pinned leaf certificate can authenticate a self-signed lab endpoint. **Allow invalid certificate** disables normal certificate validation, requires an explicit confirmation, and is particularly dangerous without a pin.
 
+### DNS routing
+
+The **DNS routing** group on the **Settings / Diagnostics** tab edits the global `dns` section described in the [configuration reference](configuration.md#dns-routing). **DNS mode** selects `Direct` (default) or `Proxy`. In `Direct` mode the **DNS proxy** and **Server override** fields are disabled but keep their values, so switching modes does not lose them. **DNS proxy** lists the routing rules by position, endpoint, and applications; selecting one stores that rule's stable `id` in `dns.proxyId`, assigning an id such as `proxy-1` to the rule if it has none. The reference therefore survives **Move Up**/**Move Down**, editing, saving, and reloading. **Duplicate** clears the id on the copy. If the referenced rule is removed, the selector shows the missing id and validation fails until another rule is chosen; the GUI never substitutes a different proxy. Validation also requires the selected rule to support both TCP and UDP and checks that the server override is an IP literal whose address family the rule accepts. Like other engine settings, DNS changes take effect after **Apply & Restart**.
+
 ## Save, apply, conflicts, and recovery
 
 **Save** validates the complete model and refuses to write when errors exist. It writes a temporary file in the configuration directory, flushes it, preserves the prior live file as `app-config.json.bak`, and replaces the live file atomically. If the service is running, the UI reports that a restart is still required.
@@ -151,3 +155,14 @@ On a Windows test machine with the appropriate driver and administrator access:
 10. Hide the GUI to the notification area, launch `ProxiFyreUI.exe` again, and confirm the existing window is restored without creating a second tray icon.
 11. Exit the GUI and confirm the service continues running.
 12. On Windows 7 SP1 x64, launch the installed UI and confirm the main window is constructed without a managed startup failure before repeating the basic service-state checks.
+
+### DNS routing manual validation
+
+The routing policy and the packet rewriting are covered by automated tests (`netlib-tests` and `netlib/test/portable/run-portable-tests.sh`); the end-to-end path through the driver and a live SOCKS5 server needs a Windows test machine. Capture with Wireshark on the physical adapter and use `Resolve-DnsName -Server <server> -DnsOnly` (UDP) and `Resolve-DnsName -TcpOnly` (TCP), running `ipconfig /flushdns` before each step:
+
+1. With no `dns` section (or `Direct`), confirm UDP and TCP queries to the system resolver and to `8.8.8.8` leave the adapter directly for IPv4 and IPv6, including with a catch-all rule.
+2. Configure two proxies with ids and select the second in `Proxy` mode. Confirm no port-53 packets leave the adapter, that the second SOCKS5 server receives `UDP ASSOCIATE`/`CONNECT` requests, and that name resolution works from a browser (Dnscache) and from `nslookup <name> 8.8.8.8` (own resolver).
+3. Enable `bypassLan` with a router resolver (`192.168.x.1`): without an override the SOCKS5 server is asked for the router address; with `serverOverride: "1.1.1.1"` it is asked for `1.1.1.1` and `Resolve-DnsName` still reports answers from the router address.
+4. Reorder the rules, Apply & Restart, and confirm DNS still uses the selected proxy.
+5. Stop the SOCKS5 server (or block it with a firewall rule) and confirm queries fail and no port-53 packet leaves the adapter; confirm the engine log shows one warning per cause and throttled drop counts.
+6. Configure an IPv4 override with an IPv6 resolver and confirm IPv6 queries are dropped while IPv4 queries succeed.

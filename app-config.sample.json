@@ -3,6 +3,7 @@
     "bypassLan": false,
     "proxies": [
         {
+            "id": "primary",
             "appNames": ["chrome", "firefox"],
             "socks5ProxyEndpoint": "proxy.example.com:1080",
             "username": "REPLACE_WITH_USERNAME_OR_LEAVE_EMPTY",
@@ -15,5 +16,10 @@
             "supportedAddressFamilies": ["IPv4", "IPv6"]
         }
     ],
-    "excludes": []
+    "excludes": [],
+    "dns": {
+        "mode": "Direct",
+        "proxyId": "primary",
+        "serverOverride": null
+    }
 }

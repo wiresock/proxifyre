@@ -1,6 +1,7 @@
 #pragma once
 
 #include "process_routing_policy.h"
+#include "dns_routing_policy.h"
 
 namespace proxy
 {
@@ -72,6 +73,26 @@ namespace proxy
             std::optional<net::ip_endpoint<net::ip_address_v4>> ipv4;
             std::optional<net::ip_endpoint<net::ip_address_v6>> ipv6;
             std::string host;
+        };
+
+        /**
+         * @brief Global DNS routing configuration (see set_dns_routing()).
+         */
+        struct dns_routing_settings
+        {
+            /// Direct (default) keeps UDP/TCP port 53 traffic off every proxy; Proxy sends it
+            /// through proxy_id or drops it.
+            dns_routing_mode mode{ dns_routing_mode::direct };
+
+            /// Index returned by add_socks5_proxy() of the proxy that carries DNS in Proxy mode.
+            /// std::nullopt in Proxy mode means no proxy is usable: every DNS packet is dropped.
+            std::optional<size_t> proxy_id;
+
+            /// Optional upstream DNS server used instead of the destination the application
+            /// queried: an IPv4 or IPv6 literal with an optional port ("1.1.1.1",
+            /// "1.1.1.1:53", "2606:4700:4700::1111", "[2606:4700:4700::1111]:53"). Empty keeps
+            /// the original destination. Host names are rejected to avoid recursive resolution.
+            std::string server_override;
         };
 
     private:
@@ -226,6 +247,48 @@ namespace proxy
          * @brief Configured destination address-family support for each proxy, index-aligned with proxy_servers_.
          */
         std::vector<supported_address_families> proxy_address_families_;
+
+        /**
+         * @brief Upstream SOCKS5 server endpoint of each proxy, index-aligned with proxy_servers_.
+         *        Used by the DNS policy so ProxiFyre's own upstream traffic is never captured.
+         */
+        std::vector<net::ip_endpoint<net::ip_address_v4>> proxy_upstreams_;
+
+        /**
+         * @brief Global DNS routing state. Written only by set_dns_routing() while the router is
+         *        inactive (under lifecycle_mutex_ and lock_); read by the packet handlers under
+         *        lock_.
+         */
+        dns_routing_mode dns_mode_{ dns_routing_mode::direct };
+        std::optional<size_t> dns_proxy_id_;
+        std::optional<net::ip_endpoint<net::ip_address_v4>> dns_server_override_v4_;
+        std::optional<net::ip_endpoint<net::ip_address_v6>> dns_server_override_v6_;
+
+        /**
+         * @brief Original server of each UDP DNS query rewritten to the server override, so the
+         *        answer can be restored to the server the resolver actually queried.
+         */
+        dns_udp_origin_tracker<net::ip_endpoint<net::ip_address_v4>> dns_udp_origins_v4_;
+        dns_udp_origin_tracker<net::ip_endpoint<net::ip_address_v6>> dns_udp_origins_v6_;
+
+        /**
+         * @brief True once the static driver filters that keep port-53 traffic (and the DNS
+         *        proxy's own local replies) in user mode, ahead of the LAN-bypass PASS filters,
+         *        have been installed.
+         */
+        bool dns_filters_installed_{ false };
+
+        /**
+         * @brief Count of DNS packets dropped by the Proxy-mode policy since the last
+         *        throttled report from the resolver thread.
+         */
+        std::atomic<std::uint64_t> dns_blocked_packets_{ 0 };
+
+        /**
+         * @brief One-shot flags so that each (family, transport, reason) block cause is
+         *        described once in the log instead of once per packet.
+         */
+        std::array<std::atomic_flag, static_cast<size_t>(dns_block_reason::count) * 4> dns_block_reason_logged_{};
 
         /**
          * @brief Maps proxy indexes to their corresponding process names (sorted by proxy ID).
@@ -503,6 +566,42 @@ namespace proxy
                 return udp_mapper_lock_;
             else
                 return udp_mapper_v6_lock_;
+        }
+
+        template <typename AddrT>
+        auto& tcp_redirect_for() noexcept
+        {
+            if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
+                return *tcp_redirect_;
+            else
+                return *tcp_redirect_v6_;
+        }
+
+        template <typename AddrT>
+        auto& udp_redirect_for() noexcept
+        {
+            if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
+                return *udp_redirect_;
+            else
+                return *udp_redirect_v6_;
+        }
+
+        template <typename AddrT>
+        auto& dns_udp_origins_for() noexcept
+        {
+            if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
+                return dns_udp_origins_v4_;
+            else
+                return dns_udp_origins_v6_;
+        }
+
+        template <typename AddrT>
+        const std::optional<net::ip_endpoint<AddrT>>& dns_server_override_for() const noexcept
+        {
+            if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
+                return dns_server_override_v4_;
+            else
+                return dns_server_override_v6_;
         }
 
     public:
@@ -857,6 +956,15 @@ namespace proxy
                 if (udp)
                     udp->stop();
 
+            // Proxy-mode DNS must take precedence over the LAN-bypass PASS filters; install the
+            // front-of-table REDIRECT filters once the DNS proxy's listener ports are known.
+            dns_udp_origins_v4_.clear();
+            dns_udp_origins_v6_.clear();
+            dns_blocked_packets_.store(0, std::memory_order_relaxed);
+            for (auto& flag : dns_block_reason_logged_)
+                flag.clear(std::memory_order_relaxed);
+            install_dns_filters();
+
             process_resolve_thread_ = std::thread(&socks_local_router::process_resolve_thread_proc, this);
 
             // Update network configuration and start filter
@@ -1064,6 +1172,8 @@ namespace proxy
         {
             add_lan_passover_filters_v4();
             add_lan_passover_filters_v6();
+            // In DNS Proxy mode, start() inserts port-53 REDIRECT filters ahead of these PASS
+            // filters, so DNS addressed to LAN resolvers is still proxied.
         }
 
         /**
@@ -1420,6 +1530,7 @@ namespace proxy
                     proxy_servers_v6_.reserve(proxy_servers_v6_.size() + 1);
                     proxy_protocols_.reserve(proxy_protocols_.size() + 1);
                     proxy_address_families_.reserve(proxy_address_families_.size() + 1);
+                    proxy_upstreams_.reserve(proxy_upstreams_.size() + 1);
                 }
 
                 // Install PASS filters only for upstream addresses selected by
@@ -1536,6 +1647,7 @@ namespace proxy
                     std::move(socks_tcp_proxy_server_v6), std::move(socks_udp_proxy_server_v6));
                 proxy_protocols_.push_back(protocols);
                 proxy_address_families_.push_back(address_families);
+                proxy_upstreams_.push_back(*proxy_endpoint->ipv4);
 
                 return proxy_servers_.size() - 1; // Return the index of the added proxy server
             }
@@ -1635,6 +1747,151 @@ namespace proxy
             }
 
             return true;
+        }
+
+        /**
+         * @brief Configures the global DNS routing policy. Must be called before start().
+         *
+         * Direct mode lets UDP and TCP traffic to port 53 bypass every proxy, for both address
+         * families and independently of application rules.
+         *
+         * Proxy mode sends all captured UDP and TCP traffic to port 53, whatever process sent
+         * it (including the Windows DNS Client service), through the proxy @p settings.proxy_id
+         * using the existing SOCKS5 UDP ASSOCIATE and TCP CONNECT paths. The policy fails
+         * closed: when the selected proxy cannot carry a query (invalid reference, missing
+         * transport, unsupported address family, listener unavailable, or SOCKS5 failure) the
+         * query is dropped and never sent direct. Port-53 traffic takes precedence over LAN
+         * bypass in this mode.
+         *
+         * An invalid configuration is rejected with a logged reason, and the router is left in
+         * Proxy mode with no usable proxy so DNS is blocked rather than leaked.
+         *
+         * @return true when the configuration was applied as requested; false when it was
+         *         rejected (Proxy mode then blocks DNS) or the router is already running.
+         */
+        bool set_dns_routing(const dns_routing_settings& settings)
+        {
+            std::scoped_lock lifecycle_lock(lifecycle_mutex_);
+
+            if (is_active_.load(std::memory_order_acquire))
+            {
+                NETLIB_LOG(log_level::error, "DNS routing cannot be changed while the router is running.");
+                return false;
+            }
+
+            std::scoped_lock lock(lock_);
+
+            dns_mode_ = settings.mode;
+            dns_proxy_id_.reset();
+            dns_server_override_v4_.reset();
+            dns_server_override_v6_.reset();
+
+            if (settings.mode == dns_routing_mode::direct)
+            {
+                NETLIB_LOG(log_level::info, "DNS routing: Direct (UDP/TCP port 53 bypasses the SOCKS5 proxies).");
+                return true;
+            }
+
+            // From here on dns_proxy_id_ stays empty (fail closed: all DNS is dropped) unless the
+            // whole configuration is valid.
+            const auto reject = [this](const std::string& reason)
+            {
+                NETLIB_LOG(log_level::error,
+                    "DNS routing: Proxy mode configuration rejected: {} All DNS queries will be blocked "
+                    "instead of being sent directly.", reason);
+                return false;
+            };
+
+            if (!settings.proxy_id)
+                return reject("no SOCKS5 proxy is available for DNS (the selected proxy was not created).");
+
+            const auto proxy_id = *settings.proxy_id;
+            if (proxy_id >= proxy_servers_.size() || proxy_id >= proxy_protocols_.size())
+                return reject("proxy index " + std::to_string(proxy_id) + " does not refer to a configured proxy.");
+
+            if (proxy_protocols_[proxy_id] != supported_protocols::both)
+                return reject("the selected proxy must support both TCP and UDP (DNS uses UDP and falls back to TCP).");
+
+            const auto families = proxy_id < proxy_address_families_.size()
+                ? proxy_address_families_[proxy_id]
+                : supported_address_families::all;
+
+            if (!settings.server_override.empty())
+            {
+                const auto parsed = parse_dns_server_override(settings.server_override);
+                if (!parsed)
+                {
+                    return reject("the DNS server override '" + settings.server_override +
+                        "' is not an IPv4 or IPv6 literal with an optional port.");
+                }
+
+                if (std::holds_alternative<net::ip_endpoint<net::ip_address_v4>>(*parsed))
+                {
+                    if (!family_supports_ipv4(families))
+                        return reject("the DNS server override is IPv4 but the selected proxy does not accept IPv4 destinations.");
+                    dns_server_override_v4_ = std::get<net::ip_endpoint<net::ip_address_v4>>(*parsed);
+                }
+                else
+                {
+                    if (!family_supports_ipv6(families))
+                        return reject("the DNS server override is IPv6 but the selected proxy does not accept IPv6 destinations.");
+                    dns_server_override_v6_ = std::get<net::ip_endpoint<net::ip_address_v6>>(*parsed);
+                }
+            }
+
+            dns_proxy_id_ = proxy_id;
+
+            const auto upstream = proxy_id < proxy_upstreams_.size()
+                ? proxy_upstreams_[proxy_id].to_string()
+                : std::string{ "unknown" };
+            const auto override_text = dns_server_override_v4_
+                ? dns_server_override_v4_->to_string()
+                : dns_server_override_v6_
+                    ? "[" + dns_server_override_v6_->ip_to_string() + "]:" + dns_server_override_v6_->port_to_string()
+                    : std::string{ "none (original destinations are kept)" };
+
+            NETLIB_LOG(log_level::info,
+                "DNS routing: Proxy via SOCKS5 proxy #{} ({}); server override: {}.",
+                proxy_id, upstream, override_text);
+
+            if (dns_server_override_v4_ || dns_server_override_v6_)
+            {
+                NETLIB_LOG(log_level::info,
+                    "DNS routing: queries addressed to {} servers are blocked because the server override is {}.",
+                    dns_server_override_v4_ ? "IPv6" : "IPv4", dns_server_override_v4_ ? "IPv4" : "IPv6");
+            }
+
+            return true;
+        }
+
+        /**
+         * @brief Parses a DNS server override literal without resolving host names.
+         * @return the IPv4 or IPv6 endpoint, or std::nullopt when @p value is not a literal.
+         */
+        static std::optional<std::variant<net::ip_endpoint<net::ip_address_v4>, net::ip_endpoint<net::ip_address_v6>>>
+            parse_dns_server_override(const std::string& value)
+        {
+            const auto text = split_dns_server_override(value);
+            if (!text)
+                return std::nullopt;
+
+            if (!text->bracketed && text->address.find(':') == std::string::npos)
+            {
+                in_addr address{};
+                if (inet_pton(AF_INET, text->address.c_str(), &address) != 1)
+                    return std::nullopt;
+                const auto host_order = ntohl(address.S_un.S_addr);
+                if (host_order == 0 || host_order == 0xffffffffu || (host_order & 0xf0000000u) == 0xe0000000u)
+                    return std::nullopt;
+                return net::ip_endpoint<net::ip_address_v4>{ net::ip_address_v4{ address }, text->port };
+            }
+
+            in6_addr address{};
+            if (inet_pton(AF_INET6, text->address.c_str(), &address) != 1)
+                return std::nullopt;
+            if (IN6_IS_ADDR_UNSPECIFIED(&address) || IN6_IS_ADDR_MULTICAST(&address) || IN6_IS_ADDR_V4MAPPED(&address))
+                return std::nullopt;
+            return net::ip_endpoint<net::ip_address_v6>{ net::ip_address_v6{ address }, text->port };
         }
 
         /**
@@ -1899,6 +2156,370 @@ namespace proxy
             });
         }
 
+        // ---------------------------------------------------------------------------------
+        // Global DNS policy (see set_dns_routing() and dns_routing_policy.h)
+        // ---------------------------------------------------------------------------------
+
+        /**
+         * @brief Local listener port of the DNS proxy for @p Transport and family @p AddrT.
+         *        The caller holds lock_.
+         */
+        template <typename AddrT, dns_transport Transport>
+        std::optional<uint16_t> dns_listener_port_locked() const
+        {
+            if (!dns_proxy_id_)
+                return std::nullopt;
+
+            const auto listener = [id = *dns_proxy_id_](const auto& servers) -> std::optional<uint16_t>
+            {
+                if (id >= servers.size())
+                    return std::nullopt;
+                if constexpr (Transport == dns_transport::tcp)
+                    return servers[id].first ? std::optional<uint16_t>{ servers[id].first->proxy_port() } : std::nullopt;
+                else
+                    return servers[id].second ? std::optional<uint16_t>{ servers[id].second->proxy_port() } : std::nullopt;
+            };
+
+            if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
+                return listener(proxy_servers_);
+            else
+                return listener(proxy_servers_v6_);
+        }
+
+        /**
+         * @brief True when @p destination (and, for TCP, @p port) is one of ProxiFyre's own
+         *        SOCKS5 upstream servers. Such traffic is never captured by the DNS policy so a
+         *        SOCKS5 server listening on port 53 cannot cause a redirect loop. UDP is matched by
+         *        address only because a UDP ASSOCIATE relay port is unrelated to the configured
+         *        port; this mirrors the upstream PASS filters installed by add_socks5_proxy().
+         *        The caller holds lock_.
+         */
+        template <typename AddrT, dns_transport Transport>
+        bool is_upstream_destination_locked(const AddrT& destination, const uint16_t port) const
+        {
+            return std::ranges::any_of(proxy_upstreams_, [&](const net::ip_endpoint<net::ip_address_v4>& upstream)
+            {
+                if (Transport == dns_transport::tcp && upstream.port != port)
+                    return false;
+
+                if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
+                {
+                    return destination == upstream.ip;
+                }
+                else
+                {
+                    // Dual-stack IPv6 listeners reach the IPv4 upstream through its IPv4-mapped form.
+                    in6_addr mapped{};
+                    mapped.u.Byte[10] = 0xff;
+                    mapped.u.Byte[11] = 0xff;
+                    const in_addr v4 = upstream.ip;
+                    memcpy(&mapped.u.Byte[12], &v4, sizeof(v4));
+                    return destination == net::ip_address_v6{ mapped };
+                }
+            });
+        }
+
+        /// Routing decision plus the effective upstream destination of a DNS packet.
+        template <typename AddrT>
+        struct dns_route
+        {
+            dns_route_decision decision;
+            std::optional<net::ip_endpoint<AddrT>> server_override; ///< set when the destination is rewritten
+        };
+
+        /**
+         * @brief Applies the global DNS policy to an outbound packet addressed to
+         *        @p destination : @p destination_port. Non-DNS packets return not_dns without
+         *        taking any lock.
+         */
+        template <typename AddrT, dns_transport Transport>
+        dns_route<AddrT> decide_dns(const AddrT& destination, const uint16_t destination_port)
+        {
+            if (destination_port != dns_port)
+                return {};
+
+            std::shared_lock lock(lock_);
+
+            if (dns_mode_ == dns_routing_mode::direct)
+                return { decide_dns_route(dns_mode_, destination_port, false, {}), std::nullopt };
+
+            constexpr auto v4 = std::is_same_v<AddrT, net::ip_address_v4>;
+
+            dns_proxy_target target;
+            target.selected = dns_proxy_id_.has_value() && *dns_proxy_id_ < proxy_protocols_.size();
+            if (target.selected)
+            {
+                const auto id = *dns_proxy_id_;
+                target.transport_supported = Transport == dns_transport::tcp
+                    ? protocol_supports_tcp(proxy_protocols_[id])
+                    : protocol_supports_udp(proxy_protocols_[id]);
+                target.family_supported = id >= proxy_address_families_.size() ||
+                    (v4 ? family_supports_ipv4(proxy_address_families_[id]) : family_supports_ipv6(proxy_address_families_[id]));
+                target.listener_port = dns_listener_port_locked<AddrT, Transport>();
+            }
+
+            target.override_configured = dns_server_override_v4_.has_value() || dns_server_override_v6_.has_value();
+            target.override_family_matches = dns_server_override_for<AddrT>().has_value();
+
+            const auto decision = decide_dns_route(dns_mode_, destination_port,
+                is_upstream_destination_locked<AddrT, Transport>(destination, destination_port), target);
+
+            return { decision, decision.action == dns_route_action::proxy ? dns_server_override_for<AddrT>() : std::nullopt };
+        }
+
+        /**
+         * @brief Accounts for a DNS packet dropped by the Proxy-mode policy. The first drop of
+         *        each (family, transport, reason) is described once; the running count is
+         *        reported by the resolver thread at a throttled rate.
+         */
+        template <typename AddrT, dns_transport Transport>
+        void note_dns_block(const dns_block_reason reason)
+        {
+            dns_blocked_packets_.fetch_add(1, std::memory_order_relaxed);
+
+            const auto family_index = std::is_same_v<AddrT, net::ip_address_v4> ? 0u : 1u;
+            const auto transport_index = Transport == dns_transport::tcp ? 0u : 1u;
+            const auto index = (static_cast<size_t>(reason) * 4) + family_index * 2 + transport_index;
+            if (index < dns_block_reason_logged_.size() &&
+                !dns_block_reason_logged_[index].test_and_set(std::memory_order_relaxed))
+            {
+                NETLIB_LOG(log_level::warning,
+                    "DNS routing: blocking {} {} DNS traffic (port 53) instead of sending it directly: {}.",
+                    family_index == 0 ? "IPv4" : "IPv6", transport_index == 0 ? "TCP" : "UDP", proxy::to_string(reason));
+            }
+        }
+
+        /**
+         * @brief Handles an outbound UDP datagram addressed to port 53 according to @p route.
+         *
+         * In Proxy mode the datagram is redirected to the DNS proxy's local UDP listener via the
+         * existing socks5_udp_local_redirect, which also writes the SOCKS5 UDP header. With a
+         * server override the header carries the override while the IP header keeps the
+         * original destination, and the original server is remembered so the answer can be
+         * restored to it. Anything that cannot be redirected is dropped, never passed.
+         */
+        template <typename AddrT>
+        packet_filter::packet_action handle_dns_udp(netlib::ndisapi::intermediate_buffer& buffer,
+            const dns_route<AddrT>& route, const AddrT& destination, const uint16_t source_port,
+            const uint16_t destination_port, const uint8_t* payload, const size_t payload_size)
+        {
+            using action_type = packet_filter::packet_action::action_type;
+
+            if (route.decision.action == dns_route_action::pass)
+                return packet_filter::packet_action{ action_type::pass };
+
+            if (route.decision.action == dns_route_action::block)
+            {
+                note_dns_block<AddrT, dns_transport::udp>(route.decision.reason);
+                return packet_filter::packet_action{ action_type::drop };
+            }
+
+            if (route.server_override)
+            {
+                // The answer comes back from the override server; remember which server the
+                // resolver addressed so that answer can be restored to it.
+                const auto message_id = dns_message_id(payload, payload_size);
+                if (!message_id)
+                {
+                    note_dns_block<AddrT, dns_transport::udp>(dns_block_reason::redirect_failed);
+                    return packet_filter::packet_action{ action_type::drop };
+                }
+
+                dns_udp_origins_for<AddrT>().remember(source_port, *message_id,
+                    net::ip_endpoint<AddrT>{ destination, destination_port });
+            }
+
+            auto& redirect = udp_redirect_for<AddrT>();
+            const auto is_new_endpoint = redirect.is_new_endpoint(buffer);
+
+            if (!redirect.process_client_to_server_packet(buffer, htons(route.decision.listener_port), route.server_override))
+            {
+                note_dns_block<AddrT, dns_transport::udp>(dns_block_reason::redirect_failed);
+                return packet_filter::packet_action{ action_type::drop };
+            }
+
+            {
+                std::scoped_lock lock(udp_mapper_lock_for<AddrT>());
+                udp_mapper_for<AddrT>().insert_or_assign(source_port, std::chrono::steady_clock::now());
+            }
+
+            if (is_new_endpoint)
+            {
+                NETLIB_LOG(log_level::debug, "Redirecting DNS over UDP from local port {} to {} via the DNS proxy",
+                    source_port, route.server_override
+                        ? route.server_override->to_string()
+                        : net::ip_endpoint<AddrT>{ destination, destination_port }.to_string());
+            }
+
+            log_packet_to_pcap(buffer);
+            return packet_filter::packet_action{ action_type::revert };
+        }
+
+        /**
+         * @brief Handles an outbound TCP segment addressed to port 53 according to @p route.
+         *
+         * In Proxy mode the connection is redirected to the DNS proxy's local TCP listener via
+         * the existing tcp_local_redirect. The source-port mapper records the effective upstream
+         * destination (the override, when configured) for the SOCKS5 CONNECT, while the packets
+         * the application sees keep the original destination. Segments that cannot be
+         * redirected (for example of a connection opened before ProxiFyre started) are dropped.
+         */
+        template <typename AddrT>
+        packet_filter::packet_action handle_dns_tcp(netlib::ndisapi::intermediate_buffer& buffer,
+            const dns_route<AddrT>& route, const AddrT& destination, const uint16_t source_port,
+            const uint16_t destination_port, const uint8_t tcp_flags)
+        {
+            using action_type = packet_filter::packet_action::action_type;
+
+            if (route.decision.action == dns_route_action::pass)
+                return packet_filter::packet_action{ action_type::pass };
+
+            if (route.decision.action == dns_route_action::block)
+            {
+                note_dns_block<AddrT, dns_transport::tcp>(route.decision.reason);
+                return packet_filter::packet_action{ action_type::drop };
+            }
+
+            if ((tcp_flags & (TH_SYN | TH_ACK)) == TH_SYN)
+            {
+                const auto upstream_destination = route.server_override
+                    ? *route.server_override
+                    : net::ip_endpoint<AddrT>{ destination, destination_port };
+
+                {
+                    std::scoped_lock lock(tcp_mapper_lock_for<AddrT>());
+                    tcp_mapper_for<AddrT>()[source_port] =
+                        tcp_mapper_entry_t<AddrT>{ std::chrono::steady_clock::now(), upstream_destination };
+                }
+
+                NETLIB_LOG(log_level::debug, "Redirecting DNS over TCP from local port {} to {} via the DNS proxy",
+                    source_port, upstream_destination.to_string());
+            }
+
+            if (!tcp_redirect_for<AddrT>().process_client_to_server_packet(buffer, htons(route.decision.listener_port)))
+            {
+                note_dns_block<AddrT, dns_transport::tcp>(dns_block_reason::redirect_failed);
+                return packet_filter::packet_action{ action_type::drop };
+            }
+
+            log_packet_to_pcap(buffer);
+            return packet_filter::packet_action{ action_type::revert };
+        }
+
+        /**
+         * @brief Determines how a reply leaving local UDP proxy listener @p listener_port toward
+         *        client port @p client_port is presented, given the relayed SOCKS5 UDP datagram
+         *        in @p socks_payload. Only answers relayed from the configured server override
+         *        by the DNS proxy's listener are restored (see classify_dns_override_reply());
+         *        other traffic through the same proxy is unchanged.
+         */
+        template <typename AddrT>
+        std::pair<dns_reply_restore, std::optional<net::ip_endpoint<AddrT>>> dns_udp_reply_origin(
+            const uint16_t listener_port, const uint16_t client_port,
+            const uint8_t* socks_payload, const size_t socks_payload_size)
+        {
+            std::optional<net::ip_endpoint<AddrT>> server_override;
+            {
+                std::shared_lock lock(lock_);
+                if (dns_mode_ != dns_routing_mode::proxy || !dns_server_override_for<AddrT>())
+                    return { dns_reply_restore::unchanged, std::nullopt };
+
+                if (dns_listener_port_locked<AddrT, dns_transport::udp>() != listener_port)
+                    return { dns_reply_restore::unchanged, std::nullopt };
+
+                server_override = dns_server_override_for<AddrT>();
+            }
+
+            constexpr auto v4 = std::is_same_v<AddrT, net::ip_address_v4>;
+            using raw_address_t = std::conditional_t<v4, in_addr, in6_addr>;
+            const raw_address_t& raw = server_override->ip;
+
+            return classify_dns_override_reply(socks_payload, socks_payload_size,
+                static_cast<uint8_t>(v4 ? 1 : 4), reinterpret_cast<const uint8_t*>(&raw), sizeof(raw_address_t),
+                server_override->port, client_port, dns_udp_origins_for<AddrT>());
+        }
+
+        /**
+         * @brief Bytes of the UDP payload of an IPv4/IPv6 frame that are actually captured.
+         */
+        static size_t captured_udp_payload_size(const netlib::ndisapi::intermediate_buffer& buffer, const void* udp_header) noexcept
+        {
+            const auto* const start = reinterpret_cast<const uint8_t*>(udp_header);
+            const auto* const end = buffer.m_IBuffer + buffer.m_Length;
+            if (start < buffer.m_IBuffer || start + sizeof(udphdr) > end)
+                return 0;
+
+            const auto declared = static_cast<size_t>(ntohs(static_cast<const udphdr*>(udp_header)->length));
+            const auto captured = static_cast<size_t>(end - start);
+            const auto udp_size = std::min(declared, captured);
+            return udp_size > sizeof(udphdr) ? udp_size - sizeof(udphdr) : 0;
+        }
+
+        /**
+         * @brief Installs the static driver filters that keep DNS in user mode in Proxy mode.
+         *
+         * Static PASS filters (LAN bypass and the upstream exemptions) are evaluated in the
+         * driver before the user-mode handler sees a packet. In Proxy mode DNS must take
+         * precedence over LAN bypass, so REDIRECT (to user mode) filters are inserted at the
+         * front of the table for outbound TCP/UDP to port 53 and for the DNS proxy's local
+         * replies (outbound from its listener ports, which are addressed to the original - often
+         * LAN - DNS server). Unrelated LAN traffic keeps matching the LAN PASS filters.
+         * Called from start() under lifecycle_mutex_.
+         */
+        void install_dns_filters()
+        {
+            if (dns_filters_installed_)
+                return;
+
+            std::optional<uint16_t> tcp4, udp4, tcp6, udp6;
+            {
+                std::shared_lock lock(lock_);
+                if (dns_mode_ != dns_routing_mode::proxy)
+                    return;
+                tcp4 = dns_listener_port_locked<net::ip_address_v4, dns_transport::tcp>();
+                udp4 = dns_listener_port_locked<net::ip_address_v4, dns_transport::udp>();
+                tcp6 = dns_listener_port_locked<net::ip_address_v6, dns_transport::tcp>();
+                udp6 = dns_listener_port_locked<net::ip_address_v6, dns_transport::udp>();
+            }
+
+            bool all_installed = true;
+            const auto add = [this, &all_installed]<typename AddrT>(const uint8_t protocol,
+                const std::optional<uint16_t> destination_port, const std::optional<uint16_t> source_port)
+            {
+                ndisapi::filter<AddrT> filter;
+                filter.set_direction(ndisapi::direction_t::out)
+                    .set_action(ndisapi::action_t::redirect)
+                    .set_protocol(protocol);
+                if (destination_port)
+                    filter.set_dest_port(std::make_pair(*destination_port, *destination_port));
+                if (source_port)
+                    filter.set_source_port(std::make_pair(*source_port, *source_port));
+
+                if (!static_filters_.add_filter_front(filter))
+                    all_installed = false;
+            };
+
+            for (const auto protocol : { static_cast<uint8_t>(IPPROTO_UDP), static_cast<uint8_t>(IPPROTO_TCP) })
+            {
+                add.template operator()<net::ip_address_v4>(protocol, dns_port, std::nullopt);
+                add.template operator()<net::ip_address_v6>(protocol, dns_port, std::nullopt);
+            }
+
+            if (tcp4) add.template operator()<net::ip_address_v4>(static_cast<uint8_t>(IPPROTO_TCP), std::nullopt, *tcp4);
+            if (udp4) add.template operator()<net::ip_address_v4>(static_cast<uint8_t>(IPPROTO_UDP), std::nullopt, *udp4);
+            if (tcp6) add.template operator()<net::ip_address_v6>(static_cast<uint8_t>(IPPROTO_TCP), std::nullopt, *tcp6);
+            if (udp6) add.template operator()<net::ip_address_v6>(static_cast<uint8_t>(IPPROTO_UDP), std::nullopt, *udp6);
+
+            dns_filters_installed_ = true;
+
+            if (!all_installed)
+            {
+                NETLIB_LOG(log_level::error,
+                    "DNS routing: failed to install one or more driver filters that give DNS precedence over "
+                    "LAN bypass; DNS addressed to LAN resolvers may not be proxied while bypassLan is enabled.");
+            }
+        }
+
         /**
          * @brief Processes a UDP packet for possible redirection through a proxy.
          *
@@ -1928,21 +2549,35 @@ namespace proxy
             const auto* const udp_header = reinterpret_cast<udphdr_ptr>(reinterpret_cast<PUCHAR>(ip_header)
                 + sizeof(DWORD) * ip_header->ip_hl);
 
-            // If the destination port is 53 (DNS), allow the packet to pass through without redirection
-            // TODO: We might consider adding a DNS proxy in the future
-            if (ntohs(udp_header->th_dport) == 53)
-            {
-                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
-            }
-
-            // If the packet is from a known proxy port, process for server-to-client redirection
+            // If the packet is from a known proxy port, process for server-to-client redirection.
+            // Answers relayed from a DNS server override are presented as coming from the server
+            // the resolver originally queried.
             if (is_udp_proxy_port(ntohs(udp_header->th_sport)))
             {
-                if (udp_redirect_->process_server_to_client_packet(buffer))
+                const auto [restore, origin] = dns_udp_reply_origin<net::ip_address_v4>(
+                    ntohs(udp_header->th_sport), ntohs(udp_header->th_dport),
+                    reinterpret_cast<const uint8_t*>(udp_header + 1), captured_udp_payload_size(buffer, udp_header));
+
+                if (restore == dns_reply_restore::drop)
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+
+                if (udp_redirect_->process_server_to_client_packet(buffer, origin))
                 {
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
+            }
+
+            // Conventional DNS (destination port 53) follows the global DNS policy, before and
+            // independently of process attribution and application rules: Direct passes it,
+            // Proxy redirects it to the DNS proxy or drops it.
+            if (const auto dns = decide_dns<net::ip_address_v4, dns_transport::udp>(
+                    net::ip_address_v4{ ip_header->ip_dst }, ntohs(udp_header->th_dport));
+                dns.decision.action != dns_route_action::not_dns)
+            {
+                return handle_dns_udp<net::ip_address_v4>(buffer, dns, net::ip_address_v4{ ip_header->ip_dst },
+                    ntohs(udp_header->th_sport), ntohs(udp_header->th_dport),
+                    reinterpret_cast<const uint8_t*>(udp_header + 1), captured_udp_payload_size(buffer, udp_header));
             }
 
             auto process = process_lookup_v4_.
@@ -2045,6 +2680,17 @@ namespace proxy
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
+            }
+
+            // Conventional DNS over TCP follows the global DNS policy. In Direct mode TCP/53 is
+            // now unconditionally direct (previously it was routed like any other TCP traffic of
+            // the owning process).
+            if (const auto dns = decide_dns<net::ip_address_v4, dns_transport::tcp>(
+                    net::ip_address_v4{ ip_header->ip_dst }, ntohs(tcp_header->th_dport));
+                dns.decision.action != dns_route_action::not_dns)
+            {
+                return handle_dns_tcp<net::ip_address_v4>(buffer, dns, net::ip_address_v4{ ip_header->ip_dst },
+                    ntohs(tcp_header->th_sport), ntohs(tcp_header->th_dport), tcp_header->th_flags);
             }
 
             auto process = process_lookup_v4_.
@@ -2199,21 +2845,32 @@ namespace proxy
 
             const auto* const udp_header = static_cast<udphdr_ptr>(transport);
 
-            // If the destination port is 53 (DNS), allow the packet to pass through
-            // without redirection (mirrors the IPv4 path).
-            if (ntohs(udp_header->th_dport) == 53)
-            {
-                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
-            }
-
             // If the packet is from a known proxy port, process for server-to-client redirection
+            // (restoring the original server of DNS override answers, as on the IPv4 path).
             if (is_udp_proxy_port_v6(ntohs(udp_header->th_sport)))
             {
-                if (udp_redirect_v6_->process_server_to_client_packet(buffer))
+                const auto [restore, origin] = dns_udp_reply_origin<net::ip_address_v6>(
+                    ntohs(udp_header->th_sport), ntohs(udp_header->th_dport),
+                    reinterpret_cast<const uint8_t*>(udp_header + 1), captured_udp_payload_size(buffer, udp_header));
+
+                if (restore == dns_reply_restore::drop)
+                    return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+
+                if (udp_redirect_v6_->process_server_to_client_packet(buffer, origin))
                 {
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
+            }
+
+            // Conventional DNS follows the global DNS policy (mirrors the IPv4 path).
+            if (const auto dns = decide_dns<net::ip_address_v6, dns_transport::udp>(
+                    net::ip_address_v6{ ip_header->ip6_dst }, ntohs(udp_header->th_dport));
+                dns.decision.action != dns_route_action::not_dns)
+            {
+                return handle_dns_udp<net::ip_address_v6>(buffer, dns, net::ip_address_v6{ ip_header->ip6_dst },
+                    ntohs(udp_header->th_sport), ntohs(udp_header->th_dport),
+                    reinterpret_cast<const uint8_t*>(udp_header + 1), captured_udp_payload_size(buffer, udp_header));
             }
 
             auto process = process_lookup_v6_.
@@ -2312,6 +2969,15 @@ namespace proxy
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
+            }
+
+            // Conventional DNS over TCP follows the global DNS policy (mirrors the IPv4 path).
+            if (const auto dns = decide_dns<net::ip_address_v6, dns_transport::tcp>(
+                    net::ip_address_v6{ ip_header->ip6_dst }, ntohs(tcp_header->th_dport));
+                dns.decision.action != dns_route_action::not_dns)
+            {
+                return handle_dns_tcp<net::ip_address_v6>(buffer, dns, net::ip_address_v6{ ip_header->ip6_dst },
+                    ntohs(tcp_header->th_sport), ntohs(tcp_header->th_dport), tcp_header->th_flags);
             }
 
             auto process = process_lookup_v6_.
@@ -2473,6 +3139,7 @@ namespace proxy
             constexpr auto maintenance_interval = tcp_mapper_entry_ttl_ / 2;
             auto last_sweep = std::chrono::steady_clock::now();
             auto last_drop_log = last_sweep;
+            auto last_dns_block_log = last_sweep;
 
             while (true)
             {
@@ -2578,6 +3245,25 @@ namespace proxy
                                 ++it;
                             }
                         }
+                    }
+
+                    // Expire DNS override response mappings for queries that were never answered.
+                    dns_udp_origins_v4_.sweep(now);
+                    dns_udp_origins_v6_.sweep(now);
+                }
+
+                // Report Proxy-mode DNS drops at the same throttled rate as the queue drops so
+                // a resolver retrying against an unreachable proxy cannot flood the log.
+                if (const auto now = std::chrono::steady_clock::now();
+                    now - last_dns_block_log >= drop_log_throttle_interval_ &&
+                    dns_blocked_packets_.load(std::memory_order_relaxed) != 0)
+                {
+                    last_dns_block_log = now;
+                    if (const auto blocked = dns_blocked_packets_.exchange(0, std::memory_order_relaxed); blocked != 0)
+                    {
+                        NETLIB_LOG(log_level::warning,
+                            "DNS routing: dropped {} DNS packet(s) that could not be sent through the DNS proxy "
+                            "(they were not sent directly).", blocked);
                     }
                 }
 

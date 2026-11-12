@@ -385,6 +385,23 @@ bool socksify_unmanaged::exclude_process_name(const std::wstring& process_name) 
 }
 
 /**
+ * @brief Configures global DNS routing on the router.
+ */
+bool socksify_unmanaged::set_dns_routing(const dns_routing_mode_mx mode, const LONG_PTR proxy_id,
+    const std::string& server_override) const
+{
+    proxy::socks_local_router::dns_routing_settings settings;
+    settings.mode = mode == dns_routing_mode_mx::proxy
+        ? proxy::dns_routing_mode::proxy
+        : proxy::dns_routing_mode::direct;
+    if (proxy_id >= 0)
+        settings.proxy_id = static_cast<size_t>(proxy_id);
+    settings.server_override = server_override;
+
+    return proxy_->set_dns_routing(settings);
+}
+
+/**
  * @brief Sets the maximum number of log entries to keep.
  * @param log_limit The new log limit.
  */

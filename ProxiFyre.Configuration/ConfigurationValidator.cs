@@ -62,6 +62,8 @@ namespace ProxiFyre.Configuration
 
             ValidateCatchAllOrdering(configuration.Proxies, issues);
             ValidateApplicationOverlap(configuration.Proxies, issues);
+            ValidateProxyIds(configuration.Proxies, issues);
+            ValidateDns(configuration.Dns, configuration.Proxies, issues);
             return new ValidationResult(issues);
         }
 
@@ -505,6 +507,166 @@ namespace ProxiFyre.Configuration
             return lastSlash >= 0 && lastSlash < value.Length - 1
                 ? value.Substring(lastSlash + 1)
                 : lastSlash < 0 ? value : string.Empty;
+        }
+
+        private static void ValidateProxyIds(IList<ProxyRule> rules, ICollection<ValidationIssue> issues)
+        {
+            var seen = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (var index = 0; index < rules.Count; index++)
+            {
+                var id = rules[index] == null ? null : rules[index].Id;
+                if (id == null)
+                    continue;
+
+                var trimmed = id.Trim();
+                if (!DnsConfiguration.IsValidProxyId(trimmed))
+                {
+                    issues.Add(Error(
+                        "PROXY_ID_INVALID",
+                        "A proxy id must contain 1 to " + DnsConfiguration.MaximumProxyIdLength +
+                        " letters, digits, '-', '_', or '.' characters. Remove the id or give it a valid value.",
+                        RulePath(index) + ".id",
+                        index));
+                    continue;
+                }
+
+                int firstIndex;
+                if (seen.TryGetValue(trimmed, out firstIndex))
+                {
+                    issues.Add(Error(
+                        "PROXY_ID_DUPLICATE",
+                        "The proxy id '" + trimmed + "' is already used by rule " + (firstIndex + 1) +
+                        "; proxy ids must be unique (case-insensitive).",
+                        RulePath(index) + ".id",
+                        index));
+                    continue;
+                }
+
+                seen.Add(trimmed, index);
+            }
+        }
+
+        private static void ValidateDns(DnsSettings dns, IList<ProxyRule> rules, ICollection<ValidationIssue> issues)
+        {
+            if (dns == null)
+                return; // Omitted means Direct.
+
+            DnsRoutingMode mode;
+            if (!DnsConfiguration.TryGetMode(dns.Mode, out mode))
+            {
+                issues.Add(Error(
+                    "DNS_MODE_UNKNOWN",
+                    "The DNS mode must be Direct or Proxy.",
+                    "dns.mode"));
+                return;
+            }
+
+            if (mode == DnsRoutingMode.Direct)
+            {
+                if (!string.IsNullOrWhiteSpace(dns.ServerOverride))
+                {
+                    issues.Add(Warning(
+                        "DNS_SERVER_OVERRIDE_IGNORED",
+                        "The DNS server override is used only in Proxy mode; in Direct mode DNS keeps its original destination.",
+                        "dns.serverOverride"));
+                }
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(dns.ProxyId))
+            {
+                issues.Add(Error(
+                    "DNS_PROXY_ID_MISSING",
+                    "DNS Proxy mode requires dns.proxyId to name the id of the proxy rule that carries DNS.",
+                    "dns.proxyId"));
+                return;
+            }
+
+            var ruleIndex = DnsConfiguration.FindProxyRuleIndex(rules, dns.ProxyId);
+            if (ruleIndex < 0)
+            {
+                issues.Add(Error(
+                    "DNS_PROXY_NOT_FOUND",
+                    "No proxy rule has the id '" + dns.ProxyId.Trim() + "'. Set dns.proxyId to the id of an existing proxy rule; " +
+                    "DNS is never switched to another proxy automatically.",
+                    "dns.proxyId"));
+                return;
+            }
+
+            var rule = rules[ruleIndex];
+            ProxyProtocolSelection protocols;
+            try
+            {
+                protocols = ConfigurationValueParser.GetProtocols(rule.SupportedProtocols);
+            }
+            catch (InvalidOperationException)
+            {
+                return; // PROTOCOL_UNKNOWN is already reported for the rule.
+            }
+
+            if (protocols != ProxyProtocolSelection.Both)
+            {
+                issues.Add(Error(
+                    "DNS_PROXY_PROTOCOLS_UNSUPPORTED",
+                    "The DNS proxy (rule " + (ruleIndex + 1) + ") must support both TCP and UDP: DNS uses UDP and falls back to TCP " +
+                    "for truncated answers. Enable both protocols on that rule or select another proxy.",
+                    "dns.proxyId"));
+            }
+
+            ProxyAddressFamilySelection families;
+            try
+            {
+                families = ConfigurationValueParser.GetAddressFamilies(rule.SupportedAddressFamilies);
+            }
+            catch (InvalidOperationException)
+            {
+                return; // ADDRESS_FAMILIES_EMPTY or ADDRESS_FAMILY_UNKNOWN is already reported.
+            }
+
+            DnsServerOverride serverOverride = null;
+            if (!string.IsNullOrWhiteSpace(dns.ServerOverride))
+            {
+                DnsServerOverrideParseError error;
+                if (!DnsConfiguration.TryParseServerOverride(dns.ServerOverride, out serverOverride, out error))
+                {
+                    issues.Add(Error(
+                        error == DnsServerOverrideParseError.InvalidPort ? "DNS_SERVER_OVERRIDE_PORT_INVALID" : "DNS_SERVER_OVERRIDE_INVALID",
+                        error == DnsServerOverrideParseError.InvalidPort
+                            ? "The DNS server override port must be an integer from 1 to 65535."
+                            : error == DnsServerOverrideParseError.UnusableAddress
+                                ? "The DNS server override must be a unicast address (not unspecified, broadcast, multicast, or IPv4-mapped)."
+                                : "The DNS server override must be an IPv4 or IPv6 address literal such as 1.1.1.1 or " +
+                                  "[2606:4700:4700::1111]:53. Host names are not accepted because resolving them would itself require DNS.",
+                        "dns.serverOverride"));
+                    return;
+                }
+
+                var overrideFamily = serverOverride.IsIpv6 ? ProxyAddressFamilySelection.Ipv6 : ProxyAddressFamilySelection.Ipv4;
+                if ((families & overrideFamily) == 0)
+                {
+                    issues.Add(Error(
+                        "DNS_SERVER_OVERRIDE_FAMILY_UNSUPPORTED",
+                        "The DNS server override is " + (serverOverride.IsIpv6 ? "IPv6" : "IPv4") + " but the DNS proxy (rule " +
+                        (ruleIndex + 1) + ") does not accept " + (serverOverride.IsIpv6 ? "IPv6" : "IPv4") + " destinations.",
+                        "dns.serverOverride"));
+                    return;
+                }
+
+                issues.Add(Warning(
+                    "DNS_SERVER_OVERRIDE_OTHER_FAMILY_BLOCKED",
+                    "DNS queries addressed to " + (serverOverride.IsIpv6 ? "IPv4" : "IPv6") + " servers are blocked because the " +
+                    "server override is " + (serverOverride.IsIpv6 ? "IPv6" : "IPv4") + ". Windows falls back to its other configured DNS servers.",
+                    "dns.serverOverride"));
+            }
+            else if (families != ProxyAddressFamilySelection.Both)
+            {
+                var unsupported = (families & ProxyAddressFamilySelection.Ipv6) == 0 ? "IPv6" : "IPv4";
+                issues.Add(Warning(
+                    "DNS_PROXY_FAMILY_BLOCKED",
+                    "The DNS proxy (rule " + (ruleIndex + 1) + ") does not accept " + unsupported + " destinations, so DNS queries " +
+                    "addressed to " + unsupported + " servers are blocked rather than sent directly.",
+                    "dns.proxyId"));
+            }
         }
 
         private static string RulePath(int index)

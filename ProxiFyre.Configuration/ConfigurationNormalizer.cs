@@ -28,10 +28,38 @@ namespace ProxiFyre.Configuration
                 Excludes = configuration.Excludes == null
                     ? new List<string>()
                     : configuration.Excludes.Where(value => !string.IsNullOrWhiteSpace(value)).ToList(),
+                Dns = configuration.Dns == null ? null : NormalizeDns(configuration.Dns),
                 ExtensionData = CloneExtensionData(configuration.ExtensionData)
             };
 
             return result;
+        }
+
+        public DnsSettings NormalizeDns(DnsSettings dns)
+        {
+            if (dns == null)
+                throw new ArgumentNullException(nameof(dns));
+
+            var mode = dns.Mode == null ? null : dns.Mode.Trim();
+            DnsRoutingMode parsed;
+            if (DnsConfiguration.TryGetMode(mode, out parsed))
+                mode = parsed == DnsRoutingMode.Proxy ? DnsConfiguration.ProxyMode : DnsConfiguration.DirectMode;
+
+            return new DnsSettings
+            {
+                Mode = mode,
+                ProxyId = EmptyToNull(dns.ProxyId),
+                ServerOverride = EmptyToNull(dns.ServerOverride),
+                ExtensionData = CloneExtensionData(dns.ExtensionData)
+            };
+        }
+
+        private static string EmptyToNull(string value)
+        {
+            if (value == null)
+                return null;
+            var trimmed = value.Trim();
+            return trimmed.Length == 0 ? null : trimmed;
         }
 
         public ProxyRule NormalizeRule(ProxyRule rule)
@@ -64,6 +92,7 @@ namespace ProxiFyre.Configuration
             var hasCanonicalTransport = TryGetCanonicalTransport(rule.Socks5Transport, out transport);
             return new ProxyRule
             {
+                Id = rule.Id == null ? null : rule.Id.Trim(),
                 AppNames = appNames,
                 Socks5ProxyEndpoint = rule.Socks5ProxyEndpoint == null ? null : rule.Socks5ProxyEndpoint.Trim(),
                 Username = rule.Username,

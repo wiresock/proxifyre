@@ -24,6 +24,7 @@ Process ownership lookup is best effort for a standard user. ProxiFyre can route
   "bypassLan": true,
   "proxies": [
     {
+      "id": "office",
       "appNames": ["chrome", "firefox"],
       "socks5ProxyEndpoint": "proxy.example.com:1080",
       "username": "example-user",
@@ -46,7 +47,12 @@ Process ownership lookup is best effort for a standard user. ProxiFyre can route
   "excludes": [
     "vpn-client.exe",
     "C:\\Program Files\\Local App\\NotProxied.exe"
-  ]
+  ],
+  "dns": {
+    "mode": "Proxy",
+    "proxyId": "office",
+    "serverOverride": "1.1.1.1"
+  }
 }
 ```
 
@@ -58,11 +64,13 @@ Process ownership lookup is best effort for a standard user. ProxiFyre can route
 | `bypassLan` | When `true`, supported local IPv4 ranges remain direct. Default: `false`. |
 | `proxies` | One or more ordered routing rules. The first matching rule wins. |
 | `excludes` | Process names or paths that always bypass proxy routing. |
+| `dns` | Optional global DNS routing. Omitted means `Direct`. See [DNS routing](#dns-routing). |
 
 ## Routing rule properties
 
 | Property | Description |
 | --- | --- |
+| `id` | Optional stable identifier used to reference this rule's proxy, for example from `dns.proxyId`. 1–64 letters, digits, `-`, `_`, or `.`; unique, case-insensitive. Unlike the rule position it survives reordering. |
 | `appNames` | Application names or paths matched by this rule. An explicit empty string is the catch-all. |
 | `socks5ProxyEndpoint` | SOCKS5 hostname or IPv4 address plus port, for example `proxy.example.com:1080`. |
 | `username`, `password` | Optional SOCKS5 authentication. Configure both or neither. |
@@ -119,6 +127,79 @@ Set `bypassLan` to `true` to keep these local IPv4 destinations direct while mat
 - `224.0.0.0/4` (multicast)
 
 Changing this setting requires a service restart.
+
+In DNS `Proxy` mode, DNS takes precedence over LAN bypass: a query addressed to a LAN resolver such as `192.168.1.1:53` is still sent through the DNS proxy, while all other LAN traffic stays direct. See [DNS routing](#dns-routing).
+
+## DNS routing
+
+The optional `dns` object controls conventional DNS: UDP and TCP traffic to destination port 53, for IPv4 and IPv6. It is a global policy that applies to every process, independently of `appNames` rules and `excludes`. Windows normally resolves names in the DNS Client service (`Dnscache`, hosted by `svchost.exe`) rather than in the requesting application, so a per-application DNS rule could not be attributed reliably; ProxiFyre therefore does not try to.
+
+| Property | Description |
+| --- | --- |
+| `mode` | `Direct` (default when `dns` or `mode` is omitted) or `Proxy`, case-insensitive. |
+| `proxyId` | Required in `Proxy` mode: the `id` of the proxy rule whose SOCKS5 proxy carries DNS. That rule must support both `TCP` and `UDP` (omitting `supportedProtocols` means both). |
+| `serverOverride` | Optional, `Proxy` mode only: an IPv4 or IPv6 literal with an optional port that the SOCKS5 proxy queries instead of the server Windows addressed, for example `1.1.1.1`, `1.1.1.1:53`, `2606:4700:4700::1111`, or `[2606:4700:4700::1111]:53`. Host names are rejected so the override never needs DNS itself. |
+
+### Direct mode
+
+UDP and TCP DNS to port 53 bypass every SOCKS5 proxy for both address families, whatever process sends it. This is the behavior of configurations without a `dns` section.
+
+> **Behavior change:** earlier releases bypassed only UDP port 53. TCP port 53 was routed like any other TCP traffic of the owning process, so a catch-all rule could send it through a proxy. In `Direct` mode TCP/53 is now also always direct, so DNS uses one consistent path whether or not an answer was truncated.
+
+### Proxy mode
+
+All captured UDP and TCP DNS is sent through the selected proxy: UDP through a SOCKS5 `UDP ASSOCIATE`, TCP through a SOCKS5 `CONNECT`, reusing the same engine paths as application traffic. Queries from the Windows DNS Client service and from applications with their own resolvers are treated the same.
+
+ProxiFyre never falls back to sending DNS directly. DNS is dropped, and a warning is logged once per cause with a throttled count of dropped packets, when:
+
+- the selected proxy could not be created at startup, or the configuration is rejected by the engine;
+- the SOCKS5 connection, authentication, TLS handshake, or `UDP ASSOCIATE` fails, or the proxy disconnects;
+- the proxy does not accept the destination's address family (for example IPv6 DNS with an IPv4-only rule);
+- a `serverOverride` is configured and the query is addressed to a server of the other address family (an IPv4 override blocks queries to IPv6 servers and vice versa; Windows then uses its other configured DNS servers); or
+- the packet cannot be redirected, such as a fragmented datagram or a TCP connection to port 53 that was opened before ProxiFyre started.
+
+Windows retries a failed query and, for UDP answers marked truncated, retries over TCP; both go through the same proxy. ProxiFyre does not inspect payloads to decide what is DNS: only destination port 53 is classified.
+
+The selection is made by `proxyId`, never by position, so reordering rules does not change the DNS proxy. If the referenced rule is removed or renamed, validation fails with `DNS_PROXY_NOT_FOUND`; ProxiFyre never silently switches to another proxy. The GUI assigns an id such as `proxy-1` to a rule when it is selected as the DNS proxy, and clears the id on a duplicated copy.
+
+### Server override
+
+Without `serverOverride`, each query keeps its original destination: the SOCKS5 server is asked to reach the DNS server Windows queried. That fails when Windows uses a local resolver, such as a home router at `192.168.1.1`, which the remote SOCKS5 server cannot reach. Set `serverOverride` to a resolver that is reachable from the SOCKS5 server, such as `1.1.1.1`.
+
+With an override, only the SOCKS5 destination changes: the `UDP ASSOCIATE` datagram header or the `CONNECT` target names the override, while the packets the application sees keep the original server address. For UDP, ProxiFyre remembers the original server for each query (by client port and DNS message ID, for 30 seconds) and presents the answer as coming from that server, because a resolver discards answers from an address it did not query. Answers relayed from the override that match no outstanding query are dropped. Checksums are recalculated on every rewritten packet.
+
+### Examples
+
+Direct (default; equivalent to omitting `dns`):
+
+```json
+"dns": { "mode": "Direct" }
+```
+
+Proxy through the rule with `"id": "office"`, keeping the original DNS servers:
+
+```json
+"dns": { "mode": "Proxy", "proxyId": "office" }
+```
+
+Proxy with an IPv4 override for a configuration that uses a router-provided resolver:
+
+```json
+"dns": { "mode": "Proxy", "proxyId": "office", "serverOverride": "1.1.1.1" }
+```
+
+### Recursion and ProxiFyre's own traffic
+
+SOCKS5 endpoint host names are resolved once while the configuration is loaded, before packet filtering starts, so that lookup is never captured. Traffic addressed to a configured SOCKS5 server itself (TCP to its address and port, UDP to its address) is never redirected, even if the server listens on port 53. A consequence is that a DNS query addressed to the SOCKS5 server's own IP address is sent directly to that server.
+
+### Limitations
+
+- Only conventional DNS on port 53 is affected. DNS over HTTPS, DNS over TLS, DNS over QUIC, mDNS (5353), and LLMNR (5355) are outside the scope of this feature; applications that resolve names internally over encrypted transports (for example browsers with secure DNS enabled) are routed according to their ordinary application rules.
+- ProxiFyre does not change Windows DNS adapter settings, does not disable or reconfigure the DNS Client service, and does not run its own resolver or cache. Answers already cached by Windows before the service started or before `Proxy` mode was enabled are still served from that cache; run `ipconfig /flushdns` after switching modes for an immediate effect.
+- Only traffic visible to the Windows Packet Filter layer is captured. Loopback and local resolvers (for example a resolver on `127.0.0.1` or `::1`, or a resolver inside a local VM or container reached through a virtual adapter that is not filtered) are not routed, and their own upstream queries are subject to the same policy only if they leave through a filtered adapter.
+- Each new UDP source port needs its own SOCKS5 control connection and `UDP ASSOCIATE`, as for application UDP traffic. The Windows DNS Client uses a fresh source port for most queries, so the first answer through the proxy is delayed by the SOCKS5 (and, for `TLS`, the TLS) handshake.
+- When the service is stopped, packet filtering stops and all traffic, including DNS, is direct.
+- Changing DNS settings requires a service restart.
 
 ## Authentication
 

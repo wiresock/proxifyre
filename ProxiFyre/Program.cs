@@ -116,8 +116,16 @@ namespace ProxiFyre
                     LoggerInstance.Info("LAN bypass enabled - local network traffic will not be proxied.");
             }
 
+            // Native proxy handle of each rule, index-aligned with serviceSettings.Proxies
+            // (-1 when the proxy could not be created). The DNS policy resolves its stable
+            // proxy id to a rule here, never by position in the native proxy list.
+            var proxyHandles = new IntPtr[serviceSettings.Proxies.Count];
+            var ruleIndex = -1;
+
             foreach (var appSettings in serviceSettings.Proxies)
             {
+                ruleIndex++;
+                proxyHandles[ruleIndex] = new IntPtr(-1);
                 var protocolSelection = ConfigurationValueParser.GetProtocols(appSettings.SupportedProtocols);
                 var addressFamilySelection =
                     ConfigurationValueParser.GetAddressFamilies(appSettings.SupportedAddressFamilies);
@@ -139,6 +147,8 @@ namespace ProxiFyre
                         $"Failed to create SOCKS5 proxy for endpoint {appSettings.Socks5ProxyEndpoint}; skipping its application associations.");
                     continue;
                 }
+
+                proxyHandles[ruleIndex] = proxy;
 
                 var protocols = appSettings.SupportedProtocols != null && appSettings.SupportedProtocols.Count > 0
                     ? string.Join(", ", appSettings.SupportedProtocols)
@@ -166,6 +176,8 @@ namespace ProxiFyre
                 }
             }
 
+            ConfigureDnsRouting(serviceSettings, proxyHandles);
+
             // Start() propagates failure from the whole native chain (e.g. the Windows Packet
             // Filter driver is not installed or failed to load). Do NOT ignore it: swallowing
             // the failure leaves the Windows service in the RUNNING state while proxying nothing,
@@ -187,6 +199,52 @@ namespace ProxiFyre
             // Inform user that the application is running
             if (_logLevel >= LogLevel.Info)
                 LoggerInstance.Info("ProxiFyre Service is running...");
+        }
+
+        /// <summary>
+        /// Applies the global DNS policy. In Proxy mode the selected proxy is resolved by its
+        /// stable id; when that proxy could not be created the engine is still put into Proxy
+        /// mode without a usable proxy so DNS is blocked rather than leaked or silently moved
+        /// to another proxy.
+        /// </summary>
+        private void ConfigureDnsRouting(ProxiFyreConfiguration settings, IntPtr[] proxyHandles)
+        {
+            if (DnsConfiguration.GetMode(settings.Dns) == DnsRoutingMode.Direct)
+            {
+                if (!_socksify.SetDnsRouting(DnsRoutingModeEnum.Direct, new IntPtr(-1), null))
+                    LoggerInstance.Warn("Failed to apply Direct DNS routing.");
+                else if (_logLevel >= LogLevel.Info)
+                    LoggerInstance.Info("DNS routing: Direct - DNS (UDP/TCP port 53) bypasses the SOCKS5 proxies.");
+                return;
+            }
+
+            var dns = settings.Dns;
+            var ruleIndex = DnsConfiguration.FindProxyRuleIndex(settings.Proxies, dns.ProxyId);
+            var handle = ruleIndex >= 0 && ruleIndex < proxyHandles.Length ? proxyHandles[ruleIndex] : new IntPtr(-1);
+
+            if (handle.ToInt64() == -1)
+            {
+                LoggerInstance.Error(
+                    $"DNS routing: the selected DNS proxy '{dns.ProxyId}' is not available because its SOCKS5 proxy could not be created. " +
+                    "All DNS queries will be blocked instead of being sent directly or through another proxy.");
+            }
+
+            if (!_socksify.SetDnsRouting(DnsRoutingModeEnum.Proxy, handle, dns.ServerOverride))
+            {
+                LoggerInstance.Error(
+                    "DNS routing: the engine rejected the Proxy mode configuration; DNS queries will be blocked. " +
+                    "See the preceding engine log entries for the reason.");
+                return;
+            }
+
+            if (_logLevel >= LogLevel.Info)
+            {
+                var serverOverride = string.IsNullOrWhiteSpace(dns.ServerOverride)
+                    ? "original destinations"
+                    : dns.ServerOverride;
+                LoggerInstance.Info(
+                    $"DNS routing: Proxy via '{dns.ProxyId}' ({settings.Proxies[ruleIndex].Socks5ProxyEndpoint}), upstream DNS: {serverOverride}.");
+            }
         }
 
         /// <summary>

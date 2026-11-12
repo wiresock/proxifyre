@@ -130,6 +130,18 @@ public:
     [[nodiscard]] bool exclude_process_name(const std::wstring& process_name) const;
 
     /**
+     * @brief Configures global DNS routing. Must be called before start().
+     * @param mode Direct or Proxy.
+     * @param proxy_id Handle returned by add_socks5_proxy() of the proxy that carries DNS in
+     *        Proxy mode; -1 when the selected proxy could not be created (DNS is then blocked).
+     * @param server_override Optional IPv4/IPv6 literal (with optional port) used as the
+     *        upstream DNS server; empty keeps the original destination.
+     * @return True when the configuration was applied as requested.
+     */
+    [[nodiscard]] bool set_dns_routing(dns_routing_mode_mx mode, LONG_PTR proxy_id,
+        const std::string& server_override) const;
+
+    /**
      * @brief Sets the maximum number of log entries to keep.
      * @param log_limit The new log limit.
      */

@@ -262,9 +262,14 @@ namespace ndisapi
          *
          * @param packet C2S network packet.
          * @param port Destination port to forward the packet to (network byte order). If 0, uses proxy_port_.
+         * @param socks_destination Optional destination (port in host byte order) written to the
+         *        SOCKS5 UDP header instead of the packet's own destination. The IP header still
+         *        records the original destination, so the response can be restored to it. Used
+         *        for the DNS server override.
          * @return True if the packet was translated, false otherwise.
          */
-        bool process_client_to_server_packet(INTERMEDIATE_BUFFER& packet, uint16_t port = 0)
+        bool process_client_to_server_packet(INTERMEDIATE_BUFFER& packet, uint16_t port = 0,
+            const std::optional<net::ip_endpoint<T>>& socks_destination = std::nullopt)
         {
             if (port == 0)
                 port = proxy_port_;
@@ -339,8 +344,16 @@ namespace ndisapi
                 socks5_udp_header_ptr->reserved = 0;
                 socks5_udp_header_ptr->fragment = 0;
                 socks5_udp_header_ptr->address_type = 1;
-                socks5_udp_header_ptr->dest_address = ip_header->ip_dst;
-                socks5_udp_header_ptr->dest_port = udp_header->th_dport;
+                if (socks_destination)
+                {
+                    socks5_udp_header_ptr->dest_address = socks_destination->ip;
+                    socks5_udp_header_ptr->dest_port = htons(socks_destination->port);
+                }
+                else
+                {
+                    socks5_udp_header_ptr->dest_address = ip_header->ip_dst;
+                    socks5_udp_header_ptr->dest_port = udp_header->th_dport;
+                }
 
                 // Swap Ethernet addresses
                 std::swap(eth_header->h_dest, eth_header->h_source);
@@ -425,8 +438,16 @@ namespace ndisapi
                 socks5_udp_header_ptr->reserved = 0;
                 socks5_udp_header_ptr->fragment = 0;
                 socks5_udp_header_ptr->address_type = 4; // For IPv6 address type is 4
-                socks5_udp_header_ptr->dest_address = ip_header->ip6_dst;
-                socks5_udp_header_ptr->dest_port = udp_header->th_dport;
+                if (socks_destination)
+                {
+                    socks5_udp_header_ptr->dest_address = socks_destination->ip;
+                    socks5_udp_header_ptr->dest_port = htons(socks_destination->port);
+                }
+                else
+                {
+                    socks5_udp_header_ptr->dest_address = ip_header->ip6_dst;
+                    socks5_udp_header_ptr->dest_port = udp_header->th_dport;
+                }
 
                 // Swap Ethernet addresses
                 std::swap(eth_header->h_dest, eth_header->h_source);
@@ -461,9 +482,13 @@ namespace ndisapi
          * addresses and ports as needed.
          *
          * @param packet S2C network packet.
+         * @param source_override Optional source endpoint (port in host byte order) presented to
+         *        the client instead of the one in the relay's SOCKS5 UDP header. Used to restore
+         *        the server the client originally queried when a DNS server override is active.
          * @return True if the packet was translated, false otherwise.
          */
-        bool process_server_to_client_packet(INTERMEDIATE_BUFFER& packet)
+        bool process_server_to_client_packet(INTERMEDIATE_BUFFER& packet,
+            const std::optional<net::ip_endpoint<T>>& source_override = std::nullopt)
         {
             if constexpr (auto* const eth_header = reinterpret_cast<ether_header_ptr>(packet.m_IBuffer); std::is_same_v<
                 net::ip_address_v4, std::decay_t<T>>)
@@ -532,8 +557,16 @@ namespace ndisapi
                 auto* udp_payload = reinterpret_cast<uint8_t*>(udp_header + 1);
                 auto* socks5_udp_header_ptr = reinterpret_cast<proxy::socks5_udp_header<T>*>(udp_payload);
 
-                ip_header->ip_src = socks5_udp_header_ptr->dest_address;
-                udp_header->th_sport = socks5_udp_header_ptr->dest_port;
+                if (source_override)
+                {
+                    ip_header->ip_src = source_override->ip;
+                    udp_header->th_sport = htons(source_override->port);
+                }
+                else
+                {
+                    ip_header->ip_src = socks5_udp_header_ptr->dest_address;
+                    udp_header->th_sport = socks5_udp_header_ptr->dest_port;
+                }
 
                 const auto udp_payload_size = static_cast<size_t>(udp_length - sizeof(udphdr));
                 memmove(udp_payload, udp_payload + socks5_header_size,
@@ -620,8 +653,16 @@ namespace ndisapi
                 // Swap IP addresses
                 std::swap(ip_header->ip6_dst, ip_header->ip6_src);
 
-                ip_header->ip6_src = socks5_udp_header_ptr->dest_address;
-                udp_header->th_sport = socks5_udp_header_ptr->dest_port;
+                if (source_override)
+                {
+                    ip_header->ip6_src = source_override->ip;
+                    udp_header->th_sport = htons(source_override->port);
+                }
+                else
+                {
+                    ip_header->ip6_src = socks5_udp_header_ptr->dest_address;
+                    udp_header->th_sport = socks5_udp_header_ptr->dest_port;
+                }
 
                 const auto udp_payload_size = static_cast<size_t>(udp_length - sizeof(udphdr));
                 memmove(udp_payload, udp_payload + socks5_header_size,

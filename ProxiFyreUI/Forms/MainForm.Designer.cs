@@ -76,6 +76,15 @@ namespace ProxiFyreUI.Forms
         private System.Windows.Forms.CheckBox bypassLanCheckBox;
         private System.Windows.Forms.Label bypassLanExplanationLabel;
         private System.Windows.Forms.CheckBox minimizeToTrayCheckBox;
+        private System.Windows.Forms.GroupBox dnsGroupBox;
+        private System.Windows.Forms.Label dnsModeLabel;
+        private System.Windows.Forms.ComboBox dnsModeComboBox;
+        private System.Windows.Forms.Label dnsProxyLabel;
+        private System.Windows.Forms.ComboBox dnsProxyComboBox;
+        private System.Windows.Forms.Label dnsServerOverrideLabel;
+        private System.Windows.Forms.TextBox dnsServerOverrideTextBox;
+        private System.Windows.Forms.Label dnsServerOverrideHintLabel;
+        private System.Windows.Forms.Label dnsExplanationLabel;
         private System.Windows.Forms.GroupBox diagnosticsGroupBox;
         private System.Windows.Forms.Label serviceNameLabel;
         private System.Windows.Forms.Label serviceNameValueLabel;
@@ -189,6 +198,15 @@ namespace ProxiFyreUI.Forms
             this.configurationSettingsGroupBox = new System.Windows.Forms.GroupBox();
             this.bypassLanExplanationLabel = new System.Windows.Forms.Label();
             this.minimizeToTrayCheckBox = new System.Windows.Forms.CheckBox();
+            this.dnsGroupBox = new System.Windows.Forms.GroupBox();
+            this.dnsModeLabel = new System.Windows.Forms.Label();
+            this.dnsModeComboBox = new System.Windows.Forms.ComboBox();
+            this.dnsProxyLabel = new System.Windows.Forms.Label();
+            this.dnsProxyComboBox = new System.Windows.Forms.ComboBox();
+            this.dnsServerOverrideLabel = new System.Windows.Forms.Label();
+            this.dnsServerOverrideTextBox = new System.Windows.Forms.TextBox();
+            this.dnsServerOverrideHintLabel = new System.Windows.Forms.Label();
+            this.dnsExplanationLabel = new System.Windows.Forms.Label();
             this.bypassLanCheckBox = new System.Windows.Forms.CheckBox();
             this.logLevelComboBox = new System.Windows.Forms.ComboBox();
             this.logLevelLabel = new System.Windows.Forms.Label();
@@ -235,6 +253,7 @@ namespace ProxiFyreUI.Forms
             this.settingsTabPage.SuspendLayout();
             this.diagnosticsGroupBox.SuspendLayout();
             this.configurationSettingsGroupBox.SuspendLayout();
+            this.dnsGroupBox.SuspendLayout();
             this.engineSettingsGroupBox.SuspendLayout();
             this.actionPanel.SuspendLayout();
             this.statusStrip.SuspendLayout();
@@ -511,6 +530,7 @@ namespace ProxiFyreUI.Forms
             this.settingsTabPage.AutoScroll = true;
             this.settingsTabPage.Controls.Add(this.uninstallNoteLabel);
             this.settingsTabPage.Controls.Add(this.uninstallServiceButton);
+            this.settingsTabPage.Controls.Add(this.dnsGroupBox);
             this.settingsTabPage.Controls.Add(this.diagnosticsGroupBox);
             this.settingsTabPage.Controls.Add(this.configurationSettingsGroupBox);
             this.settingsTabPage.Controls.Add(this.engineSettingsGroupBox);
@@ -552,8 +572,19 @@ namespace ProxiFyreUI.Forms
             this.architectureLabel.AutoSize = true; this.architectureLabel.Location = new System.Drawing.Point(14, 103); this.architectureLabel.Text = "Architecture:";
             this.architectureValueLabel.AutoSize = true; this.architectureValueLabel.Location = new System.Drawing.Point(112, 103); this.architectureValueLabel.Text = "Unknown";
             this.copyDiagnosticsButton.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right))); this.copyDiagnosticsButton.Location = new System.Drawing.Point(473, 25); this.copyDiagnosticsButton.Size = new System.Drawing.Size(151, 29); this.copyDiagnosticsButton.Text = "Copy diagnostics"; this.copyDiagnosticsButton.UseVisualStyleBackColor = true; this.copyDiagnosticsButton.Click += new System.EventHandler(this.CopyDiagnosticsButton_Click);
-            this.uninstallServiceButton.Location = new System.Drawing.Point(10, 362); this.uninstallServiceButton.Size = new System.Drawing.Size(125, 29); this.uninstallServiceButton.Text = "Uninstall service…"; this.uninstallServiceButton.UseVisualStyleBackColor = true; this.uninstallServiceButton.Click += new System.EventHandler(this.UninstallServiceButton_Click);
-            this.uninstallNoteLabel.AutoSize = true; this.uninstallNoteLabel.Location = new System.Drawing.Point(145, 369); this.uninstallNoteLabel.Text = "Uninstalling preserves " + ProxiFyre.Configuration.ProxiFyrePaths.ConfigurationFileName + ", its backup, and all log files.";
+            // DNS routing
+            this.dnsGroupBox.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) | System.Windows.Forms.AnchorStyles.Right))); this.dnsGroupBox.Location = new System.Drawing.Point(10, 358); this.dnsGroupBox.Name = "dnsGroupBox"; this.dnsGroupBox.Size = new System.Drawing.Size(1078, 154); this.dnsGroupBox.TabIndex = 3; this.dnsGroupBox.TabStop = false; this.dnsGroupBox.Text = "DNS routing (UDP/TCP port 53)";
+            this.dnsGroupBox.Controls.Add(this.dnsExplanationLabel); this.dnsGroupBox.Controls.Add(this.dnsServerOverrideHintLabel); this.dnsGroupBox.Controls.Add(this.dnsServerOverrideTextBox); this.dnsGroupBox.Controls.Add(this.dnsServerOverrideLabel); this.dnsGroupBox.Controls.Add(this.dnsProxyComboBox); this.dnsGroupBox.Controls.Add(this.dnsProxyLabel); this.dnsGroupBox.Controls.Add(this.dnsModeComboBox); this.dnsGroupBox.Controls.Add(this.dnsModeLabel);
+            this.dnsModeLabel.AutoSize = true; this.dnsModeLabel.Location = new System.Drawing.Point(13, 31); this.dnsModeLabel.Text = "DNS &mode:";
+            this.dnsModeComboBox.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList; this.dnsModeComboBox.Items.AddRange(new object[] { "Direct", "Proxy" }); this.dnsModeComboBox.Location = new System.Drawing.Point(122, 27); this.dnsModeComboBox.Size = new System.Drawing.Size(108, 23); this.dnsModeComboBox.TabIndex = 1; this.dnsModeComboBox.SelectedIndexChanged += new System.EventHandler(this.DnsControlChanged);
+            this.dnsProxyLabel.AutoSize = true; this.dnsProxyLabel.Location = new System.Drawing.Point(250, 31); this.dnsProxyLabel.Text = "DNS &proxy:";
+            this.dnsProxyComboBox.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) | System.Windows.Forms.AnchorStyles.Right))); this.dnsProxyComboBox.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList; this.dnsProxyComboBox.Location = new System.Drawing.Point(340, 27); this.dnsProxyComboBox.Size = new System.Drawing.Size(723, 23); this.dnsProxyComboBox.TabIndex = 3; this.dnsProxyComboBox.SelectedIndexChanged += new System.EventHandler(this.DnsControlChanged);
+            this.dnsServerOverrideLabel.AutoSize = true; this.dnsServerOverrideLabel.Location = new System.Drawing.Point(13, 66); this.dnsServerOverrideLabel.Text = "&Server override:";
+            this.dnsServerOverrideTextBox.Location = new System.Drawing.Point(122, 62); this.dnsServerOverrideTextBox.Size = new System.Drawing.Size(210, 23); this.dnsServerOverrideTextBox.TabIndex = 5; this.dnsServerOverrideTextBox.TextChanged += new System.EventHandler(this.DnsControlChanged);
+            this.dnsServerOverrideHintLabel.AutoSize = true; this.dnsServerOverrideHintLabel.ForeColor = System.Drawing.SystemColors.GrayText; this.dnsServerOverrideHintLabel.Location = new System.Drawing.Point(340, 66); this.dnsServerOverrideHintLabel.Text = "Optional IP literal, e.g. 1.1.1.1 or [2606:4700:4700::1111]:53. Empty keeps the server Windows queried.";
+            this.dnsExplanationLabel.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) | System.Windows.Forms.AnchorStyles.Right))); this.dnsExplanationLabel.ForeColor = System.Drawing.SystemColors.GrayText; this.dnsExplanationLabel.Location = new System.Drawing.Point(13, 96); this.dnsExplanationLabel.Size = new System.Drawing.Size(1050, 50); this.dnsExplanationLabel.Text = "Direct: DNS bypasses the proxies. Proxy: DNS from every application, including the Windows DNS Client service, uses the selected proxy (which must support TCP and UDP), takes precedence over LAN bypass, and is blocked rather than sent directly if that proxy cannot carry it. Encrypted DNS (DoH/DoT) is not affected. Takes effect after service restart.";
+            this.uninstallServiceButton.Location = new System.Drawing.Point(10, 522); this.uninstallServiceButton.Size = new System.Drawing.Size(125, 29); this.uninstallServiceButton.Text = "Uninstall service…"; this.uninstallServiceButton.UseVisualStyleBackColor = true; this.uninstallServiceButton.Click += new System.EventHandler(this.UninstallServiceButton_Click);
+            this.uninstallNoteLabel.AutoSize = true; this.uninstallNoteLabel.Location = new System.Drawing.Point(145, 529); this.uninstallNoteLabel.Text = "Uninstalling preserves " + ProxiFyre.Configuration.ProxiFyrePaths.ConfigurationFileName + ", its backup, and all log files.";
             // action/status
             this.actionPanel.Controls.Add(this.operationProgressBar); this.actionPanel.Controls.Add(this.applyRestartButton); this.actionPanel.Controls.Add(this.saveButton); this.actionPanel.Controls.Add(this.validateButton); this.actionPanel.Controls.Add(this.reloadButton); this.actionPanel.Dock = System.Windows.Forms.DockStyle.Bottom; this.actionPanel.Location = new System.Drawing.Point(0, 617); this.actionPanel.Name = "actionPanel"; this.actionPanel.Size = new System.Drawing.Size(1114, 51); this.actionPanel.TabIndex = 2;
             this.reloadButton.Location = new System.Drawing.Point(12, 11); this.reloadButton.Size = new System.Drawing.Size(80, 29); this.reloadButton.Text = "Reload"; this.reloadButton.UseVisualStyleBackColor = true; this.reloadButton.Click += new System.EventHandler(this.ReloadButton_Click);
@@ -601,6 +632,7 @@ namespace ProxiFyreUI.Forms
             this.settingsTabPage.ResumeLayout(false); this.settingsTabPage.PerformLayout();
             this.diagnosticsGroupBox.ResumeLayout(false); this.diagnosticsGroupBox.PerformLayout();
             this.configurationSettingsGroupBox.ResumeLayout(false); this.configurationSettingsGroupBox.PerformLayout();
+            this.dnsGroupBox.ResumeLayout(false); this.dnsGroupBox.PerformLayout();
             this.engineSettingsGroupBox.ResumeLayout(false); this.engineSettingsGroupBox.PerformLayout();
             this.actionPanel.ResumeLayout(false);
             this.statusStrip.ResumeLayout(false); this.statusStrip.PerformLayout();

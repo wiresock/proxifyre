@@ -17,6 +17,7 @@ ProxiFyre transparently routes selected Windows applications—or all unmatched 
 - Proxy IPv4 and IPv6 destinations over TCP, UDP, or both.
 - Choose normal SOCKS5 or TLS transport, with certificate validation and optional pinning.
 - Keep local network traffic direct with LAN bypass.
+- Optionally send all conventional DNS (UDP/TCP port 53), including the Windows DNS Client's, through one selected proxy to prevent DNS leaks, without changing Windows DNS settings.
 - Configure, validate, apply, monitor, and troubleshoot through the Windows GUI.
 - Run unattended as `ProxiFyreService` with notification-area controls.
 
@@ -86,7 +87,15 @@ The GUI edits `app-config.json` beside `ProxiFyre.exe`. A minimal configuration 
 
 Rules are evaluated from top to bottom and the first match wins. Put the catch-all rule (`"appNames": [""]`) last; exclusions take priority over every routing rule. Unsupported destination address families are blocked rather than allowed to leak directly.
 
-See the [configuration reference](docs/configuration.md) for matching rules, authentication, LAN bypass, logging, TLS options, and complete examples. The repository also includes a ready-to-edit [sample configuration](app-config.sample.json).
+DNS (UDP/TCP port 53) bypasses the proxies by default. To prevent DNS leaks, give a rule an `id` and add a global DNS policy that sends all DNS through that proxy, optionally to a resolver the proxy can reach:
+
+```json
+"dns": { "mode": "Proxy", "proxyId": "office", "serverOverride": "1.1.1.1" }
+```
+
+In `Proxy` mode DNS is never sent directly: if the selected proxy cannot carry a query, the query is dropped. See [DNS routing](docs/configuration.md#dns-routing) for the behavior, the TCP port 53 change in `Direct` mode, and limitations.
+
+See the [configuration reference](docs/configuration.md) for matching rules, authentication, LAN bypass, DNS routing, logging, TLS options, and complete examples. The repository also includes a ready-to-edit [sample configuration](app-config.sample.json).
 
 ## Windows GUI
 
@@ -109,6 +118,7 @@ Set `socks5Transport` to `"TLS"` to protect the SOCKS5 TCP connection and UDP `A
 - The SOCKS5 server endpoint must be reachable over IPv4: use an IPv4 literal or a hostname with an A record. Destination traffic may still be IPv4, IPv6, or both.
 - IPv6 proxying requires working IPv6 connectivity on the client and a SOCKS5 server that accepts IPv6 targets (`ATYP=4`). ProxiFyre redirects packets the application emits; it does not create IPv6 connectivity.
 - Fragmented IPv6 datagrams are passed through directly to avoid corrupting partial packets. Applications that emit oversized fragmented UDP datagrams can therefore bypass the proxy.
+- DNS routing covers conventional DNS on port 53 only. DNS over HTTPS/TLS/QUIC used internally by applications, mDNS, LLMNR, and loopback resolvers are not affected, and answers already in the Windows DNS cache are reused.
 - SOCKS5 usernames and passwords are stored in plaintext in `app-config.json`, although the GUI masks and redacts them from its diagnostics.
 - The MSI creates program-specific inbound TCP and UDP firewall rules for `ProxiFyre.exe` because redirect listener ports are allocated dynamically.
 

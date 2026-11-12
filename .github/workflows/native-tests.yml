@@ -1,6 +1,7 @@
 name: 'Native tests'
 
-# Builds and runs the native x64 GoogleTest executable (netlib-tests). This workflow is
+# Builds and runs the native x64 GoogleTest executable (netlib-tests) on Windows and the portable
+# native tests on Linux. This workflow is
 # independent of release packaging and signing: it produces no release artifacts and needs no
 # secrets. The commands mirror the local instructions in netlib/README.md.
 
@@ -9,6 +10,29 @@ on:
   workflow_dispatch:
 
 jobs:
+  portable-native-tests:
+    # Platform-independent native tests (DNS routing policy and the real packet-rewriting
+    # headers it drives); see netlib/README.md#portable-native-tests.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout from GitHub
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install compiler and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++ libgtest-dev libmsgsl-dev
+
+      - name: Run portable native tests
+        run: netlib/test/portable/run-portable-tests.sh
+
+      - name: Run portable native tests with sanitizers
+        run: SANITIZE=1 netlib/test/portable/run-portable-tests.sh
+
   netlib-tests:
     strategy:
       fail-fast: false
