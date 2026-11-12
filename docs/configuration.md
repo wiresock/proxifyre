@@ -150,14 +150,20 @@ UDP and TCP DNS to port 53 bypass every SOCKS5 proxy for both address families, 
 
 All captured UDP and TCP DNS is sent through the selected proxy: UDP through a SOCKS5 `UDP ASSOCIATE`, TCP through a SOCKS5 `CONNECT`, reusing the same engine paths as application traffic. Queries from the Windows DNS Client service and from applications with their own resolvers are treated the same.
 
-ProxiFyre never falls back to sending DNS directly. DNS is dropped, and a warning is logged once per cause with a throttled count of dropped packets, when:
+ProxiFyre never falls back to sending DNS directly. The DNS policy itself drops a query when:
 
 - the selected proxy could not be created at startup, or the configuration is rejected by the engine;
-- the SOCKS5 connection, authentication, TLS handshake, or `UDP ASSOCIATE` fails, or the proxy disconnects;
 - the proxy does not accept the destination's address family (for example IPv6 DNS with an IPv4-only rule);
-- a `serverOverride` is configured and the query is addressed to a server of the other address family (an IPv4 override blocks queries to IPv6 servers and vice versa; Windows then uses its other configured DNS servers); or
-- the packet cannot be redirected, such as a TCP connection to port 53 that was opened before ProxiFyre started, or a datagram too large to carry the SOCKS5 UDP header; or
-- the datagram is fragmented. Only the first fragment carries the UDP or TCP header, so only a first fragment (IPv4 or IPv6) addressed to port 53 can be recognized as DNS; it is dropped, which also prevents the datagram from being reassembled at the server. Later fragments carry no ports, cannot be classified, and are passed unchanged, so other fragmented traffic is not affected. In `Direct` mode fragmented DNS is passed like any other DNS.
+- a `serverOverride` is configured and the query is addressed to a server of the other address family (an IPv4 override blocks queries to IPv6 servers and vice versa);
+- the packet cannot be redirected, such as a TCP connection to port 53 that was opened before ProxiFyre started, or a datagram too large to carry the SOCKS5 UDP header;
+- the datagram is fragmented. Only the first fragment carries the UDP or TCP header, so only a first fragment (IPv4 or IPv6) addressed to port 53 can be recognized as DNS; it is dropped, which also prevents the datagram from being reassembled at the server. Later fragments carry no ports, cannot be classified, and are passed unchanged, so other fragmented traffic is not affected. In `Direct` mode fragmented DNS is passed like any other DNS; or
+- it is addressed to a configured SOCKS5 server and its sending process cannot be determined (see [Recursion and ProxiFyre's own traffic](#recursion-and-proxifyres-own-traffic)).
+
+For these drops the engine logs one warning per cause, address family, and transport, followed by a count of dropped packets at most every five seconds.
+
+A query can also fail after it has been redirected to the DNS proxy's local listener: the SOCKS5 connection, authentication, TLS handshake, or `UDP ASSOCIATE` fails, or the proxy disconnects. The query is then not sent directly either, but these failures are reported by the local proxy server in the same way as for application traffic, not by the DNS policy's warnings and counts.
+
+Whether name resolution still succeeds after a drop depends on Windows: it retries, and may try its other configured DNS servers, but ProxiFyre does not control that.
 
 Windows retries a failed query and, for UDP answers marked truncated, retries over TCP; both go through the same proxy. ProxiFyre does not inspect payloads to decide what is DNS: only destination port 53 is classified.
 
