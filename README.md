@@ -120,7 +120,7 @@ Set `socks5Transport` to `"TLS"` to protect the SOCKS5 TCP connection and UDP `A
 
 - The SOCKS5 server endpoint must be reachable over IPv4: use an IPv4 literal or a hostname with an A record. Destination traffic may still be IPv4, IPv6, or both.
 - IPv6 proxying requires working IPv6 connectivity on the client and a SOCKS5 server that accepts IPv6 targets (`ATYP=4`). ProxiFyre redirects packets the application emits; it does not create IPv6 connectivity.
-- Fragmented IPv6 datagrams are passed through directly to avoid corrupting partial packets. Applications that emit oversized fragmented UDP datagrams can therefore bypass the proxy.
+- Fragmented IPv6 datagrams are passed through directly to avoid corrupting partial packets. Applications that emit oversized fragmented UDP datagrams can therefore bypass the proxy. Two kinds of first fragment are dropped instead: one addressed to port 53 in DNS `Proxy` mode, and one sent by a local proxy listener.
 - DNS routing covers conventional DNS on port 53 only. DNS over HTTPS/TLS/QUIC used internally by applications, mDNS, LLMNR, and loopback resolvers are not affected, and answers already in the Windows DNS cache are reused.
 - SOCKS5 usernames and passwords are stored in plaintext in `app-config.json`, although the GUI masks and redacts them from its diagnostics.
 - The MSI creates program-specific inbound TCP and UDP firewall rules for `ProxiFyre.exe` because redirect listener ports are allocated dynamically.

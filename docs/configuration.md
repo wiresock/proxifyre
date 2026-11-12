@@ -114,7 +114,7 @@ IPv6 destination routing also requires:
 - a SOCKS5 server that accepts IPv6 target addresses (`ATYP=4`); and
 - an upstream proxy reachable through IPv4. The endpoint itself must be an IPv4 literal or a hostname with an A record; IPv6-literal and AAAA-only upstreams are not supported.
 
-Fragmented IPv6 datagrams are passed through directly to avoid rewriting an incomplete packet. Applications that emit oversized fragmented UDP datagrams can therefore bypass the proxy; TCP and path-MTU-aware UDP such as normal QUIC traffic are unaffected. DNS `Proxy` mode is the exception for port 53: see [Proxy mode](#proxy-mode).
+Fragmented IPv6 datagrams are passed through directly to avoid rewriting an incomplete packet. Applications that emit oversized fragmented UDP datagrams can therefore bypass the proxy; TCP and path-MTU-aware UDP such as normal QUIC traffic are unaffected. There are two exceptions, both for first fragments, which are the only fragments that carry ports: a first fragment addressed to port 53 is dropped in DNS `Proxy` mode (see [Proxy mode](#proxy-mode)), and a first fragment sent by one of ProxiFyre's local proxy listeners is dropped in every mode (see [Local listener replies and TCP close handling](#local-listener-replies-and-tcp-close-handling)).
 
 ## LAN bypass
 
@@ -130,6 +130,15 @@ Changing this setting requires a service restart.
 
 In DNS `Proxy` mode, DNS takes precedence over LAN bypass: a query addressed to a LAN resolver such as `192.168.1.1:53` is still sent through the DNS proxy, while all other LAN traffic stays direct. See [DNS routing](#dns-routing).
 
+## Local listener replies and TCP close handling
+
+ProxiFyre redirects a matched connection to a local listener and translates the listener's replies back before the application sees them. Two rules apply to every proxied connection, not only to DNS:
+
+- **A reply that cannot be translated back is dropped.** A reply from a local listener is addressed to the original server only because redirection swapped the addresses, so it must never reach the network. It is dropped when its TCP connection or UDP endpoint is no longer tracked, when it is the first fragment of a fragmented reply, or when its SOCKS5 relay header is malformed or of the wrong address type. Earlier releases passed such packets toward the original server. The first such drop after the service starts is logged once as a warning, and a count is logged at `Info` level at most every five seconds while drops continue. Later fragments of a fragmented reply carry no ports, cannot be attributed to a listener, and are still passed.
+- **A TCP connection is tracked through its whole close.** The FIN/ACK exchange is translated in both directions instead of reaching the real server. A reset (RST) ends the connection immediately; segments the local proxy had already sent when the reset arrived are dropped without the warning and are counted at `Debug` level only.
+
+A proxied TCP connection that stays idle for more than 5 minutes loses its redirect entry; see [Limitations](#limitations).
+
 ## DNS routing
 
 The optional `dns` object controls conventional DNS: UDP and TCP traffic to destination port 53, for IPv4 and IPv6. It is a global policy that applies to every process, independently of `appNames` rules and `excludes`. Windows normally resolves names in the DNS Client service (`Dnscache`, hosted by `svchost.exe`) rather than in the requesting application, so a per-application DNS rule could not be attributed reliably; ProxiFyre therefore does not try to.
@@ -139,6 +148,8 @@ The optional `dns` object controls conventional DNS: UDP and TCP traffic to dest
 | `mode` | `Direct` (default when `dns` or `mode` is omitted) or `Proxy`, case-insensitive. |
 | `proxyId` | Required in `Proxy` mode: the `id` of the proxy rule whose SOCKS5 proxy carries DNS. That rule must support both `TCP` and `UDP` (omitting `supportedProtocols` means both). |
 | `serverOverride` | Optional, `Proxy` mode only: an IPv4 or IPv6 literal with an optional port that the SOCKS5 proxy queries instead of the server Windows addressed, for example `1.1.1.1`, `1.1.1.1:53`, `2606:4700:4700::1111`, or `[2606:4700:4700::1111]:53`. Host names are rejected so the override never needs DNS itself. |
+
+Configurations written before DNS routing existed load and save unchanged. The one exception is a configuration that already contained a rule property named `id` or a top-level property named `dns`: these were preserved but ignored by earlier releases and are now interpreted and validated.
 
 ### Direct mode
 
@@ -155,7 +166,7 @@ ProxiFyre never falls back to sending DNS directly. The DNS policy itself drops 
 - the selected proxy could not be created at startup, or the configuration is rejected by the engine;
 - the proxy does not accept the destination's address family (for example IPv6 DNS with an IPv4-only rule);
 - a `serverOverride` is configured and the query is addressed to a server of the other address family (an IPv4 override blocks queries to IPv6 servers and vice versa);
-- the packet cannot be redirected, such as a TCP connection to port 53 that was opened before ProxiFyre started, or a datagram too large to carry the SOCKS5 UDP header;
+- the packet cannot be redirected, such as a TCP connection to port 53 that was opened before ProxiFyre started, a datagram too large to carry the SOCKS5 UDP header, or, with a `serverOverride`, a datagram too short to carry a DNS header;
 - the datagram is fragmented. Only the first fragment carries the UDP or TCP header, so only a first fragment (IPv4 or IPv6) addressed to port 53 can be recognized as DNS; it is dropped, which also prevents the datagram from being reassembled at the server. Later fragments carry no ports, cannot be classified, and are passed unchanged, so other fragmented traffic is not affected. In `Direct` mode fragmented DNS is passed like any other DNS; or
 - it is addressed to a configured SOCKS5 server and its sending process cannot be determined (see [Recursion and ProxiFyre's own traffic](#recursion-and-proxifyres-own-traffic)).
 
@@ -167,6 +178,8 @@ Whether name resolution still succeeds after a drop depends on Windows: it retri
 
 Windows retries a failed query and, for UDP answers marked truncated, retries over TCP; both go through the same proxy. ProxiFyre does not inspect payloads to decide what is DNS: only destination port 53 is classified.
 
+For UDP, ProxiFyre remembers the server each redirected query was addressed to (by client port and DNS message ID, for 30 seconds) and presents the answer as coming from that server, whatever source address the SOCKS5 relay reports for it, because a resolver discards an answer from an address it did not query. RFC 1928 relays report the server that answered, but some report another address, such as their own. This applies with or without a `serverOverride`. Datagrams relayed through the same proxy that match no outstanding query are delivered with the source the relay reports.
+
 If the selected proxy cannot be created when the service starts (for example its host name does not resolve or its listeners cannot be opened), the service still starts but **all DNS is blocked until the service is restarted** after the cause is fixed. The engine log says so explicitly. An unknown `mode` value stops the service from starting instead of being treated as `Direct`.
 
 The selection is made by `proxyId`, never by position, so reordering rules does not change the DNS proxy. If the referenced rule is removed or renamed, validation fails with `DNS_PROXY_NOT_FOUND`; ProxiFyre never silently switches to another proxy. The GUI assigns an id such as `proxy-1` to a rule when it is selected as the DNS proxy, and clears the id on a duplicated copy.
@@ -175,7 +188,7 @@ The selection is made by `proxyId`, never by position, so reordering rules does 
 
 Without `serverOverride`, each query keeps its original destination: the SOCKS5 server is asked to reach the DNS server Windows queried. That fails when Windows uses a local resolver, such as a home router at `192.168.1.1`, which the remote SOCKS5 server cannot reach. Set `serverOverride` to a resolver that is reachable from the SOCKS5 server, such as `1.1.1.1`.
 
-With an override, only the SOCKS5 destination changes: the `UDP ASSOCIATE` datagram header or the `CONNECT` target names the override, while the packets the application sees keep the original server address. For UDP, ProxiFyre remembers the original server for each query (by client port and DNS message ID, for 30 seconds) and presents the answer as coming from that server, because a resolver discards answers from an address it did not query. An answer that matches an outstanding query is restored this way whatever source address the SOCKS5 relay reports for it: RFC 1928 relays report the override server, but some report another address. A datagram that names the override server but matches no outstanding query is dropped; other datagrams relayed through the same proxy are delivered unchanged. Checksums are recalculated on every rewritten packet.
+With an override, only the SOCKS5 destination changes: the `UDP ASSOCIATE` datagram header or the `CONNECT` target names the override, while the packets the application sees keep the original server address. A UDP answer is restored to the server the resolver queried as described under [Proxy mode](#proxy-mode); an RFC 1928 relay reports the override server as its source. A datagram that names the override server but matches no outstanding query is dropped; other datagrams relayed through the same proxy are delivered unchanged. Checksums are recalculated on every rewritten packet.
 
 ### Examples
 
@@ -215,6 +228,8 @@ The sender is taken from ProxiFyre's cached copy of the Windows connection table
 - Only traffic visible to the Windows Packet Filter layer is captured. Loopback and local resolvers (for example a resolver on `127.0.0.1` or `::1`, or a resolver inside a local VM or container reached through a virtual adapter that is not filtered) are not routed, and their own upstream queries are subject to the same policy only if they leave through a filtered adapter.
 - Each new UDP source port needs its own SOCKS5 control connection and `UDP ASSOCIATE`, as for application UDP traffic. The Windows DNS Client uses a fresh source port for most queries, so the first answer through the proxy is delayed by the SOCKS5 (and, for `TLS`, the TLS) handshake.
 - When the service is stopped, packet filtering stops and all traffic, including DNS, is direct.
+- UDP sent to a broadcast or multicast link-layer address is passed before the DNS policy is applied, as it is for application traffic, so a port-53 datagram addressed to a broadcast or multicast address is not proxied. Conventional DNS is unicast.
+- An IPv6 packet whose extension-header chain ProxiFyre cannot walk to a UDP or TCP header (for example one protected by AH or ESP, or a truncated chain) is passed without being classified.
 - A proxied TCP connection that stays idle for more than 5 minutes loses its redirect entry. This applies to every proxied TCP connection, not only DNS. If the local proxy then sends first on that connection, its segments are dropped rather than sent to the real server, so the connection stalls until the application or the proxy times it out instead of being reset. A segment the application sends on such a connection is no longer redirected either: for application traffic it goes to the real server as before, which normally resets the connection; for DNS in `Proxy` mode it is dropped.
 - Changing DNS settings requires a service restart.
 
