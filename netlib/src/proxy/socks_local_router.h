@@ -272,13 +272,6 @@ namespace proxy
         dns_udp_origin_tracker<net::ip_endpoint<net::ip_address_v6>> dns_udp_origins_v6_;
 
         /**
-         * @brief True once the static driver filters that keep port-53 traffic (and the DNS
-         *        proxy's own local replies) in user mode, ahead of the LAN-bypass PASS filters,
-         *        have been installed.
-         */
-        bool dns_filters_installed_{ false };
-
-        /**
          * @brief Count of DNS packets dropped by the Proxy-mode policy since the last
          *        throttled report from the resolver thread.
          */
@@ -963,15 +956,20 @@ namespace proxy
                 if (udp)
                     udp->stop();
 
-            // Proxy-mode DNS must take precedence over the LAN-bypass PASS filters; install the
-            // front-of-table REDIRECT filters once the DNS proxy's listener ports are known.
+            // Proxy-mode DNS must take precedence over the LAN-bypass PASS filters: (re)install
+            // the front-of-table REDIRECT filters with the current listener ports. If that fails,
+            // fail start() instead of running with DNS able to bypass the policy.
             dns_udp_origins_v4_.clear();
             dns_udp_origins_v6_.clear();
             dns_blocked_packets_.store(0, std::memory_order_relaxed);
             untranslated_listener_replies_.store(0, std::memory_order_relaxed);
             for (auto& flag : dns_block_reason_logged_)
                 flag.clear(std::memory_order_relaxed);
-            install_dns_filters();
+            if (!install_dns_filters())
+            {
+                start_failure_cleanup();
+                return false;
+            }
 
             process_resolve_thread_ = std::thread(&socks_local_router::process_resolve_thread_proc, this);
 
@@ -1180,8 +1178,8 @@ namespace proxy
         {
             add_lan_passover_filters_v4();
             add_lan_passover_filters_v6();
-            // In DNS Proxy mode, start() inserts port-53 REDIRECT filters ahead of these PASS
-            // filters, so DNS addressed to LAN resolvers is still proxied.
+            // In DNS Proxy mode, every start() (re)inserts port-53 REDIRECT filters ahead of these
+            // PASS filters, so DNS addressed to LAN resolvers is still proxied.
         }
 
         /**
@@ -2515,68 +2513,79 @@ namespace proxy
         }
 
         /**
-         * @brief Installs the static driver filters that keep DNS in user mode in Proxy mode.
-         *
-         * Static PASS filters (LAN bypass and the upstream exemptions) are evaluated in the
-         * driver before the user-mode handler sees a packet. In Proxy mode DNS must take
-         * precedence over LAN bypass, so REDIRECT (to user mode) filters are inserted at the
-         * front of the table for outbound TCP/UDP to port 53 and for the DNS proxy's local
-         * replies (outbound from its listener ports, which are addressed to the original - often
-         * LAN - DNS server). Unrelated LAN traffic keeps matching the LAN PASS filters.
-         * Called from start() under lifecycle_mutex_.
+         * @brief Removes the DNS policy's driver filters from an earlier start(). They are the
+         *        only REDIRECT filters this router installs; every other static filter is PASS.
          */
-        void install_dns_filters()
+        void remove_dns_filters()
         {
-            if (dns_filters_installed_)
-                return;
+            const auto is_dns_filter = [](const auto& filter) { return filter.get_action() == ndisapi::action_t::redirect; };
+            static_filters_.remove_filters_if<net::ip_address_v4>(
+                [&is_dns_filter](const ndisapi::filter<net::ip_address_v4>& filter) { return is_dns_filter(filter); });
+            static_filters_.remove_filters_if<net::ip_address_v6>(
+                [&is_dns_filter](const ndisapi::filter<net::ip_address_v6>& filter) { return is_dns_filter(filter); });
+        }
 
-            std::optional<uint16_t> tcp4, udp4, tcp6, udp6;
+        /**
+         * @brief (Re)installs the static driver filters the DNS policy needs (plan_dns_filters()).
+         *
+         * Runs on every start(): the filters from an earlier run are removed and the current plan
+         * is inserted at the front of the table, so the filters stay ahead of LAN-bypass PASS
+         * filters added between runs and use the current listener ports and proxy selection. In
+         * Direct mode the plan is empty, so earlier filters are only removed.
+         * Called from start() under lifecycle_mutex_.
+         *
+         * @return false when a filter needed by Proxy mode could not be installed; the caller
+         *         then fails start() rather than running with DNS able to bypass the policy.
+         */
+        bool install_dns_filters()
+        {
+            dns_routing_mode mode;
+            dns_listener_ports listeners;
             {
                 std::shared_lock lock(lock_);
-                if (dns_mode_ != dns_routing_mode::proxy)
-                    return;
-                tcp4 = dns_listener_port_locked<net::ip_address_v4, dns_transport::tcp>();
-                udp4 = dns_listener_port_locked<net::ip_address_v4, dns_transport::udp>();
-                tcp6 = dns_listener_port_locked<net::ip_address_v6, dns_transport::tcp>();
-                udp6 = dns_listener_port_locked<net::ip_address_v6, dns_transport::udp>();
+                mode = dns_mode_;
+                listeners.tcp4 = dns_listener_port_locked<net::ip_address_v4, dns_transport::tcp>();
+                listeners.udp4 = dns_listener_port_locked<net::ip_address_v4, dns_transport::udp>();
+                listeners.tcp6 = dns_listener_port_locked<net::ip_address_v6, dns_transport::tcp>();
+                listeners.udp6 = dns_listener_port_locked<net::ip_address_v6, dns_transport::udp>();
             }
 
-            bool all_installed = true;
-            const auto add = [this, &all_installed]<typename AddrT>(const uint8_t protocol,
-                const std::optional<uint16_t> destination_port, const std::optional<uint16_t> source_port)
-            {
-                ndisapi::filter<AddrT> filter;
-                filter.set_direction(ndisapi::direction_t::out)
-                    .set_action(ndisapi::action_t::redirect)
-                    .set_protocol(protocol);
-                if (destination_port)
-                    filter.set_dest_port(std::make_pair(*destination_port, *destination_port));
-                if (source_port)
-                    filter.set_source_port(std::make_pair(*source_port, *source_port));
+            remove_dns_filters();
 
-                if (!static_filters_.add_filter_front(filter))
-                    all_installed = false;
-            };
-
-            for (const auto protocol : { static_cast<uint8_t>(IPPROTO_UDP), static_cast<uint8_t>(IPPROTO_TCP) })
+            for (const auto& spec : plan_dns_filters(mode, listeners))
             {
-                add.template operator()<net::ip_address_v4>(protocol, dns_port, std::nullopt);
-                add.template operator()<net::ip_address_v6>(protocol, dns_port, std::nullopt);
+                const auto protocol = static_cast<uint8_t>(spec.transport == dns_transport::tcp ? IPPROTO_TCP : IPPROTO_UDP);
+                const auto add = [this, &spec, protocol](auto filter) -> bool
+                {
+                    filter.set_direction(ndisapi::direction_t::out)
+                        .set_action(ndisapi::action_t::redirect)
+                        .set_protocol(protocol);
+                    if (spec.destination_port)
+                        filter.set_dest_port(std::make_pair(*spec.destination_port, *spec.destination_port));
+                    if (spec.source_port)
+                        filter.set_source_port(std::make_pair(*spec.source_port, *spec.source_port));
+                    return static_filters_.add_filter_front(filter);
+                };
+
+                const bool added = spec.family == dns_family::ipv4
+                    ? add(ndisapi::filter<net::ip_address_v4>{})
+                    : add(ndisapi::filter<net::ip_address_v6>{});
+
+                if (!added)
+                {
+                    NETLIB_LOG(log_level::error,
+                        "DNS routing: failed to install the {} {} driver filter for {} port {}; refusing to start so "
+                        "DNS cannot bypass the DNS proxy.",
+                        spec.family == dns_family::ipv4 ? "IPv4" : "IPv6",
+                        spec.transport == dns_transport::tcp ? "TCP" : "UDP",
+                        spec.destination_port ? "destination" : "source",
+                        spec.destination_port ? *spec.destination_port : spec.source_port.value_or(0));
+                    remove_dns_filters();
+                    return false;
+                }
             }
 
-            if (tcp4) add.template operator()<net::ip_address_v4>(static_cast<uint8_t>(IPPROTO_TCP), std::nullopt, *tcp4);
-            if (udp4) add.template operator()<net::ip_address_v4>(static_cast<uint8_t>(IPPROTO_UDP), std::nullopt, *udp4);
-            if (tcp6) add.template operator()<net::ip_address_v6>(static_cast<uint8_t>(IPPROTO_TCP), std::nullopt, *tcp6);
-            if (udp6) add.template operator()<net::ip_address_v6>(static_cast<uint8_t>(IPPROTO_UDP), std::nullopt, *udp6);
-
-            dns_filters_installed_ = true;
-
-            if (!all_installed)
-            {
-                NETLIB_LOG(log_level::error,
-                    "DNS routing: failed to install one or more driver filters that give DNS precedence over "
-                    "LAN bypass; DNS addressed to LAN resolvers may not be proxied while bypassLan is enabled.");
-            }
+            return true;
         }
 
         /**

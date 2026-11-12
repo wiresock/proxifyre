@@ -568,3 +568,46 @@ TEST(DnsFragmentPolicy, Ipv6PacketsWithoutAClassifiableFirstFragmentAreNotReport
     EXPECT_FALSE(parse(ipv6_packet(fragment_proto,
         concat({ fragment_header(fragment_proto, 0, true), fragment_header(udp_proto, 0, true), ports(1, 53) }))).has_value());
 }
+
+// 6. Driver filters: Proxy mode keeps port-53 traffic of both families and transports, and the
+//    DNS listeners' replies, in user mode; Direct mode installs none; no port-0 filters.
+TEST(DnsFilterPlan, DirectModeInstallsNoFilters)
+{
+    proxy::dns_listener_ports listeners{ 41001, 41002, 41003, 41004 };
+    EXPECT_TRUE(proxy::plan_dns_filters(direct, listeners).empty());
+}
+
+TEST(DnsFilterPlan, ProxyModeCoversPort53AndEveryRunningListener)
+{
+    using proxy::dns_filter_spec;
+    const auto plan = proxy::plan_dns_filters(proxy_mode, { 41001, 41002, 41003, 41004 });
+
+    const std::vector<dns_filter_spec> expected{
+        { dns_family::ipv4, dns_transport::udp, dns_port, std::nullopt },
+        { dns_family::ipv4, dns_transport::tcp, dns_port, std::nullopt },
+        { dns_family::ipv6, dns_transport::udp, dns_port, std::nullopt },
+        { dns_family::ipv6, dns_transport::tcp, dns_port, std::nullopt },
+        { dns_family::ipv4, dns_transport::tcp, std::nullopt, uint16_t{ 41001 } },
+        { dns_family::ipv4, dns_transport::udp, std::nullopt, uint16_t{ 41002 } },
+        { dns_family::ipv6, dns_transport::tcp, std::nullopt, uint16_t{ 41003 } },
+        { dns_family::ipv6, dns_transport::udp, std::nullopt, uint16_t{ 41004 } },
+    };
+    EXPECT_EQ(plan, expected);
+}
+
+TEST(DnsFilterPlan, ListenersThatAreNotRunningGetNoSourcePortFilter)
+{
+    // IPv6 listeners disabled (nullopt) and an IPv4 UDP listener reporting port 0.
+    const auto plan = proxy::plan_dns_filters(proxy_mode, { 41001, uint16_t{ 0 }, std::nullopt, std::nullopt });
+
+    ASSERT_EQ(plan.size(), 5u);
+    for (const auto& spec : plan)
+    {
+        EXPECT_NE(spec.source_port, std::optional<uint16_t>{ 0 });
+        EXPECT_TRUE(spec.destination_port.has_value() != spec.source_port.has_value());
+    }
+    EXPECT_EQ(plan.back().source_port, std::optional<uint16_t>{ 41001 });
+
+    // Even with no listener at all, port 53 stays in user mode (where it is then blocked).
+    EXPECT_EQ(proxy::plan_dns_filters(proxy_mode, {}).size(), 4u);
+}

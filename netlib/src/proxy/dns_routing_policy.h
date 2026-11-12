@@ -18,6 +18,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace proxy
 {
@@ -196,6 +197,66 @@ namespace proxy
         default:
             return "unknown";
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Driver filters
+    // ---------------------------------------------------------------------------------------
+
+    /// Local listener ports (host byte order) of the DNS proxy; nullopt or 0 when not running.
+    struct dns_listener_ports
+    {
+        std::optional<uint16_t> tcp4;
+        std::optional<uint16_t> udp4;
+        std::optional<uint16_t> tcp6;
+        std::optional<uint16_t> udp6;
+    };
+
+    /// One outbound REDIRECT (to user mode) driver filter the DNS policy needs.
+    struct dns_filter_spec
+    {
+        dns_family family{};
+        dns_transport transport{};
+        std::optional<uint16_t> destination_port; ///< host byte order
+        std::optional<uint16_t> source_port;      ///< host byte order
+
+        bool operator==(const dns_filter_spec&) const = default;
+    };
+
+    /**
+     * @brief The driver filters the DNS policy installs for @p mode.
+     *
+     * Static PASS filters (LAN bypass, the SOCKS5 upstream exemptions) are evaluated in the
+     * driver before the user-mode handler sees a packet. In Proxy mode, REDIRECT filters at the
+     * front of the table keep outbound TCP/UDP to port 53, and the DNS proxy listeners' replies
+     * (outbound from their ports and addressed to the original, often LAN, server), in user mode
+     * for both address families. Direct mode needs none. A listener that is not running (no port
+     * or port 0) gets no filter: a source-port filter for port 0 would be meaningless.
+     */
+    [[nodiscard]] inline std::vector<dns_filter_spec> plan_dns_filters(const dns_routing_mode mode,
+        const dns_listener_ports& listeners)
+    {
+        std::vector<dns_filter_spec> plan;
+        if (mode != dns_routing_mode::proxy)
+            return plan;
+
+        for (const auto family : { dns_family::ipv4, dns_family::ipv6 })
+        {
+            for (const auto transport : { dns_transport::udp, dns_transport::tcp })
+                plan.push_back({ family, transport, dns_port, std::nullopt });
+        }
+
+        const auto add_listener = [&plan](const dns_family family, const dns_transport transport,
+                                          const std::optional<uint16_t> port)
+        {
+            if (port && *port != 0)
+                plan.push_back({ family, transport, std::nullopt, *port });
+        };
+        add_listener(dns_family::ipv4, dns_transport::tcp, listeners.tcp4);
+        add_listener(dns_family::ipv4, dns_transport::udp, listeners.udp4);
+        add_listener(dns_family::ipv6, dns_transport::tcp, listeners.tcp6);
+        add_listener(dns_family::ipv6, dns_transport::udp, listeners.udp6);
+        return plan;
     }
 
     // ---------------------------------------------------------------------------------------
