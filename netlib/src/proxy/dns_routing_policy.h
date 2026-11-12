@@ -666,6 +666,17 @@ namespace proxy
         return view;
     }
 
+    /**
+     * @brief Whether replies leaving the DNS proxy's UDP listener may need their source restored
+     *        (classify_dns_override_reply()): only in Proxy mode with a usable proxy and a server
+     *        override. Otherwise the reply path needs no DNS work at all.
+     */
+    [[nodiscard]] constexpr bool dns_reply_restore_needed(const dns_routing_mode mode, const bool proxy_selected,
+        const bool server_override_configured) noexcept
+    {
+        return mode == dns_routing_mode::proxy && proxy_selected && server_override_configured;
+    }
+
     /// How a datagram leaving a local UDP proxy listener is presented to the client.
     enum class dns_reply_restore : uint8_t
     {

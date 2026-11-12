@@ -265,6 +265,14 @@ namespace proxy
         std::optional<net::ip_endpoint<net::ip_address_v6>> dns_server_override_v6_;
 
         /**
+         * @brief True when replies from the DNS proxy's UDP listener may need their source
+         *        restored (dns_reply_restore_needed()). Lets every listener reply skip lock_ in
+         *        Direct mode and in Proxy mode without an override. Written by set_dns_routing()
+         *        while the router is inactive.
+         */
+        std::atomic_bool dns_reply_restore_active_{ false };
+
+        /**
          * @brief Original server of each UDP DNS query rewritten to the server override, so the
          *        answer can be restored to the server the resolver actually queried.
          */
@@ -1791,6 +1799,7 @@ namespace proxy
             dns_proxy_id_.reset();
             dns_server_override_v4_.reset();
             dns_server_override_v6_.reset();
+            dns_reply_restore_active_.store(false, std::memory_order_release);
 
             if (settings.mode == dns_routing_mode::direct)
             {
@@ -1846,6 +1855,8 @@ namespace proxy
             }
 
             dns_proxy_id_ = proxy_id;
+            dns_reply_restore_active_.store(dns_reply_restore_needed(dns_mode_, true,
+                dns_server_override_v4_.has_value() || dns_server_override_v6_.has_value()), std::memory_order_release);
 
             const auto upstream = proxy_id < proxy_upstreams_.size()
                 ? proxy_upstreams_[proxy_id].to_string()
@@ -2475,6 +2486,11 @@ namespace proxy
             const uint16_t listener_port, const uint16_t client_port,
             const uint8_t* socks_payload, const size_t socks_payload_size)
         {
+            // Lock-free early exit for every listener reply in Direct mode and in Proxy mode
+            // without an override.
+            if (!dns_reply_restore_active_.load(std::memory_order_acquire))
+                return { dns_reply_restore::unchanged, std::nullopt };
+
             std::optional<net::ip_endpoint<AddrT>> server_override;
             {
                 std::shared_lock lock(lock_);

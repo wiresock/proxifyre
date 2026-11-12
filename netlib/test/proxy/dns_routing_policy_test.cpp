@@ -611,3 +611,14 @@ TEST(DnsFilterPlan, ListenersThatAreNotRunningGetNoSourcePortFilter)
     // Even with no listener at all, port 53 stays in user mode (where it is then blocked).
     EXPECT_EQ(proxy::plan_dns_filters(proxy_mode, {}).size(), 4u);
 }
+
+// 9. Listener replies need DNS work (and lock_) only in Proxy mode with a usable proxy and an override.
+TEST(DnsReplyRestore, NeededOnlyInProxyModeWithAnOverride)
+{
+    using proxy::dns_reply_restore_needed;
+    EXPECT_TRUE(dns_reply_restore_needed(proxy_mode, true, true));
+    EXPECT_FALSE(dns_reply_restore_needed(proxy_mode, true, false));
+    EXPECT_FALSE(dns_reply_restore_needed(proxy_mode, false, true));
+    EXPECT_FALSE(dns_reply_restore_needed(direct, true, true));
+    EXPECT_FALSE(dns_reply_restore_needed(direct, false, false));
+}
