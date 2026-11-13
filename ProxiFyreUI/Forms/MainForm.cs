@@ -243,9 +243,12 @@ namespace ProxiFyreUI.Forms
             _suppressChanges = true;
             try
             {
+                // An unrecognized mode is shown as no selection, never as Direct: validation reports
+                // it, and it is only replaced when the user picks a mode (DnsControlChanged).
                 DnsRoutingMode mode;
-                DnsConfiguration.TryGetMode(dns?.Mode, out mode);
-                dnsModeComboBox.SelectedIndex = mode == DnsRoutingMode.Proxy ? 1 : 0;
+                dnsModeComboBox.SelectedIndex = !DnsConfiguration.TryGetMode(dns?.Mode, out mode)
+                    ? -1
+                    : mode == DnsRoutingMode.Proxy ? 1 : 0;
                 dnsServerOverrideTextBox.Text = dns?.ServerOverride ?? string.Empty;
                 RefreshDnsProxyChoices();
             }
@@ -308,7 +311,10 @@ namespace ProxiFyreUI.Forms
                 return;
 
             var dns = configuration.Dns ?? new DnsSettings();
-            dns.Mode = dnsModeComboBox.SelectedIndex == 1 ? DnsConfiguration.ProxyMode : DnsConfiguration.DirectMode;
+            // Only the mode box changes the mode, so editing another DNS field never turns an
+            // unrecognized mode into Direct.
+            if (ReferenceEquals(sender, dnsModeComboBox) && dnsModeComboBox.SelectedIndex >= 0)
+                dns.Mode = dnsModeComboBox.SelectedIndex == 1 ? DnsConfiguration.ProxyMode : DnsConfiguration.DirectMode;
 
             if (ReferenceEquals(sender, dnsProxyComboBox) &&
                 dnsProxyComboBox.SelectedItem is DnsProxyChoice choice && choice.Rule != null)
