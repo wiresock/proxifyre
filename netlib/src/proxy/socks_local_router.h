@@ -3519,9 +3519,15 @@ namespace proxy
             // Run the source-port mapper sweeps at most once per maintenance interval,
             // even under heavy resolver activity. The interval is half the TTL so an
             // entry is evicted within at most 1.5 * TTL of becoming stale, and the
-            // condition variable below uses the same period as its wait timeout so
-            // the sweep still runs when the deferred-resolve queue stays empty.
+            // condition variable below times out at least that often so the sweep
+            // still runs when the deferred-resolve queue stays empty.
             constexpr auto maintenance_interval = tcp_mapper_entry_ttl_ / 2;
+
+            // The wait below also bounds how late the throttled DNS and listener drop counts are
+            // reported: they are not signalled through the condition variable, so wake at least
+            // once per report interval.
+            constexpr auto wake_interval = (std::min)(std::chrono::duration_cast<std::chrono::seconds>(maintenance_interval),
+                std::chrono::duration_cast<std::chrono::seconds>(drop_log_throttle_interval_));
             auto last_sweep = std::chrono::steady_clock::now();
             auto last_drop_log = last_sweep;
             auto last_dns_block_log = last_sweep;
@@ -3540,7 +3546,7 @@ namespace proxy
                     // non-zero until the throttled log path runs and exchanges
                     // them, so waking unconditionally on non-zero counters would
                     // re-fire every iteration until the throttle elapses).
-                    process_resolve_buffer_queue_cv_.wait_for(lock, maintenance_interval, [this, &last_drop_log] {
+                    process_resolve_buffer_queue_cv_.wait_for(lock, wake_interval, [this, &last_drop_log] {
                         if (!process_resolve_buffer_queue_.empty() || resolver_should_exit_.load())
                             return true;
 
@@ -3631,8 +3637,6 @@ namespace proxy
                             }
                         }
                     }
-
-                    // Expire DNS answer-origin mappings for queries that were never answered.
                 }
 
                 // Report Proxy-mode DNS drops and untranslatable listener replies at the same
