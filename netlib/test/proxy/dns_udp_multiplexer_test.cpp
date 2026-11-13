@@ -791,10 +791,32 @@ TEST(DnsAssociationHealth, AssociationRetiredForSilenceBacksOffWhateverItsAge)
     }
 
     // A long-lived association closed for another reason reopens at once.
-    health.on_opened(t0 + 61s);
-    health.on_closed(t0 + 200s);
+    health.on_opened(at);
+    health.on_closed(at + 140s);
     EXPECT_EQ(health.consecutive_failures(), 0u);
-    EXPECT_TRUE(health.may_open(t0 + 200s));
+    EXPECT_TRUE(health.may_open(at + 140s));
+}
+
+// The relay's UDP path dies whenever the machine is idle (a NAT or server UDP timeout) while
+// keepalive holds the control connection: each association answers for a while, goes silent and
+// is retired. That is a new outage each time, so the delay must not grow towards 30 s.
+TEST(DnsAssociationHealth, AssociationThatAnsweredBeforeGoingSilentRestartsTheBackoff)
+{
+    proxy::dns_association_health<> health{ 3, 30s };
+    auto at = t0;
+    for (int cycle = 0; cycle < 8; ++cycle)
+    {
+        ASSERT_TRUE(health.may_open(at)) << cycle;
+        health.on_opened(at);
+        for (int i = 1; i <= 20; ++i)
+            health.on_relay_datagram(at + std::chrono::seconds{ i }); // busy for 20 s
+        at += 320s;                                                   // idle, then silent
+        ASSERT_TRUE(health.on_unanswered(3, at)) << cycle;
+        health.on_closed(at, true);
+        EXPECT_FALSE(health.may_open(at + 999ms)) << cycle;
+        EXPECT_TRUE(health.may_open(at + 1s)) << cycle;
+        at += 1s;
+    }
 }
 
 TEST(DnsAssociationHealth, FirstOpenFailureSinceEachSuccessfulOpenIsReported)

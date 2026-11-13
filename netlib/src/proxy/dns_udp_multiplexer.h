@@ -535,9 +535,11 @@ namespace proxy
      *   arriving meanwhile are dropped (Proxy mode never sends DNS directly). An association that
      *   closes less than @p minimum_age after opening counts as a failed open, so a server that
      *   accepts UDP ASSOCIATE and then drops the connection is not reconnected in a tight loop,
-     *   and so does one retired because it stopped answering. The backoff resets only when an
-     *   association proves itself: a datagram arrives from the relay once it is at least
-     *   @p minimum_age old, or it closes normally at that age.
+     *   and so does one retired because it stopped answering. A retired association that had
+     *   delivered something restarts the backoff at its shortest delay; one that never did
+     *   lets it grow. The backoff also resets when an association proves itself: a datagram
+     *   arrives from the relay once it is at least @p minimum_age old, or it closes normally at
+     *   that age.
      * - An open association is reopened when its SOCKS5 control connection closes or its relay
      *   socket fails (reported by the relay), or when it looks silently dead: at least
      *   @p unanswered_limit queries expired unanswered that were sent after the last datagram
@@ -590,14 +592,28 @@ namespace proxy
          * @brief The association was closed at @p now.
          * @param failed The association stopped working (for example it was retired for
          *        unanswered queries): back off before the next attempt whatever its age. An
-         *        association younger than the minimum age always counts as a failed open.
+         *        association younger than the minimum age always counts as a failed open. An
+         *        association that worked (something arrived from the relay) and later stopped
+         *        working at or past the minimum age starts a new outage: the backoff restarts
+         *        at its shortest delay instead of growing, so a relay that answers after every
+         *        reopen is never kept waiting long.
          */
         void on_closed(const time_point now, const bool failed = false) noexcept
         {
-            if (failed || now - opened_at_ < minimum_age_)
-                back_off(now);
-            else
+            const bool young = now - opened_at_ < minimum_age_;
+            if (failed && !young && last_datagram_)
+            {
                 failures_ = 0;
+                back_off(now);
+            }
+            else if (failed || young)
+            {
+                back_off(now);
+            }
+            else
+            {
+                failures_ = 0;
+            }
         }
 
         /// Any datagram from the relay shows the association is alive; once it is also at least

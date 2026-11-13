@@ -694,8 +694,8 @@ namespace proxy
                 }
                 else
                 {
-                    NETLIB_DEBUG("DNS relay: SOCKS5 UDP association attempt {} failed; next attempt in {} s",
-                        session_.consecutive_failures(), retry.count());
+                    NETLIB_DEBUG("DNS relay: SOCKS5 UDP association attempt failed again; next attempt in {} s",
+                        retry.count());
                 }
                 return;
             }
@@ -831,7 +831,8 @@ namespace proxy
 
             NETLIB_INFO("DNS relay: dropped so far: {} queries while no SOCKS5 UDP association was available, "
                 "{} not from a redirected DNS client, {} naming a destination other than the queried server or the "
-                "override, or from a loopback address, {} without a DNS question, {} answers matching no query, "
+                "override, or from a loopback address, {} malformed (no SOCKS5 header of this family or no DNS "
+                "question), {} answers matching no query, "
                 "{} send failures", unavailable, unauthorized, refused, malformed, unmatched, send_failures);
             reported_drops_ = total;
             last_report_ = now;

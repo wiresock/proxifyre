@@ -2750,12 +2750,9 @@ namespace proxy
          */
         void start_dns_udp_relays()
         {
-            {
-                // A stop() that did not finish (for example stop_filter() threw) must not leave
-                // UDP DNS silently blocked after this start.
-                std::unique_lock lock(lock_);
-                dns_udp_relays_stopping_ = false;
-            }
+            // A stop() that did not finish (for example stop_filter() threw) must leave neither
+            // stopped relays registered nor UDP DNS silently blocked after this start.
+            release_dns_udp_relays();
 
             std::optional<net::ip_endpoint<net::ip_address_v4>> upstream;
             proxy_session_settings settings;
