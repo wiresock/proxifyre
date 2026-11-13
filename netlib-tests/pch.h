@@ -58,5 +58,6 @@
 #include "../netlib/src/iphelper/process_lookup.h"
 #include "../netlib/src/proxy/process_routing_policy.h"
 #include "../netlib/src/proxy/dns_routing_policy.h"
+#include "../netlib/src/proxy/dns_udp_multiplexer.h"
 
 #endif // PCH_H

@@ -5,6 +5,7 @@
 # be exercised on Linux/macOS CI hosts and developer machines.
 #
 #   * ../proxy/dns_routing_policy_test.cpp  - also part of the Windows netlib-tests project
+#   * ../proxy/dns_udp_multiplexer_test.cpp - also part of the Windows netlib-tests project
 #   * dns_packet_redirect_test.cpp          - portable only: compiles the production
 #     tcp_local_redirect.h / socks5_udp_local_redirect.h against winshim/ and the product
 #     CNdisApi checksum routines extracted verbatim from external/ndisapi/ndisapi/ndisapi.cpp
@@ -47,6 +48,7 @@ fi
 
 "$cxx" "${flags[@]}" -I"$here" -I"$here/winshim" \
   "$here/../proxy/dns_routing_policy_test.cpp" \
+  "$here/../proxy/dns_udp_multiplexer_test.cpp" \
   "$here/dns_packet_redirect_test.cpp" \
   "$checksums" \
   -lgtest -lgtest_main \

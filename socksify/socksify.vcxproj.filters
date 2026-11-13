@@ -144,6 +144,12 @@
     <ClInclude Include="..\netlib\src\proxy\dns_routing_policy.h">
       <Filter>Header Files\netlib\proxy</Filter>
     </ClInclude>
+    <ClInclude Include="..\netlib\src\proxy\dns_udp_multiplexer.h">
+      <Filter>Header Files\netlib\proxy</Filter>
+    </ClInclude>
+    <ClInclude Include="..\netlib\src\proxy\socks5_dns_udp_relay.h">
+      <Filter>Header Files\netlib\proxy</Filter>
+    </ClInclude>
     <ClInclude Include="..\netlib\src\proxy\socks5_udp_association.h">
       <Filter>Header Files\netlib\proxy</Filter>
     </ClInclude>

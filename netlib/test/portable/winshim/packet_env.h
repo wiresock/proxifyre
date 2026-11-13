@@ -22,3 +22,4 @@
 #include "../../../src/ndisapi/tcp_local_redirect.h"
 #include "../../../src/ndisapi/socks5_udp_local_redirect.h"
 #include "../../../src/proxy/dns_routing_policy.h"
+#include "../../../src/proxy/dns_udp_multiplexer.h"

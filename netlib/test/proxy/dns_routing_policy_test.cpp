@@ -4,8 +4,8 @@
 // outbound packet before process attribution: Direct mode passes port-53 traffic, Proxy mode
 // redirects it to the selected proxy's listener or blocks it (never passes it), ProxiFyre's own
 // upstream traffic is never captured, and non-DNS traffic keeps its ordinary routing. They also
-// cover the DNS server override syntax and the bookkeeping that restores override answers to
-// the server the resolver originally queried.
+// cover the DNS server override syntax. The shared UDP association's bookkeeping is tested in
+// dns_udp_multiplexer_test.cpp.
 //
 // The header has no Windows dependencies, so this file also builds outside the Windows test
 // project (see netlib/test/portable/run-portable-tests.sh).
@@ -14,7 +14,6 @@
 #include "../../src/proxy/dns_routing_policy.h"
 
 #include <set>
-#include <thread>
 #include <vector>
 
 namespace
@@ -352,109 +351,6 @@ TEST(DnsMessageId, ReadsTheIdOfACompleteHeaderOnly)
     EXPECT_FALSE(dns_message_id(nullptr, 64).has_value());
 }
 
-namespace
-{
-    struct endpoint
-    {
-        std::string address;
-        uint16_t port{};
-        bool operator==(const endpoint&) const = default;
-    };
-
-    using tracker = proxy::dns_udp_origin_tracker<endpoint>;
-    using clock = tracker::clock;
-}
-
-// 6./7. Answers relayed from the override are mapped back to the original (often private) server
-//       by client port and DNS message ID.
-TEST(DnsUdpOriginTracker, MapsOverrideAnswersToTheOriginalServer)
-{
-    tracker origins;
-    const auto now = clock::now();
-
-    origins.remember(50001, 0x1234, { "192.168.1.1", 53 }, now);
-    origins.remember(50001, 0x9999, { "10.0.0.53", 53 }, now);
-    origins.remember(50002, 0x1234, { "fd00::53", 53 }, now);
-
-    EXPECT_EQ(origins.resolve(50001, 0x1234, now), (endpoint{ "192.168.1.1", 53 }));
-    EXPECT_EQ(origins.resolve(50001, 0x9999, now), (endpoint{ "10.0.0.53", 53 }));
-    EXPECT_EQ(origins.resolve(50002, 0x1234, now), (endpoint{ "fd00::53", 53 }));
-
-    // Unknown query: no mapping (the router drops such an answer).
-    EXPECT_FALSE(origins.resolve(50003, 0x1234, now).has_value());
-    EXPECT_FALSE(origins.resolve(50001, 0x4321, now).has_value());
-
-    // A lookup does not consume the entry: duplicate answers to a retransmitted query are
-    // restored consistently.
-    EXPECT_EQ(origins.resolve(50001, 0x1234, now), (endpoint{ "192.168.1.1", 53 }));
-
-    // A retransmission to another server with the same port and ID updates the mapping.
-    origins.remember(50001, 0x1234, { "192.168.1.2", 53 }, now);
-    EXPECT_EQ(origins.resolve(50001, 0x1234, now), (endpoint{ "192.168.1.2", 53 }));
-}
-
-TEST(DnsUdpOriginTracker, EntriesExpire)
-{
-    tracker origins{ std::chrono::seconds{ 30 } };
-    const auto start = clock::now();
-    origins.remember(50001, 1, { "192.168.1.1", 53 }, start);
-    origins.remember(50002, 2, { "192.168.1.1", 53 }, start + std::chrono::seconds{ 20 });
-
-    EXPECT_TRUE(origins.resolve(50001, 1, start + std::chrono::seconds{ 30 }).has_value());
-    EXPECT_FALSE(origins.resolve(50001, 1, start + std::chrono::seconds{ 31 }).has_value());
-
-    origins.sweep(start + std::chrono::seconds{ 45 });
-    EXPECT_EQ(origins.size(), 1u);
-    origins.sweep(start + std::chrono::seconds{ 60 });
-    EXPECT_EQ(origins.size(), 0u);
-
-    origins.remember(50003, 3, { "192.168.1.1", 53 }, start);
-    origins.clear();
-    EXPECT_EQ(origins.size(), 0u);
-}
-
-TEST(DnsUdpOriginTracker, IsBoundedAndEvictsTheOldestLiveEntry)
-{
-    tracker origins{ std::chrono::seconds{ 30 }, 3 };
-    const auto start = clock::now();
-    origins.remember(1, 1, { "a", 53 }, start);
-    origins.remember(2, 1, { "b", 53 }, start + std::chrono::milliseconds{ 1 });
-    origins.remember(3, 1, { "c", 53 }, start + std::chrono::milliseconds{ 2 });
-    origins.remember(4, 1, { "d", 53 }, start + std::chrono::milliseconds{ 3 });
-
-    EXPECT_EQ(origins.size(), 3u);
-    EXPECT_FALSE(origins.resolve(1, 1, start + std::chrono::milliseconds{ 4 }).has_value());
-    EXPECT_TRUE(origins.resolve(4, 1, start + std::chrono::milliseconds{ 4 }).has_value());
-
-    // Expired entries are reclaimed before a live entry is evicted.
-    origins.remember(5, 1, { "e", 53 }, start + std::chrono::seconds{ 40 });
-    EXPECT_EQ(origins.size(), 1u);
-}
-
-TEST(DnsUdpOriginTracker, IsSafeForConcurrentPacketAndMaintenanceThreads)
-{
-    tracker origins{ std::chrono::seconds{ 30 }, 4096 };
-    std::vector<std::thread> threads;
-    for (uint16_t t = 0; t < 4; ++t)
-    {
-        threads.emplace_back([&origins, t]
-        {
-            for (uint16_t i = 0; i < 2000; ++i)
-            {
-                const auto port = static_cast<uint16_t>(10000 + t * 2000 + i);
-                origins.remember(port, i, { "server", 53 });
-                EXPECT_TRUE(origins.resolve(port, i).has_value());
-                if (i % 100 == 0)
-                    origins.sweep();
-            }
-        });
-    }
-    for (auto& thread : threads)
-        thread.join();
-
-    EXPECT_LE(origins.size(), 4096u);
-}
-
 // 1. Packets sourced from a local proxy listener are re-injected when translated and dropped
 //    otherwise; there is no outcome that passes them to the wire.
 TEST(ListenerReplyPolicy, UntranslatedListenerRepliesAreDroppedNeverPassed)
@@ -625,116 +521,6 @@ TEST(DnsFilterPlan, ListenersThatAreNotRunningGetNoSourcePortFilter)
     EXPECT_EQ(proxy::plan_dns_filters(proxy_mode, {}).size(), 4u);
 }
 
-// 9. Listener replies need DNS work (and lock_) in Proxy mode with a usable proxy, whether or not
-//    a server override is configured: a relay can report another source either way. Direct mode
-//    and Proxy mode without a usable proxy redirect no DNS and need none.
-TEST(DnsReplyRestore, NeededInProxyModeWithAUsableProxy)
-{
-    using proxy::dns_reply_restore_needed;
-    EXPECT_TRUE(dns_reply_restore_needed(proxy_mode, true));
-    EXPECT_FALSE(dns_reply_restore_needed(proxy_mode, false));
-    EXPECT_FALSE(dns_reply_restore_needed(direct, true));
-    EXPECT_FALSE(dns_reply_restore_needed(direct, false));
-}
-
-// A redirected query is tracked whenever it carries a DNS header, with or without a server
-// override. One that is too short to carry a header is still redirected without an override
-// (as before), and dropped with one, because its answer could never be restored.
-TEST(DnsReplyRestore, QueriesAreTrackedWithOrWithoutAnOverride)
-{
-    using proxy::decide_dns_query_tracking;
-    using proxy::dns_query_tracking;
-    EXPECT_EQ(decide_dns_query_tracking(false, true), dns_query_tracking::track);
-    EXPECT_EQ(decide_dns_query_tracking(true, true), dns_query_tracking::track);
-    EXPECT_EQ(decide_dns_query_tracking(false, false), dns_query_tracking::untracked);
-    EXPECT_EQ(decide_dns_query_tracking(true, false), dns_query_tracking::drop);
-}
-
-// 10. Eviction uses insertion order: a refreshed key is not the oldest, the queue of insertion
-//     records stays bounded under repeated refreshes, and inserting into a full table is cheap.
-TEST(DnsUdpOriginTracker, RefreshedKeysAreEvictedByTheirLatestTime)
-{
-    tracker origins{ std::chrono::seconds{ 30 }, 2 };
-    const auto start = clock::now();
-    origins.remember(1, 1, { "a", 53 }, start);
-    origins.remember(2, 1, { "b", 53 }, start + std::chrono::milliseconds{ 1 });
-    origins.remember(1, 1, { "a2", 53 }, start + std::chrono::milliseconds{ 2 }); // refresh: now newest
-    origins.remember(3, 1, { "c", 53 }, start + std::chrono::milliseconds{ 3 });  // evicts key 2
-
-    const auto at = start + std::chrono::milliseconds{ 4 };
-    EXPECT_EQ(origins.resolve(1, 1, at), (endpoint{ "a2", 53 }));
-    EXPECT_FALSE(origins.resolve(2, 1, at).has_value());
-    EXPECT_TRUE(origins.resolve(3, 1, at).has_value());
-    EXPECT_EQ(origins.size(), 2u);
-}
-
-TEST(DnsUdpOriginTracker, InsertionRecordsStayBoundedUnderRepeatedRefreshes)
-{
-    constexpr std::size_t capacity = 64;
-    tracker origins{ std::chrono::seconds{ 30 }, capacity };
-    const auto start = clock::now();
-    for (int i = 0; i < 100000; ++i)
-        origins.remember(static_cast<uint16_t>(i % 8), 7, { "x", 53 }, start + std::chrono::microseconds{ i });
-
-    EXPECT_EQ(origins.size(), 8u);
-    EXPECT_LE(origins.order_records(), 2 * capacity + 16);
-    for (uint16_t port = 0; port < 8; ++port)
-        EXPECT_TRUE(origins.resolve(port, 7, start + std::chrono::seconds{ 1 }).has_value());
-}
-
-TEST(DnsUdpOriginTracker, InsertingIntoAFullTableOfLiveEntriesDoesBoundedWorkPerInsert)
-{
-    constexpr std::size_t capacity = 8192;
-    constexpr uint32_t inserts = 100000;
-    tracker origins{ std::chrono::seconds{ 30 }, capacity };
-    const auto start = clock::now();
-    const auto remember = [&](const uint32_t i)
-    {
-        origins.remember(static_cast<uint16_t>(i >> 16), static_cast<uint16_t>(i), { "s", 53 },
-            start + std::chrono::microseconds{ i });
-    };
-
-    // Fill the table with live entries (nothing expires within the test's time span).
-    for (uint32_t i = 0; i < capacity; ++i)
-        remember(i);
-    ASSERT_EQ(origins.size(), capacity);
-
-    // Every further insert must evict one live entry. Count the entries and records examined:
-    // insertion-order eviction examines a constant amortized number per insert, while a sweep or
-    // a search for the oldest entry examines the whole table (8192) on every insert.
-    //
-    // Limitation: visits() counts work done through the tracker's two iteration helpers, which
-    // every loop over its table and queue uses. The test bounds that counted work; it cannot see a
-    // raw loop added later that bypasses the helpers.
-    const auto before = origins.visits();
-    for (uint32_t i = capacity; i < capacity + inserts; ++i)
-        remember(i);
-    const auto work = origins.visits() - before;
-
-    EXPECT_EQ(origins.size(), capacity);
-    EXPECT_LE(work, 4ull * inserts) << "entries/records examined per insert: " << double(work) / inserts;
-    EXPECT_LE(origins.order_records(), 2 * capacity + 16);
-    // The newest entries survive, the oldest are evicted.
-    const auto newest = capacity + inserts - 1;
-    EXPECT_TRUE(origins.resolve(static_cast<uint16_t>(newest >> 16), static_cast<uint16_t>(newest), start + std::chrono::seconds{ 1 }).has_value());
-    EXPECT_FALSE(origins.resolve(0, 0, start + std::chrono::seconds{ 1 }).has_value());
-}
-
-TEST(DnsUdpOriginTracker, RepeatedRefreshesDoBoundedWork)
-{
-    constexpr std::size_t capacity = 64;
-    constexpr int refreshes = 100000;
-    tracker origins{ std::chrono::seconds{ 30 }, capacity };
-    const auto start = clock::now();
-    const auto before = origins.visits();
-    for (int i = 0; i < refreshes; ++i)
-        origins.remember(static_cast<uint16_t>(i % 8), 7, { "x", 53 }, start + std::chrono::microseconds{ i });
-
-    // Compaction rebuilds the queue from the 8 live entries only after at least `capacity`
-    // stale records have accumulated, so its cost is amortized to well under one visit per call.
-    EXPECT_LE(origins.visits() - before, static_cast<std::uint64_t>(refreshes));
-}
-
 // ------------------------------------------------------------------ listener replies and fragments
 //
 // A fragmented listener reply must not reach the wire, and a later fragment's payload must never
@@ -795,20 +581,6 @@ TEST(ListenerFragmentPolicy, LaterIpv4FragmentsAreNeverReadForPorts)
     EXPECT_TRUE(ipv4_transport_header_present(classify_ipv4_fragment(0x2000)));
     EXPECT_TRUE(ipv4_transport_header_present(classify_ipv4_fragment(0x4000)));
     EXPECT_TRUE(ipv4_transport_header_present(classify_ipv4_fragment(0x0000)));
-}
-
-TEST(ListenerFragmentPolicy, UdpListenerRepliesAreDroppedOnBothPaths)
-{
-    using proxy::decide_udp_listener_reply;
-    using proxy::dns_reply_restore;
-    using proxy::listener_reply_action;
-
-    EXPECT_EQ(decide_udp_listener_reply(dns_reply_restore::unchanged, true), listener_reply_action::revert);
-    EXPECT_EQ(decide_udp_listener_reply(dns_reply_restore::restore, true), listener_reply_action::revert);
-    EXPECT_EQ(decide_udp_listener_reply(dns_reply_restore::unchanged, false), listener_reply_action::drop);
-    // An override answer to no tracked query is dropped even if it could be translated.
-    EXPECT_EQ(decide_udp_listener_reply(dns_reply_restore::drop, true), listener_reply_action::drop);
-    EXPECT_EQ(decide_udp_listener_reply(dns_reply_restore::drop, false), listener_reply_action::drop);
 }
 
 // Listener segments: translated ones are re-injected; those of a connection that was just reset

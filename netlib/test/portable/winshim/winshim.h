@@ -130,8 +130,8 @@ inline PWSTR RtlIpv6AddressToStringW(const in6_addr*, PWSTR s) { if (s) *s = 0; 
 #define IN6ADDR_LOOPBACK_INIT { { { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } } }
 
 // CNdisApi: only the static checksum routines used by the redirect headers. Their definitions
-// are extracted verbatim from ndisapi/ndisapi.cpp by run-portable-tests.sh, so the tests run the
-// product implementations.
+// are extracted verbatim from the ndisapi submodule (external/ndisapi) by run-portable-tests.sh,
+// so the tests run the product implementations.
 struct _INTERMEDIATE_BUFFER;
 class CNdisApi
 {

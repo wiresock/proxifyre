@@ -264,8 +264,7 @@ namespace ndisapi
          * @param port Destination port to forward the packet to (network byte order). If 0, uses proxy_port_.
          * @param socks_destination Optional destination (port in host byte order) written to the
          *        SOCKS5 UDP header instead of the packet's own destination. The IP header still
-         *        records the original destination, so the response can be restored to it. Used
-         *        for the DNS server override.
+         *        records the original destination. Used for the DNS server override.
          * @return True if the packet was translated, false otherwise.
          */
         bool process_client_to_server_packet(INTERMEDIATE_BUFFER& packet, uint16_t port = 0,
@@ -476,54 +475,15 @@ namespace ndisapi
         }
 
         /**
-         * @brief Size of the SOCKS5 UDP header to strip from a relayed datagram, or 0 when the
-         *        datagram must not be translated.
-         *
-         * The relay's header normally has this redirect's address family (ATYP 1 for IPv4, 4 for
-         * IPv6). A header of the other family is rejected: parsing a mismatched layout would hand
-         * the client a garbage source endpoint. When the caller supplies the source to present
-         * (@p source_supplied), the header's own address is not used, so a header of the other
-         * family is accepted and stripped by its real size.
-         *
-         * @param udp_payload The UDP payload: the SOCKS5 UDP header followed by the data.
-         * @param captured Captured bytes available at @p udp_payload.
-         */
-        [[nodiscard]] static std::size_t relay_header_size(const uint8_t* udp_payload, const std::size_t captured,
-            const bool source_supplied) noexcept
-        {
-            constexpr std::size_t prefix_size = 4; // RSV (2), FRAG (1), ATYP (1)
-            if (captured < prefix_size)
-                return 0;
-
-            constexpr uint8_t own_address_type = std::is_same_v<net::ip_address_v4, std::decay_t<T>> ? 1 : 4;
-            const auto address_type = udp_payload[3];
-            if (address_type == own_address_type)
-                return sizeof(proxy::socks5_udp_header<T>);
-            if (!source_supplied)
-                return 0;
-            if (address_type == 1)
-                return sizeof(proxy::socks5_udp_header<net::ip_address_v4>);
-            if (address_type == 4)
-                return sizeof(proxy::socks5_udp_header<net::ip_address_v6>);
-            return 0;
-        }
-
-        /**
          * @brief Processes an S2C packet, restoring the original client source port and remote peer.
          *
          * Modifies the packet in-place, removes the SOCKS5 UDP header, and updates the source/destination
          * addresses and ports as needed.
          *
          * @param packet S2C network packet.
-         * @param source_override Optional source endpoint (port in host byte order) presented to
-         *        the client instead of the one in the relay's SOCKS5 UDP header. Used to restore
-         *        the server a DNS client originally queried. Because the header's own address is
-         *        then not used, a header of the other address family is accepted and stripped by
-         *        its real size; without it such a header is rejected.
          * @return True if the packet was translated, false otherwise.
          */
-        bool process_server_to_client_packet(INTERMEDIATE_BUFFER& packet,
-            const std::optional<net::ip_endpoint<T>>& source_override = std::nullopt)
+        bool process_server_to_client_packet(INTERMEDIATE_BUFFER& packet)
         {
             if constexpr (auto* const eth_header = reinterpret_cast<ether_header_ptr>(packet.m_IBuffer); std::is_same_v<
                 net::ip_address_v4, std::decay_t<T>>)
@@ -555,29 +515,26 @@ namespace ndisapi
                 // the received datagram. Without these guards a short/forged length makes
                 // udp_payload_size - socks5_header_size underflow into a huge value and the
                 // memmove writes far out of bounds. Mirrors the IPv6 detach guards.
+                constexpr auto socks5_header_size = sizeof(proxy::socks5_udp_header<T>);
                 const auto* const packet_end = packet.m_IBuffer + packet.m_Length;
                 const auto* const udp_header_bytes = reinterpret_cast<const uint8_t*>(udp_header);
-                if (udp_header_bytes > packet_end ||
-                    static_cast<size_t>(packet_end - udp_header_bytes) < sizeof(udphdr))
-                {
-                    return false;
-                }
-
-                // The SOCKS5 UDP header to strip: this relay's family (ATYP 1), or, only when the
-                // caller supplies the source to present, the other family's (relay_header_size()).
-                // A mismatched header is otherwise rejected, before any mutation.
                 const auto udp_length = ntohs(udp_header->length);
-                const auto captured_udp_size = static_cast<size_t>(packet_end - udp_header_bytes);
-                const auto socks5_header_size = relay_header_size(reinterpret_cast<const uint8_t*>(udp_header + 1),
-                    captured_udp_size - sizeof(udphdr), source_override.has_value());
-                if (socks5_header_size == 0 ||
+                if (udp_header_bytes > packet_end ||
+                    static_cast<size_t>(packet_end - udp_header_bytes) < sizeof(udphdr) ||
                     udp_length < sizeof(udphdr) + socks5_header_size ||
-                    udp_length > captured_udp_size ||
+                    udp_length > static_cast<size_t>(packet_end - udp_header_bytes) ||
                     packet.m_Length < socks5_header_size ||
                     ntohs(ip_header->ip_len) < socks5_header_size)
                 {
                     return false;
                 }
+
+                // Reject a reply whose SOCKS5 UDP header ATYP doesn't match this relay's family
+                // (IPv4 = 1): parsing a mismatched layout (e.g. a 16-byte IPv6 address as IPv4)
+                // would hand the client a spoofed/garbage source endpoint. The bounds check above
+                // guarantees the SOCKS5 header is fully captured. Done before any mutation.
+                if (reinterpret_cast<const proxy::socks5_udp_header<T>*>(udp_header + 1)->address_type != 1)
+                    return false;
 
                 NETLIB_DEBUG(
                     "S2C: {}:{} -> {}:{}",
@@ -595,24 +552,16 @@ namespace ndisapi
                 auto* udp_payload = reinterpret_cast<uint8_t*>(udp_header + 1);
                 auto* socks5_udp_header_ptr = reinterpret_cast<proxy::socks5_udp_header<T>*>(udp_payload);
 
-                if (source_override)
-                {
-                    ip_header->ip_src = source_override->ip;
-                    udp_header->th_sport = htons(source_override->port);
-                }
-                else
-                {
-                    ip_header->ip_src = socks5_udp_header_ptr->dest_address;
-                    udp_header->th_sport = socks5_udp_header_ptr->dest_port;
-                }
+                ip_header->ip_src = socks5_udp_header_ptr->dest_address;
+                udp_header->th_sport = socks5_udp_header_ptr->dest_port;
 
                 const auto udp_payload_size = static_cast<size_t>(udp_length - sizeof(udphdr));
                 memmove(udp_payload, udp_payload + socks5_header_size,
                     udp_payload_size - socks5_header_size);
 
-                packet.m_Length -= static_cast<uint32_t>(socks5_header_size);
-                ip_header->ip_len = htons(static_cast<uint16_t>(ntohs(ip_header->ip_len) - socks5_header_size));
-                udp_header->length = htons(static_cast<uint16_t>(ntohs(udp_header->length) - socks5_header_size));
+                packet.m_Length -= sizeof(proxy::socks5_udp_header<T>);
+                ip_header->ip_len = htons(ntohs(ip_header->ip_len) - sizeof(proxy::socks5_udp_header<T>));
+                udp_header->length = htons(ntohs(udp_header->length) - sizeof(proxy::socks5_udp_header<T>));
 
                 CNdisApi::RecalculateUDPChecksum(&packet);
                 CNdisApi::RecalculateIPChecksum(&packet);
@@ -657,6 +606,7 @@ namespace ndisapi
                     ntohs(udp_header->th_dport));
 
                 // Remove SOCK5 UDP header here
+                constexpr auto socks5_header_size = sizeof(proxy::socks5_udp_header<T>);
                 const auto* const packet_end = packet.m_IBuffer + packet.m_Length;
                 const auto* const udp_header_bytes = reinterpret_cast<const uint8_t*>(udp_header);
                 if (udp_header_bytes > packet_end ||
@@ -665,15 +615,9 @@ namespace ndisapi
                     return false;
                 }
 
-                // The SOCKS5 UDP header to strip: this relay's family (ATYP 4), or, only when the
-                // caller supplies the source to present, the other family's (relay_header_size()).
-                // A mismatched header is otherwise rejected, before any mutation.
                 const auto udp_length = ntohs(udp_header->length);
                 const auto captured_udp_size = static_cast<size_t>(packet_end - udp_header_bytes);
-                const auto socks5_header_size = relay_header_size(reinterpret_cast<const uint8_t*>(udp_header + 1),
-                    captured_udp_size - sizeof(udphdr), source_override.has_value());
-                if (socks5_header_size == 0 ||
-                    udp_length < sizeof(udphdr) + socks5_header_size ||
+                if (udp_length < sizeof(udphdr) + socks5_header_size ||
                     udp_length > captured_udp_size ||
                     packet.m_Length < socks5_header_size ||
                     ntohs(ip_header->ip6_len) < socks5_header_size)
@@ -684,30 +628,28 @@ namespace ndisapi
                 auto* udp_payload = reinterpret_cast<uint8_t*>(udp_header + 1);
                 auto* socks5_udp_header_ptr = reinterpret_cast<proxy::socks5_udp_header<T>*>(udp_payload);
 
+                // Reject a reply whose SOCKS5 UDP header ATYP doesn't match this relay's family
+                // (IPv6 = 4); see the IPv4 path. The bounds check above guarantees the header is
+                // fully captured. Done before any mutation.
+                if (socks5_udp_header_ptr->address_type != 4)
+                    return false;
+
                 // Swap Ethernet addresses
                 std::swap(eth_header->h_dest, eth_header->h_source);
 
                 // Swap IP addresses
                 std::swap(ip_header->ip6_dst, ip_header->ip6_src);
 
-                if (source_override)
-                {
-                    ip_header->ip6_src = source_override->ip;
-                    udp_header->th_sport = htons(source_override->port);
-                }
-                else
-                {
-                    ip_header->ip6_src = socks5_udp_header_ptr->dest_address;
-                    udp_header->th_sport = socks5_udp_header_ptr->dest_port;
-                }
+                ip_header->ip6_src = socks5_udp_header_ptr->dest_address;
+                udp_header->th_sport = socks5_udp_header_ptr->dest_port;
 
                 const auto udp_payload_size = static_cast<size_t>(udp_length - sizeof(udphdr));
                 memmove(udp_payload, udp_payload + socks5_header_size,
                     udp_payload_size - socks5_header_size);
 
-                packet.m_Length -= static_cast<uint32_t>(socks5_header_size);
-                ip_header->ip6_len = htons(static_cast<uint16_t>(ntohs(ip_header->ip6_len) - socks5_header_size));
-                udp_header->length = htons(static_cast<uint16_t>(ntohs(udp_header->length) - socks5_header_size));
+                packet.m_Length -= socks5_header_size;
+                ip_header->ip6_len = htons(ntohs(ip_header->ip6_len) - socks5_header_size);
+                udp_header->length = htons(ntohs(udp_header->length) - socks5_header_size);
 
                 // Recalculate checksum
                 net::ipv6_helper::recalculate_tcp_udp_checksum(&packet);

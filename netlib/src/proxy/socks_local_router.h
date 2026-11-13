@@ -255,6 +255,17 @@ namespace proxy
         std::vector<net::ip_endpoint<net::ip_address_v4>> proxy_upstreams_;
 
         /**
+         * @brief SOCKS5 credentials and upstream transport options of each proxy, index-aligned
+         *        with proxy_servers_. Used to open the DNS relay's shared UDP association.
+         */
+        struct proxy_session_settings
+        {
+            std::optional<std::pair<std::string, std::string>> credentials;
+            socks5_upstream_options upstream_options;
+        };
+        std::vector<proxy_session_settings> proxy_session_settings_;
+
+        /**
          * @brief Global DNS routing state. Written only by set_dns_routing() while the router is
          *        inactive (under lifecycle_mutex_ and lock_); read by the packet handlers under
          *        lock_.
@@ -263,14 +274,6 @@ namespace proxy
         std::optional<size_t> dns_proxy_id_;
         std::optional<net::ip_endpoint<net::ip_address_v4>> dns_server_override_v4_;
         std::optional<net::ip_endpoint<net::ip_address_v6>> dns_server_override_v6_;
-
-        /**
-         * @brief True when replies from the DNS proxy's UDP listener may need their source
-         *        restored (dns_reply_restore_needed()): in Proxy mode with a usable DNS proxy.
-         *        Lets every listener reply skip lock_ in Direct mode. Written by
-         *        set_dns_routing() while the router is inactive.
-         */
-        std::atomic_bool dns_reply_restore_active_{ false };
 
         /**
          * @brief Set once any SOCKS5 server has returned a UDP relay endpoint on port 53, before
@@ -282,12 +285,13 @@ namespace proxy
         std::atomic_bool udp_relay_on_dns_port_{ false };
 
         /**
-         * @brief Original server of each UDP DNS query redirected to the DNS proxy, so the answer
-         *        can be restored to the server the resolver actually queried whatever source the
-         *        relay reports (with or without a server override).
+         * @brief The DNS proxy's UDP path: one SOCKS5 UDP association per address family shared
+         *        by every UDP DNS query (socks5_dns_udp_relay.h). Created by start() in Proxy mode
+         *        when the selected proxy carries UDP for that family, destroyed by stop(). Their
+         *        listener ports are the DNS proxy's UDP listeners. Guarded by lock_.
          */
-        dns_udp_origin_tracker<net::ip_endpoint<net::ip_address_v4>> dns_udp_origins_v4_;
-        dns_udp_origin_tracker<net::ip_endpoint<net::ip_address_v6>> dns_udp_origins_v6_;
+        std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v4>> dns_udp_relay_v4_;
+        std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v6>> dns_udp_relay_v6_;
 
         /**
          * @brief Count of DNS packets dropped by the Proxy-mode policy since the last
@@ -617,12 +621,12 @@ namespace proxy
         }
 
         template <typename AddrT>
-        auto& dns_udp_origins_for() noexcept
+        const auto& dns_udp_relay_for() const noexcept
         {
             if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
-                return dns_udp_origins_v4_;
+                return dns_udp_relay_v4_;
             else
-                return dns_udp_origins_v6_;
+                return dns_udp_relay_v6_;
         }
 
         template <typename AddrT>
@@ -818,6 +822,8 @@ namespace proxy
                     GetLastError());
             }
 
+            stop_dns_udp_relays();
+
             std::vector<std::pair<s5_tcp_proxy_server*, s5_udp_proxy_server*>> proxies_to_stop;
             std::vector<std::pair<s5_tcp_proxy_server_v6*, s5_udp_proxy_server_v6*>> proxies_to_stop_v6;
             {
@@ -989,8 +995,7 @@ namespace proxy
             // Proxy-mode DNS must take precedence over the LAN-bypass PASS filters: (re)install
             // the front-of-table REDIRECT filters with the current listener ports. If that fails,
             // fail start() instead of running with DNS able to bypass the policy.
-            dns_udp_origins_v4_.clear();
-            dns_udp_origins_v6_.clear();
+            start_dns_udp_relays();
             dns_blocked_packets_.store(0, std::memory_order_relaxed);
             untranslated_listener_replies_.store(0, std::memory_order_relaxed);
             untranslated_listener_reply_logged_.clear(std::memory_order_relaxed);
@@ -1102,6 +1107,9 @@ namespace proxy
             {
                 udp_redirect_v6_->stop();  // This should join the cleanup thread
             }
+
+            // Step 3b: Stop the DNS relays (their threads are joined without lock_ held).
+            stop_dns_udp_relays();
 
             // Step 4: Stop all proxy servers WITHOUT holding lock_
             // CRITICAL: We must NOT hold lock_ while calling stop() or during destruction
@@ -1430,6 +1438,7 @@ namespace proxy
                 // registration still works on hosts where IPv6 sockets are disabled.
                 std::unique_ptr<s5_tcp_proxy_server> socks_tcp_proxy_server;
                 std::unique_ptr<s5_udp_proxy_server> socks_udp_proxy_server;
+                proxy_session_settings session_settings{ cred_pair, upstream_options };
 
                 if (ipv4_destinations_enabled)
                 {
@@ -1573,6 +1582,7 @@ namespace proxy
                     proxy_protocols_.reserve(proxy_protocols_.size() + 1);
                     proxy_address_families_.reserve(proxy_address_families_.size() + 1);
                     proxy_upstreams_.reserve(proxy_upstreams_.size() + 1);
+                    proxy_session_settings_.reserve(proxy_session_settings_.size() + 1);
                 }
 
                 // Install PASS filters only for upstream addresses selected by
@@ -1690,6 +1700,7 @@ namespace proxy
                 proxy_protocols_.push_back(protocols);
                 proxy_address_families_.push_back(address_families);
                 proxy_upstreams_.push_back(*proxy_endpoint->ipv4);
+                proxy_session_settings_.push_back(std::move(session_settings));
 
                 return proxy_servers_.size() - 1; // Return the index of the added proxy server
             }
@@ -1827,7 +1838,6 @@ namespace proxy
             dns_proxy_id_.reset();
             dns_server_override_v4_.reset();
             dns_server_override_v6_.reset();
-            dns_reply_restore_active_.store(false, std::memory_order_release);
 
             if (settings.mode == dns_routing_mode::direct)
             {
@@ -1883,7 +1893,6 @@ namespace proxy
             }
 
             dns_proxy_id_ = proxy_id;
-            dns_reply_restore_active_.store(dns_reply_restore_needed(dns_mode_, true), std::memory_order_release);
 
             const auto upstream = proxy_id < proxy_upstreams_.size()
                 ? proxy_upstreams_[proxy_id].to_string()
@@ -2159,8 +2168,11 @@ namespace proxy
             // Locks the proxy servers list for reading.
             std::shared_lock lock(lock_);
 
-            // Checks each proxy server to see if the given port number is being used.
-            // Returns true if any server is using the port, false otherwise.
+            // Checks each proxy server, and the DNS relay, to see if the given port number is
+            // being used. Returns true if any of them is using the port, false otherwise.
+            if (dns_udp_relay_v4_ && dns_udp_relay_v4_->listener_port() == port)
+                return true;
+
             return std::ranges::any_of(std::as_const(proxy_servers_), [port](auto& proxy)
             {
                 if (proxy.second && proxy.second->proxy_port() == port)
@@ -2186,11 +2198,15 @@ namespace proxy
         }
 
         /**
-         * IPv6 counterpart of is_udp_proxy_port(): checks the IPv6 UDP proxy listeners.
+         * IPv6 counterpart of is_udp_proxy_port(): checks the IPv6 UDP proxy listeners and the
+         * IPv6 DNS relay.
          */
         bool is_udp_proxy_port_v6(const uint16_t port)
         {
             std::shared_lock lock(lock_);
+
+            if (dns_udp_relay_v6_ && dns_udp_relay_v6_->listener_port() == port)
+                return true;
 
             return std::ranges::any_of(std::as_const(proxy_servers_v6_), [port](auto& proxy)
             {
@@ -2214,20 +2230,27 @@ namespace proxy
             if (!dns_proxy_id_)
                 return std::nullopt;
 
-            const auto listener = [id = *dns_proxy_id_](const auto& servers) -> std::optional<uint16_t>
+            if constexpr (Transport == dns_transport::udp)
             {
-                if (id >= servers.size())
-                    return std::nullopt;
-                if constexpr (Transport == dns_transport::tcp)
-                    return servers[id].first ? std::optional<uint16_t>{ servers[id].first->proxy_port() } : std::nullopt;
-                else
-                    return servers[id].second ? std::optional<uint16_t>{ servers[id].second->proxy_port() } : std::nullopt;
-            };
-
-            if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
-                return listener(proxy_servers_);
+                // UDP DNS goes through the DNS relay's shared association, not the proxy's
+                // per-source-port UDP listener.
+                const auto& relay = dns_udp_relay_for<AddrT>();
+                return relay ? std::optional<uint16_t>{ relay->listener_port() } : std::nullopt;
+            }
             else
-                return listener(proxy_servers_v6_);
+            {
+                const auto listener = [id = *dns_proxy_id_](const auto& servers) -> std::optional<uint16_t>
+                {
+                    if (id >= servers.size() || !servers[id].first)
+                        return std::nullopt;
+                    return servers[id].first->proxy_port();
+                };
+
+                if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
+                    return listener(proxy_servers_);
+                else
+                    return listener(proxy_servers_v6_);
+            }
         }
 
         /**
@@ -2457,12 +2480,13 @@ namespace proxy
         /**
          * @brief Handles an outbound UDP datagram addressed to port 53 according to @p route.
          *
-         * In Proxy mode the datagram is redirected to the DNS proxy's local UDP listener via the
+         * In Proxy mode the datagram is redirected to the DNS relay's local listener via the
          * existing socks5_udp_local_redirect, which also writes the SOCKS5 UDP header. With a
          * server override the header carries the override while the IP header keeps the
-         * original destination. The server the resolver addressed is remembered, with or without
-         * an override, so the answer can be restored to it whatever source the relay reports.
-         * Anything that cannot be redirected is dropped, never passed.
+         * original destination. The relay sends the query through its shared SOCKS5 association
+         * and answers the client as the server it queried (socks5_dns_udp_relay.h). The source
+         * port is recorded in the UDP source-port mapper, which is what authorizes the relay to
+         * accept datagrams from it. Anything that cannot be redirected is dropped, never passed.
          */
         template <typename AddrT>
         packet_filter::packet_action handle_dns_udp(netlib::ndisapi::intermediate_buffer& buffer,
@@ -2488,21 +2512,12 @@ namespace proxy
                 return packet_filter::packet_action{ action_type::drop };
             }
 
-            // The relay may report a source other than the server the resolver addressed (always,
-            // with a server override), and the resolver accepts an answer only from that server.
-            // Remember it so the answer can be restored to it (decide_dns_query_tracking()).
-            const auto message_id = dns_message_id(payload, payload_size);
-            const auto tracking = decide_dns_query_tracking(route.server_override.has_value(), message_id.has_value());
-            if (tracking == dns_query_tracking::drop)
+            // The DNS relay multiplexes queries by message ID (socks5_dns_udp_relay.h); a datagram
+            // too short to carry a DNS header cannot be relayed.
+            if (!dns_message_id(payload, payload_size))
             {
-                note_dns_block<AddrT, dns_transport::udp>(dns_block_reason::redirect_failed);
+                note_dns_block<AddrT, dns_transport::udp>(dns_block_reason::not_dns_message);
                 return packet_filter::packet_action{ action_type::drop };
-            }
-
-            if (tracking == dns_query_tracking::track)
-            {
-                dns_udp_origins_for<AddrT>().remember(source_port, *message_id,
-                    net::ip_endpoint<AddrT>{ destination, destination_port });
             }
 
             auto& redirect = udp_redirect_for<AddrT>();
@@ -2591,53 +2606,6 @@ namespace proxy
         }
 
         /**
-         * @brief Determines how a reply leaving local UDP proxy listener @p listener_port toward
-         *        client port @p client_port is presented, given the relayed SOCKS5 UDP datagram
-         *        in @p socks_payload. Only answers to tracked queries relayed through the DNS
-         *        proxy's listener are restored, with or without a server override (see
-         *        classify_dns_reply()); other traffic through the same proxy is unchanged.
-         */
-        template <typename AddrT>
-        std::pair<dns_reply_restore, std::optional<net::ip_endpoint<AddrT>>> dns_udp_reply_origin(
-            const uint16_t listener_port, const uint16_t client_port,
-            const uint8_t* socks_payload, const size_t socks_payload_size)
-        {
-            // Lock-free early exit for every listener reply in Direct mode and when no DNS proxy
-            // is usable.
-            if (!dns_reply_restore_active_.load(std::memory_order_acquire))
-                return { dns_reply_restore::unchanged, std::nullopt };
-
-            // Only replies from the DNS proxy's own UDP listener can answer a tracked query. The
-            // server override, when one is configured for this family, is optional here: tracked
-            // answers are restored with or without it.
-            std::optional<net::ip_endpoint<AddrT>> server_override;
-            {
-                std::shared_lock lock(lock_);
-                if (dns_mode_ != dns_routing_mode::proxy)
-                    return { dns_reply_restore::unchanged, std::nullopt };
-
-                if (dns_listener_port_locked<AddrT, dns_transport::udp>() != listener_port)
-                    return { dns_reply_restore::unchanged, std::nullopt };
-
-                server_override = dns_server_override_for<AddrT>();
-            }
-
-            constexpr auto v4 = std::is_same_v<AddrT, net::ip_address_v4>;
-            using raw_address_t = std::conditional_t<v4, in_addr, in6_addr>;
-            const raw_address_t* raw = nullptr;
-            uint16_t override_port = 0;
-            if (server_override)
-            {
-                raw = &server_override->ip;
-                override_port = server_override->port;
-            }
-
-            return classify_dns_reply(socks_payload, socks_payload_size,
-                static_cast<uint8_t>(v4 ? 1 : 4), reinterpret_cast<const uint8_t*>(raw), sizeof(raw_address_t),
-                override_port, client_port, dns_udp_origins_for<AddrT>());
-        }
-
-        /**
          * @brief Bytes of the UDP payload of an IPv4/IPv6 frame that are actually captured.
          */
         static size_t captured_udp_payload_size(const netlib::ndisapi::intermediate_buffer& buffer, const void* udp_header) noexcept
@@ -2651,6 +2619,123 @@ namespace proxy
             const auto captured = static_cast<size_t>(end - start);
             const auto udp_size = std::min(declared, captured);
             return udp_size > sizeof(udphdr) ? udp_size - sizeof(udphdr) : 0;
+        }
+
+        /**
+         * @brief The IPv4-mapped IPv6 form of an IPv4 SOCKS5 server endpoint, which IPv6 sockets
+         *        use to reach it (as the proxy's IPv6 listeners do; see add_socks5_proxy()).
+         */
+        static net::ip_endpoint<net::ip_address_v6> ipv4_mapped(const net::ip_endpoint<net::ip_address_v4>& upstream)
+        {
+            in6_addr mapped{};
+            mapped.u.Byte[10] = 0xff;
+            mapped.u.Byte[11] = 0xff;
+            const in_addr address = upstream.ip;
+            memcpy(&mapped.u.Byte[12], &address, sizeof(address));
+            return { net::ip_address_v6{ mapped }, upstream.port };
+        }
+
+        /**
+         * @brief Creates and starts a DNS relay for family @p AddrT through SOCKS5 server
+         *        @p upstream. Its listener accepts only source ports the router recently redirected
+         *        (the UDP source-port mapper), and every relay endpoint it is given is reported to
+         *        the recursion guard. Returns null when the relay cannot be started.
+         */
+        template <typename AddrT>
+        std::unique_ptr<socks5_dns_udp_relay<AddrT>> make_dns_udp_relay(const net::ip_endpoint<AddrT>& upstream,
+            const proxy_session_settings& settings)
+        {
+            try
+            {
+                auto relay = std::make_unique<socks5_dns_udp_relay<AddrT>>(upstream, settings.credentials,
+                    settings.upstream_options,
+                    [this](const uint16_t port)
+                    {
+                        auto& mapper = udp_mapper_for<AddrT>();
+                        std::scoped_lock lock(udp_mapper_lock_for<AddrT>());
+                        const auto it = mapper.find(port);
+                        return it != mapper.end() &&
+                            std::chrono::steady_clock::now() - it->second <= udp_mapper_entry_ttl_;
+                    },
+                    [this](const net::ip_endpoint<AddrT>& relay_endpoint)
+                    {
+                        note_udp_relay_endpoint(relay_endpoint.port);
+                    },
+                    log_level_, log_stream_);
+
+                if (relay->start())
+                    return relay;
+            }
+            catch (const std::exception& e)
+            {
+                NETLIB_LOG(log_level::error, "DNS routing: failed to create the {} DNS relay: {}",
+                    std::is_same_v<AddrT, net::ip_address_v4> ? "IPv4" : "IPv6", e.what());
+                return nullptr;
+            }
+
+            NETLIB_LOG(log_level::error, "DNS routing: the {} DNS relay could not be started; UDP DNS of this "
+                "family is blocked.", std::is_same_v<AddrT, net::ip_address_v4> ? "IPv4" : "IPv6");
+            return nullptr;
+        }
+
+        /**
+         * @brief Starts the DNS proxy's UDP relays (one shared SOCKS5 UDP association per address
+         *        family) in Proxy mode, for the families the selected proxy carries over UDP. The
+         *        IPv6 relay mirrors the proxy's IPv6 UDP listener and runs only while it does.
+         *        Called from start() under lifecycle_mutex_, before the driver filters are
+         *        installed, so the filter plan uses the relays' listener ports. A relay that cannot
+         *        be started leaves UDP DNS of its family blocked, never direct.
+         */
+        void start_dns_udp_relays()
+        {
+            std::optional<net::ip_endpoint<net::ip_address_v4>> upstream;
+            proxy_session_settings settings;
+            bool ipv4 = false;
+            bool ipv6 = false;
+            {
+                std::shared_lock lock(lock_);
+                if (dns_mode_ != dns_routing_mode::proxy || !dns_proxy_id_)
+                    return;
+
+                const auto id = *dns_proxy_id_;
+                if (id >= proxy_upstreams_.size() || id >= proxy_session_settings_.size() ||
+                    id >= proxy_protocols_.size() || !protocol_supports_udp(proxy_protocols_[id]))
+                    return;
+
+                upstream = proxy_upstreams_[id];
+                settings = proxy_session_settings_[id];
+                const auto families = id < proxy_address_families_.size()
+                    ? proxy_address_families_[id]
+                    : supported_address_families::all;
+                ipv4 = family_supports_ipv4(families);
+                ipv6 = family_supports_ipv6(families) && id < proxy_servers_v6_.size() && proxy_servers_v6_[id].second;
+            }
+
+            auto relay_v4 = ipv4 ? make_dns_udp_relay<net::ip_address_v4>(*upstream, settings) : nullptr;
+            auto relay_v6 = ipv6 ? make_dns_udp_relay<net::ip_address_v6>(ipv4_mapped(*upstream), settings) : nullptr;
+
+            std::unique_lock lock(lock_);
+            dns_udp_relay_v4_ = std::move(relay_v4);
+            dns_udp_relay_v6_ = std::move(relay_v6);
+        }
+
+        /**
+         * @brief Stops and destroys the DNS relays. Their threads are joined without lock_ held.
+         */
+        void stop_dns_udp_relays()
+        {
+            std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v4>> relay_v4;
+            std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v6>> relay_v6;
+            {
+                std::unique_lock lock(lock_);
+                relay_v4 = std::move(dns_udp_relay_v4_);
+                relay_v6 = std::move(dns_udp_relay_v6_);
+            }
+
+            if (relay_v4)
+                relay_v4->stop();
+            if (relay_v6)
+                relay_v6->stop();
         }
 
         /**
@@ -2763,19 +2848,14 @@ namespace proxy
             const auto fragment = classify_ipv4_fragment(ntohs(ip_header->ip_off));
             const bool has_ports = ipv4_transport_header_present(fragment);
 
-            // If the packet is from a known proxy port, process for server-to-client redirection.
-            // Answers to tracked DNS queries are presented as coming from the server the resolver
-            // originally queried.
+            // If the packet is from a local UDP listener (a proxy's or the DNS relay's), process
+            // for server-to-client redirection. The DNS relay already names the server the client
+            // queried in the SOCKS5 header, so its answers need nothing more.
             if (has_ports && is_udp_proxy_port(ntohs(udp_header->th_sport)))
             {
-                const auto [restore, origin] = dns_udp_reply_origin<net::ip_address_v4>(
-                    ntohs(udp_header->th_sport), ntohs(udp_header->th_dport),
-                    reinterpret_cast<const uint8_t*>(udp_header + 1), captured_udp_payload_size(buffer, udp_header));
-
                 // A listener reply never belongs on the wire: drop it when it cannot be translated.
-                const bool translated = restore != dns_reply_restore::drop &&
-                    udp_redirect_->process_server_to_client_packet(buffer, origin);
-                if (decide_udp_listener_reply(restore, translated) == listener_reply_action::revert)
+                const bool translated = udp_redirect_->process_server_to_client_packet(buffer);
+                if (decide_listener_reply(translated) == listener_reply_action::revert)
                 {
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
@@ -3133,18 +3213,13 @@ namespace proxy
 
             const auto* const udp_header = static_cast<udphdr_ptr>(transport);
 
-            // If the packet is from a known proxy port, process for server-to-client redirection
-            // (restoring the original server of answers to tracked DNS queries, as on the IPv4 path).
+            // If the packet is from a local UDP listener (a proxy's or the DNS relay's), process
+            // for server-to-client redirection, as on the IPv4 path.
             if (is_udp_proxy_port_v6(ntohs(udp_header->th_sport)))
             {
-                const auto [restore, origin] = dns_udp_reply_origin<net::ip_address_v6>(
-                    ntohs(udp_header->th_sport), ntohs(udp_header->th_dport),
-                    reinterpret_cast<const uint8_t*>(udp_header + 1), captured_udp_payload_size(buffer, udp_header));
-
                 // A listener reply never belongs on the wire: drop it when it cannot be translated.
-                const bool translated = restore != dns_reply_restore::drop &&
-                    udp_redirect_v6_->process_server_to_client_packet(buffer, origin);
-                if (decide_udp_listener_reply(restore, translated) == listener_reply_action::revert)
+                const bool translated = udp_redirect_v6_->process_server_to_client_packet(buffer);
+                if (decide_listener_reply(translated) == listener_reply_action::revert)
                 {
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
@@ -3558,8 +3633,6 @@ namespace proxy
                     }
 
                     // Expire DNS answer-origin mappings for queries that were never answered.
-                    dns_udp_origins_v4_.sweep(now);
-                    dns_udp_origins_v6_.sweep(now);
                 }
 
                 // Report Proxy-mode DNS drops and untranslatable listener replies at the same

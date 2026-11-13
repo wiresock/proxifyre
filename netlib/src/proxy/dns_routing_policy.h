@@ -3,22 +3,18 @@
 // Global DNS routing policy used by socks_local_router's packet handlers.
 //
 // Everything in this header is deliberately free of Windows, driver, and socket types so the
-// routing decisions, the DNS server override syntax, and the UDP response-origin bookkeeping
+// routing decisions, the DNS server override syntax, and the parsing the DNS relay relies on
 // can be unit tested on any platform without the Windows Packet Filter driver. The router
 // supplies already-parsed packet fields and the state of the selected proxy; these helpers
 // return what to do with the packet.
 
 #include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <iterator>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -60,6 +56,7 @@ namespace proxy
                                   ///< or a TCP segment of a connection opened before ProxiFyre started)
         upstream_sender_unknown,  ///< addressed to a SOCKS5 server, and its sender could not be resolved
         fragmented,               ///< the first fragment of a fragmented datagram addressed to port 53
+        not_dns_message,          ///< a UDP datagram too short for a DNS header: it cannot be relayed
         count
     };
 
@@ -131,10 +128,11 @@ namespace proxy
      * ProxiFyre's TCP traffic to a SOCKS5 server goes to its configured port, so for TCP the
      * destination match (address and port 53) already implies a server configured on port 53.
      * The only ProxiFyre UDP traffic to a SOCKS5 server's address that can reach the recursion
-     * guard goes to the relay endpoint returned by UDP ASSOCIATE (the local listener's replies,
-     * which can also be addressed to a SOCKS5 host, are handled as listener replies before any
-     * DNS decision), so for UDP the packet can be ProxiFyre's own only if a server has returned
-     * a relay on port 53. Otherwise it cannot be, and it follows the DNS policy
+     * guard goes to relay endpoints returned by UDP ASSOCIATE, for the per-port UDP proxy and
+     * for the DNS relay's shared association alike (the local listeners' replies, which can also
+     * be addressed to a SOCKS5 host, are handled as listener replies before any DNS decision),
+     * so for UDP the packet can be ProxiFyre's own only if a server has returned a relay on
+     * port 53. Otherwise it cannot be, and it follows the DNS policy
      * with no sender lookup and no deferral, which also removes any dependence on the cached
      * connection table.
      *
@@ -213,10 +211,12 @@ namespace proxy
             return "the DNS server override belongs to the other address family";
         case dns_block_reason::redirect_failed:
             return "the packet could not be redirected to the DNS proxy (fragmented, oversized, "
-                "not a DNS message, or part of a TCP connection opened before ProxiFyre started)";
+                "or part of a TCP connection opened before ProxiFyre started)";
         case dns_block_reason::fragmented:
             return "the datagram is fragmented and cannot be redirected through the DNS proxy; only its first "
                 "fragment, which carries the port, is dropped";
+        case dns_block_reason::not_dns_message:
+            return "the UDP datagram is too short to be a DNS message, so the DNS proxy cannot relay it";
         case dns_block_reason::upstream_sender_unknown:
             return "the packet is addressed to a configured SOCKS5 server and its sending process could not be "
                 "resolved, so it cannot be identified as ProxiFyre's own traffic";
@@ -638,257 +638,6 @@ namespace proxy
         return static_cast<uint16_t>((static_cast<uint16_t>(payload[0]) << 8) | payload[1]);
     }
 
-    /**
-     * @brief Remembers, for UDP DNS queries redirected to the DNS proxy, which server the
-     *        application originally addressed.
-     *
-     * The requesting resolver only accepts an answer from the server it queried, but the SOCKS5
-     * relay may report another source: always when a server override is configured (it answers
-     * from the override server), and for some relays even without one. Each redirected query
-     * records (client source port, DNS message ID) -> original server endpoint;
-     * the response carrying the same client port and message ID is restored to that endpoint
-     * before it is delivered. Entries expire after @p ttl and the table is bounded, so it cannot
-     * grow without limit under a flood of queries. Entries are not consumed by a lookup so that
-     * duplicate answers to a retransmitted query are restored consistently.
-     *
-     * Thread-safe.
-     *
-     * @tparam Endpoint Original server endpoint type (copyable).
-     */
-    template <typename Endpoint>
-    class dns_udp_origin_tracker
-    {
-    public:
-        using clock = std::chrono::steady_clock;
-
-        explicit dns_udp_origin_tracker(const std::chrono::seconds ttl = std::chrono::seconds{ 30 },
-            const std::size_t capacity = 8192) noexcept
-            : ttl_(ttl), capacity_(std::max<std::size_t>(capacity, 1))
-        {
-        }
-
-        /**
-         * @brief Records the original server of a query sent from @p client_port with
-         *        @p message_id. Re-remembering a key refreshes its time.
-         *
-         * Runs on the packet thread, so it costs amortized O(1) even when the table is full of
-         * live entries: expired and then oldest entries are found at the front of an
-         * insertion-ordered queue instead of by scanning the table.
-         */
-        void remember(const uint16_t client_port, const uint16_t message_id, const Endpoint& original,
-            const clock::time_point now = clock::now())
-        {
-            std::scoped_lock lock(lock_);
-            const auto key = make_key(client_port, message_id);
-
-            if (const auto it = entries_.find(key); it != entries_.end())
-            {
-                // The key's earlier queue record becomes stale; it is skipped when it reaches
-                // the front.
-                it->second = entry{ now, original };
-                order_.push_back({ key, now });
-                compact_if_needed_locked();
-                return;
-            }
-
-            if (entries_.size() >= capacity_)
-            {
-                expire_front_locked(now);
-                if (entries_.size() >= capacity_)
-                    evict_oldest_locked();
-            }
-
-            entries_.emplace(key, entry{ now, original });
-            order_.push_back({ key, now });
-            compact_if_needed_locked();
-        }
-
-        /// Returns the original server for a response to @p client_port with @p message_id.
-        [[nodiscard]] std::optional<Endpoint> resolve(const uint16_t client_port, const uint16_t message_id,
-            const clock::time_point now = clock::now())
-        {
-            std::scoped_lock lock(lock_);
-            const auto it = entries_.find(make_key(client_port, message_id));
-            if (it == entries_.end())
-                return std::nullopt;
-
-            if (now - it->second.created_at > ttl_)
-            {
-                entries_.erase(it);
-                return std::nullopt;
-            }
-
-            return it->second.original;
-        }
-
-        /// Removes every expired entry (maintenance thread).
-        void sweep(const clock::time_point now = clock::now())
-        {
-            std::scoped_lock lock(lock_);
-            for_each_entry_locked([this, now](const auto it)
-            {
-                return now - it->second.created_at > ttl_ ? entries_.erase(it) : std::next(it);
-            });
-            expire_front_locked(now);
-        }
-
-        /// Removes every entry (router start).
-        void clear()
-        {
-            std::scoped_lock lock(lock_);
-            entries_.clear();
-            order_.clear();
-        }
-
-        [[nodiscard]] std::size_t size() const
-        {
-            std::scoped_lock lock(lock_);
-            return entries_.size();
-        }
-
-        /// Number of insertion-order records, including stale ones (bounded; for tests).
-        [[nodiscard]] std::size_t order_records() const
-        {
-            std::scoped_lock lock(lock_);
-            return order_.size();
-        }
-
-        /**
-         * @brief Total number of table entries and queue records examined by expiry, eviction,
-         *        compaction, and sweeps since construction.
-         *
-         * Every loop over the table or the queue counts here, so tests can assert that the work
-         * done by remember() stays bounded per call when the table is full, without measuring time.
-         */
-        [[nodiscard]] std::uint64_t visits() const
-        {
-            std::scoped_lock lock(lock_);
-            return visits_;
-        }
-
-    private:
-        struct entry
-        {
-            clock::time_point created_at;
-            Endpoint original;
-        };
-
-        struct record
-        {
-            uint32_t key;
-            clock::time_point created_at;
-        };
-
-        static constexpr uint32_t make_key(const uint16_t client_port, const uint16_t message_id) noexcept
-        {
-            return (static_cast<uint32_t>(client_port) << 16) | message_id;
-        }
-
-        /// True when @p r is the current record of a live entry.
-        [[nodiscard]] bool is_current_locked(const record& r) const
-        {
-            const auto it = entries_.find(r.key);
-            return it != entries_.end() && it->second.created_at == r.created_at;
-        }
-
-        // Every iteration over entries_ or order_ goes through one of the two helpers below,
-        // which count each element examined in visits_. Do not add raw loops over either
-        // container: visits() is how tests bound the work done on the packet thread.
-
-        /**
-         * @brief Visits table entries, counting each. @p step receives an iterator to the current
-         *        entry and returns the iterator to continue from (the erase() result or the next).
-         */
-        template <typename Step>
-        void for_each_entry_locked(Step&& step)
-        {
-            for (auto it = entries_.begin(); it != entries_.end();)
-            {
-                ++visits_;
-                it = step(it);
-            }
-        }
-
-        /// What consume_front_locked() does after examining the front record.
-        enum class front_step : uint8_t
-        {
-            pop_and_continue,
-            pop_and_stop,
-            stop
-        };
-
-        /**
-         * @brief Examines records at the front of the queue, counting each, and pops them as
-         *        @p step decides.
-         */
-        template <typename Step>
-        void consume_front_locked(Step&& step)
-        {
-            while (!order_.empty())
-            {
-                ++visits_;
-                const auto front = order_.front();
-                const front_step next = step(front);
-                if (next == front_step::stop)
-                    return;
-                order_.pop_front();
-                if (next == front_step::pop_and_stop)
-                    return;
-            }
-        }
-
-        /// Pops expired records from the front, erasing the entries they still describe.
-        void expire_front_locked(const clock::time_point now)
-        {
-            consume_front_locked([this, now](const record& front)
-            {
-                if (!(now - front.created_at > ttl_))
-                    return front_step::stop;
-                if (is_current_locked(front))
-                    entries_.erase(front.key);
-                return front_step::pop_and_continue;
-            });
-        }
-
-        /// Erases the oldest live entry, skipping stale records.
-        void evict_oldest_locked()
-        {
-            consume_front_locked([this](const record& front)
-            {
-                if (!is_current_locked(front))
-                    return front_step::pop_and_continue;
-                entries_.erase(front.key);
-                return front_step::pop_and_stop;
-            });
-        }
-
-        /// Keeps the queue bounded when keys are refreshed repeatedly: rebuilds it from the
-        /// live entries, oldest first, once stale records outnumber them.
-        void compact_if_needed_locked()
-        {
-            if (order_.size() <= 2 * capacity_ + 16)
-                return;
-
-            std::vector<record> live;
-            live.reserve(entries_.size());
-            for_each_entry_locked([&live](const auto it)
-            {
-                live.push_back({ it->first, it->second.created_at });
-                return std::next(it);
-            });
-            std::sort(live.begin(), live.end(),
-                [](const record& left, const record& right) { return left.created_at < right.created_at; });
-            order_.assign(live.begin(), live.end());
-        }
-
-        mutable std::mutex lock_;
-        std::unordered_map<uint32_t, entry> entries_;
-        std::deque<record> order_;
-        std::uint64_t visits_{};
-        std::chrono::seconds ttl_;
-        std::size_t capacity_;
-    };
-
     /// SOCKS5 UDP request/reply header fields (RFC 1928 section 7) of a relayed datagram.
     struct socks5_udp_datagram_view
     {
@@ -930,121 +679,6 @@ namespace proxy
         view.data = datagram + header_size;
         view.data_size = size - header_size;
         return view;
-    }
-
-    /**
-     * @brief Whether replies leaving the DNS proxy's UDP listener may need their source restored
-     *        (classify_dns_reply()): in Proxy mode with a usable proxy, with or without
-     *        a server override, because a relay can report a source other than the server the
-     *        resolver queried either way. In Direct mode, or without a usable proxy, no DNS is
-     *        redirected and the reply path needs no DNS work at all.
-     */
-    [[nodiscard]] constexpr bool dns_reply_restore_needed(const dns_routing_mode mode, const bool proxy_selected) noexcept
-    {
-        return mode == dns_routing_mode::proxy && proxy_selected;
-    }
-
-    /// What the UDP handler does about remembering the server a redirected query was addressed to.
-    enum class dns_query_tracking : uint8_t
-    {
-        track,     ///< remember the queried server so the answer can be restored to it
-        untracked, ///< redirect without remembering: the answer keeps the source the relay reports
-        drop       ///< cannot be redirected usefully: drop it
-    };
-
-    /**
-     * @brief Decides whether a UDP datagram about to be redirected to the DNS proxy is tracked.
-     *
-     * A datagram that carries a DNS header is tracked by (client port, message ID), so its answer
-     * can be presented as coming from the server the resolver queried whatever source the relay
-     * reports. A datagram too short to carry a DNS header cannot be tracked. Without a server
-     * override it is still redirected: its answer, if any, carries the relay-reported source,
-     * which for an RFC 1928 relay is the server that was queried. With a server override the
-     * relay reports the override, the answer could never be matched to the queried server, and
-     * the resolver would discard it, so the datagram is dropped instead.
-     */
-    [[nodiscard]] constexpr dns_query_tracking decide_dns_query_tracking(const bool server_override_configured,
-        const bool has_message_id) noexcept
-    {
-        if (has_message_id)
-            return dns_query_tracking::track;
-        return server_override_configured ? dns_query_tracking::drop : dns_query_tracking::untracked;
-    }
-
-    /// How a datagram leaving a local UDP proxy listener is presented to the client.
-    enum class dns_reply_restore : uint8_t
-    {
-        unchanged, ///< not an answer to a tracked query: present the relay's SOCKS5 header source
-        restore,   ///< answer to a tracked query: present it as coming from the original server
-        drop       ///< names the override server but answers no tracked query: drop it
-    };
-
-    /**
-     * @brief Decides what to do with a reply leaving a local UDP proxy listener.
-     *
-     * An override answer that matches no tracked query (@p restore == drop) is dropped without
-     * being translated; otherwise the reply is re-injected when translated and dropped when not.
-     * Both drops are listener replies that are not sent to the network and are reported the same
-     * way.
-     */
-    [[nodiscard]] constexpr listener_reply_action decide_udp_listener_reply(const dns_reply_restore restore,
-        const bool translated) noexcept
-    {
-        if (restore == dns_reply_restore::drop)
-            return listener_reply_action::drop;
-        return decide_listener_reply(translated);
-    }
-
-    /**
-     * @brief Classifies a datagram relayed back by the DNS proxy, with or without a server
-     *        override, and finds the server the resolver originally queried.
-     *
-     * A datagram whose (@p client_port, DNS message ID) matches a tracked query is restored to
-     * the original server whatever source its SOCKS5 header reports, of either address family:
-     * RFC 1928 relays report the server that answered (the override, when one is configured),
-     * but some report another address (for example their own, which is IPv4 even for an IPv6
-     * query), and an answer presented from any address other than the queried server is
-     * discarded by the resolver. The redirect strips such a header by its real size when it is
-     * given the source to present. With a server override, a datagram that names the override
-     * server but matches no tracked query is dropped. Any other datagram relayed through the
-     * same proxy is left unchanged; if its ATYP is not the listener's family
-     * (@p expected_address_type), the redirect then rejects it and it is dropped.
-     *
-     * The match is on the client port and the first two bytes of the relayed data only. A
-     * datagram that is not a DNS answer is restored by mistake only if it arrives for a client
-     * port that sent a port-53 datagram within the tracker's lifetime and begins with that
-     * datagram's ID.
-     *
-     * @param socks_datagram The UDP payload as relayed: SOCKS5 UDP header followed by the data.
-     * @param expected_address_type 1 for the IPv4 path, 4 for the IPv6 path.
-     * @param override_address The override address bytes (network byte order), or nullptr when
-     *        no server override is configured for this family; @p override_address_size and
-     *        @p override_port are then ignored.
-     */
-    template <typename Endpoint>
-    [[nodiscard]] std::pair<dns_reply_restore, std::optional<Endpoint>> classify_dns_reply(
-        const uint8_t* socks_datagram, const std::size_t size, const uint8_t expected_address_type,
-        const uint8_t* override_address, const std::size_t override_address_size, const uint16_t override_port,
-        const uint16_t client_port, dns_udp_origin_tracker<Endpoint>& origins)
-    {
-        const auto view = parse_socks5_udp_datagram(socks_datagram, size);
-        if (!view)
-            return { dns_reply_restore::unchanged, std::nullopt };
-
-        if (const auto message_id = dns_message_id(view->data, view->data_size))
-        {
-            if (auto original = origins.resolve(client_port, *message_id))
-                return { dns_reply_restore::restore, std::move(original) };
-        }
-
-        if (view->address_type != expected_address_type)
-            return { dns_reply_restore::unchanged, std::nullopt };
-
-        const bool names_override = override_address != nullptr &&
-            view->address_size == override_address_size && view->port == override_port &&
-            std::equal(view->address, view->address + view->address_size, override_address);
-
-        return { names_override ? dns_reply_restore::drop : dns_reply_restore::unchanged, std::nullopt };
     }
 
     // Compile-time checks of the decision table's key invariants.
