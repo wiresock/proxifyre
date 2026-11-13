@@ -294,6 +294,19 @@ namespace proxy
         std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v6>> dns_udp_relay_v6_;
 
         /**
+         * @brief Local source ports of UDP DNS queries redirected to the DNS relay, with the time
+         *        of the last one. The relay accepts datagrams only from these ports (refreshed
+         *        within udp_mapper_entry_ttl_). Swept by the resolver thread.
+         */
+        /// Set while the DNS relays stop: new UDP DNS is blocked, but the relays' listener
+        /// ports are still recognized so their last answers are translated. Guarded by lock_.
+        bool dns_udp_relays_stopping_{ false };
+
+        std::unordered_map<uint16_t, std::chrono::steady_clock::time_point> dns_udp_clients_v4_;
+        std::unordered_map<uint16_t, std::chrono::steady_clock::time_point> dns_udp_clients_v6_;
+        std::mutex dns_udp_clients_lock_;
+
+        /**
          * @brief Count of DNS packets dropped by the Proxy-mode policy since the last
          *        throttled report from the resolver thread.
          */
@@ -618,6 +631,15 @@ namespace proxy
                 return *udp_redirect_;
             else
                 return *udp_redirect_v6_;
+        }
+
+        template <typename AddrT>
+        auto& dns_udp_clients_for() noexcept
+        {
+            if constexpr (std::is_same_v<AddrT, net::ip_address_v4>)
+                return dns_udp_clients_v4_;
+            else
+                return dns_udp_clients_v6_;
         }
 
         template <typename AddrT>
@@ -992,9 +1014,6 @@ namespace proxy
                 if (udp)
                     udp->stop();
 
-            // Proxy-mode DNS must take precedence over the LAN-bypass PASS filters: (re)install
-            // the front-of-table REDIRECT filters with the current listener ports. If that fails,
-            // fail start() instead of running with DNS able to bypass the policy.
             // stop() joined the redirects' cleanup threads; a later start() must run them again
             // so expired TCP and UDP entries (including closed and reset connections) are removed.
             if (tcp_redirect_)
@@ -1006,6 +1025,11 @@ namespace proxy
             if (udp_redirect_v6_)
                 udp_redirect_v6_->restart();
 
+            {
+                std::scoped_lock lock(dns_udp_clients_lock_);
+                dns_udp_clients_v4_.clear();
+                dns_udp_clients_v6_.clear();
+            }
             start_dns_udp_relays();
             dns_blocked_packets_.store(0, std::memory_order_relaxed);
             untranslated_listener_replies_.store(0, std::memory_order_relaxed);
@@ -1013,6 +1037,10 @@ namespace proxy
             listener_segments_after_reset_.store(0, std::memory_order_relaxed);
             for (auto& flag : dns_block_reason_logged_)
                 flag.clear(std::memory_order_relaxed);
+
+            // Proxy-mode DNS must take precedence over the LAN-bypass PASS filters: (re)install
+            // the front-of-table REDIRECT filters with the current listener ports. If that fails,
+            // fail start() instead of running with DNS able to bypass the policy.
             if (!install_dns_filters())
             {
                 start_failure_cleanup();
@@ -1076,7 +1104,12 @@ namespace proxy
             if (auto expected = true; !is_active_.compare_exchange_strong(expected, false))
                 return false;
 
-            // Step 1: Stop the packet filter FIRST
+            // Step 0: Stop the DNS relays while the packet filter still runs, so answers they
+            // send while stopping are still translated (or dropped) instead of reaching the
+            // network. Without a relay, UDP DNS is blocked until the filter stops.
+            stop_dns_udp_relays();
+
+            // Step 1: Stop the packet filter
             // This prevents new packets from being processed and queued
             NETLIB_DEBUG("Stopping packet filter");
             packet_filter_->stop_filter();
@@ -1094,6 +1127,10 @@ namespace proxy
 
             if (process_resolve_thread_.joinable())
                 process_resolve_thread_.join();
+
+            // Report the last DNS and listener drop counts, which the resolver thread may not
+            // have reached.
+            (void)report_listener_and_dns_drops();
 
             // Step 3: Stop all redirect objects FIRST to stop their cleanup threads
             // CRITICAL: Stop redirects before stopping proxies to ensure cleanup threads finish
@@ -1118,9 +1155,6 @@ namespace proxy
             {
                 udp_redirect_v6_->stop();  // This should join the cleanup thread
             }
-
-            // Step 3b: Stop the DNS relays (their threads are joined without lock_ held).
-            stop_dns_udp_relays();
 
             // Step 4: Stop all proxy servers WITHOUT holding lock_
             // CRITICAL: We must NOT hold lock_ while calling stop() or during destruction
@@ -2246,7 +2280,9 @@ namespace proxy
                 // UDP DNS goes through the DNS relay's shared association, not the proxy's
                 // per-source-port UDP listener.
                 const auto& relay = dns_udp_relay_for<AddrT>();
-                return relay ? std::optional<uint16_t>{ relay->listener_port() } : std::nullopt;
+                return relay && !dns_udp_relays_stopping_
+                    ? std::optional<uint16_t>{ relay->listener_port() }
+                    : std::nullopt;
             }
             else
             {
@@ -2493,8 +2529,8 @@ namespace proxy
          * server override the header carries the override while the IP header keeps the
          * original destination. The relay sends the query through its shared SOCKS5 association
          * and answers the client as the server it queried (socks5_dns_udp_relay.h). The source
-         * port is recorded in the UDP source-port mapper, which is what authorizes the relay to
-         * accept datagrams from it. Anything that cannot be redirected is dropped, never passed.
+         * port is recorded in dns_udp_clients_, which is what authorizes the relay to accept
+         * datagrams from it. Anything that cannot be redirected is dropped, never passed.
          */
         template <typename AddrT>
         packet_filter::packet_action handle_dns_udp(netlib::ndisapi::intermediate_buffer& buffer,
@@ -2538,8 +2574,8 @@ namespace proxy
             }
 
             {
-                std::scoped_lock lock(udp_mapper_lock_for<AddrT>());
-                udp_mapper_for<AddrT>().insert_or_assign(source_port, std::chrono::steady_clock::now());
+                std::scoped_lock lock(dns_udp_clients_lock_);
+                dns_udp_clients_for<AddrT>().insert_or_assign(source_port, std::chrono::steady_clock::now());
             }
 
             if (is_new_endpoint)
@@ -2646,8 +2682,8 @@ namespace proxy
         /**
          * @brief Creates and starts a DNS relay for family @p AddrT through SOCKS5 server
          *        @p upstream. Its listener accepts only source ports the router recently redirected
-         *        (the UDP source-port mapper), and every relay endpoint it is given is reported to
-         *        the recursion guard. Returns null when the relay cannot be started.
+         *        to it (dns_udp_clients_), and every relay endpoint it is given is reported to the
+         *        recursion guard. Returns null when the relay cannot be started.
          */
         template <typename AddrT>
         std::unique_ptr<socks5_dns_udp_relay<AddrT>> make_dns_udp_relay(const net::ip_endpoint<AddrT>& upstream,
@@ -2659,10 +2695,10 @@ namespace proxy
                     settings.upstream_options,
                     [this](const uint16_t port)
                     {
-                        auto& mapper = udp_mapper_for<AddrT>();
-                        std::scoped_lock lock(udp_mapper_lock_for<AddrT>());
-                        const auto it = mapper.find(port);
-                        return it != mapper.end() &&
+                        std::scoped_lock lock(dns_udp_clients_lock_);
+                        const auto& clients = dns_udp_clients_for<AddrT>();
+                        const auto it = clients.find(port);
+                        return it != clients.end() &&
                             std::chrono::steady_clock::now() - it->second <= udp_mapper_entry_ttl_;
                     },
                     [this](const net::ip_endpoint<AddrT>& relay_endpoint)
@@ -2728,22 +2764,36 @@ namespace proxy
         }
 
         /**
-         * @brief Stops and destroys the DNS relays. Their threads are joined without lock_ held.
+         * @brief Stops and destroys the DNS relays. New UDP DNS is blocked first; the relays stay
+         *        registered while they stop so their listener ports are still recognized and
+         *        answers they send meanwhile are translated rather than passed. Their threads are
+         *        joined without lock_ held. Called under lifecycle_mutex_, which also serializes
+         *        every write of the relay pointers.
          */
         void stop_dns_udp_relays()
         {
-            std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v4>> relay_v4;
-            std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v6>> relay_v6;
+            socks5_dns_udp_relay<net::ip_address_v4>* relay_v4;
+            socks5_dns_udp_relay<net::ip_address_v6>* relay_v6;
             {
                 std::unique_lock lock(lock_);
-                relay_v4 = std::move(dns_udp_relay_v4_);
-                relay_v6 = std::move(dns_udp_relay_v6_);
+                dns_udp_relays_stopping_ = true;
+                relay_v4 = dns_udp_relay_v4_.get();
+                relay_v6 = dns_udp_relay_v6_.get();
             }
 
             if (relay_v4)
                 relay_v4->stop();
             if (relay_v6)
                 relay_v6->stop();
+
+            std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v4>> stopped_v4;
+            std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v6>> stopped_v6;
+            {
+                std::unique_lock lock(lock_);
+                stopped_v4 = std::move(dns_udp_relay_v4_);
+                stopped_v6 = std::move(dns_udp_relay_v6_);
+                dns_udp_relays_stopping_ = false;
+            }
         }
 
         /**
@@ -3494,6 +3544,42 @@ namespace proxy
         }
 
         /**
+         * @brief Logs and resets the counts of Proxy-mode DNS drops and of listener packets that
+         *        were dropped. Called by the resolver thread at a throttled rate, and once more by
+         *        stop() so the last counts are not lost.
+         * @return Whether anything was reported.
+         */
+        bool report_listener_and_dns_drops()
+        {
+            bool reported = false;
+            if (const auto blocked = dns_blocked_packets_.exchange(0, std::memory_order_relaxed); blocked != 0)
+            {
+                reported = true;
+                NETLIB_LOG(log_level::warning,
+                    "DNS routing: dropped {} DNS packet(s) that could not be sent through the DNS proxy "
+                    "(they were not sent directly).", blocked);
+            }
+            if (const auto untranslated = untranslated_listener_replies_.exchange(0, std::memory_order_relaxed);
+                untranslated != 0)
+            {
+                reported = true;
+                NETLIB_LOG(log_level::info,
+                    "Dropped {} packet(s) from local proxy listeners that could not be translated back "
+                    "(no tracked connection, fragmented, or malformed); they were not sent to the network.",
+                    untranslated);
+            }
+            if (const auto after_reset = listener_segments_after_reset_.exchange(0, std::memory_order_relaxed);
+                after_reset != 0)
+            {
+                reported = true;
+                NETLIB_LOG(log_level::debug,
+                    "Dropped {} segment(s) from local TCP listeners for connections that had just been reset "
+                    "(expected during aborts).", after_reset);
+            }
+            return reported;
+        }
+
+        /**
         * @brief Thread procedure for deferred process resolution and packet forwarding.
         *
         * This method runs in a dedicated thread and is responsible for processing packets
@@ -3645,39 +3731,30 @@ namespace proxy
                             }
                         }
                     }
+
+                    // Same TTL sweep for the DNS relay's client ports.
+                    {
+                        std::scoped_lock lock(dns_udp_clients_lock_);
+                        for (auto* clients : { &dns_udp_clients_v4_, &dns_udp_clients_v6_ })
+                        {
+                            for (auto it = clients->begin(); it != clients->end();)
+                            {
+                                if (now - it->second > udp_mapper_entry_ttl_)
+                                    it = clients->erase(it);
+                                else
+                                    ++it;
+                            }
+                        }
+                    }
                 }
 
                 // Report Proxy-mode DNS drops and untranslatable listener replies at the same
                 // throttled rate as the queue drops so a resolver retrying against an
                 // unreachable proxy cannot flood the log.
                 if (const auto now = std::chrono::steady_clock::now();
-                    now - last_dns_block_log >= drop_log_throttle_interval_ &&
-                    (dns_blocked_packets_.load(std::memory_order_relaxed) != 0 ||
-                        untranslated_listener_replies_.load(std::memory_order_relaxed) != 0 ||
-                        listener_segments_after_reset_.load(std::memory_order_relaxed) != 0))
+                    now - last_dns_block_log >= drop_log_throttle_interval_ && report_listener_and_dns_drops())
                 {
                     last_dns_block_log = now;
-                    if (const auto blocked = dns_blocked_packets_.exchange(0, std::memory_order_relaxed); blocked != 0)
-                    {
-                        NETLIB_LOG(log_level::warning,
-                            "DNS routing: dropped {} DNS packet(s) that could not be sent through the DNS proxy "
-                            "(they were not sent directly).", blocked);
-                    }
-                    if (const auto untranslated = untranslated_listener_replies_.exchange(0, std::memory_order_relaxed);
-                        untranslated != 0)
-                    {
-                        NETLIB_LOG(log_level::info,
-                            "Dropped {} packet(s) from local proxy listeners that could not be translated back "
-                            "(no tracked connection, fragmented, or malformed); they were not sent to the network.",
-                            untranslated);
-                    }
-                    if (const auto after_reset = listener_segments_after_reset_.exchange(0, std::memory_order_relaxed);
-                        after_reset != 0)
-                    {
-                        NETLIB_LOG(log_level::debug,
-                            "Dropped {} segment(s) from local TCP listeners for connections that had just been reset "
-                            "(expected during aborts).", after_reset);
-                    }
                 }
 
                 // Periodically surface the counts of packets dropped due to a
