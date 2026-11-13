@@ -65,17 +65,7 @@ namespace ProxiFyre.Configuration
                     "The configuration is not a valid JSON object.", ex);
             }
 
-            // Earlier releases kept an unknown top-level "dns" property and ignored it. It now selects
-            // DNS routing, so a value that is not an object is named in the error rather than
-            // reported as an anonymous invalid property value.
-            var dnsProperty = root.Properties().FirstOrDefault(
-                p => string.Equals(p.Name, "dns", StringComparison.OrdinalIgnoreCase));
-            if (dnsProperty != null && dnsProperty.Value.Type != JTokenType.Object && dnsProperty.Value.Type != JTokenType.Null)
-            {
-                throw new ConfigurationFormatException(
-                    "The 'dns' property must be an object such as { \"mode\": \"Proxy\", \"proxyId\": \"office\" }, " +
-                    "or be removed to keep DNS Direct.");
-            }
+            PrepareKeysEarlierReleasesIgnored(root);
 
             ProxiFyreConfiguration configuration;
             try
@@ -107,6 +97,62 @@ namespace ProxiFyre.Configuration
         /// Creates a lossless editable copy, including credentials and unknown extension fields.
         /// Keeping this operation here prevents UI projects from taking a direct JSON dependency.
         /// </summary>
+        /// <summary>
+        /// Earlier releases kept a rule "id" and a top-level "dns" property as unknown data and
+        /// ignored them. A rule id that is an object or array is turned into its JSON text, which
+        /// the validator then reports as an invalid id (a warning unless DNS uses it), so such a
+        /// configuration still loads. A "dns" value that is not an object, or a DNS setting that
+        /// is an object or array, is a configuration error that names the property.
+        /// </summary>
+        private static void PrepareKeysEarlierReleasesIgnored(JObject root)
+        {
+            foreach (var proxies in PropertiesNamed(root, "proxies"))
+            {
+                var rules = proxies.Value as JArray;
+                if (rules == null)
+                    continue;
+                foreach (var rule in rules.OfType<JObject>())
+                {
+                    foreach (var id in PropertiesNamed(rule, "id"))
+                    {
+                        if (id.Value.Type == JTokenType.Object || id.Value.Type == JTokenType.Array)
+                            id.Value = new JValue(id.Value.ToString(Formatting.None));
+                    }
+                }
+            }
+
+            foreach (var dns in PropertiesNamed(root, "dns"))
+            {
+                if (dns.Value.Type == JTokenType.Null)
+                    continue;
+                var settings = dns.Value as JObject;
+                if (settings == null)
+                {
+                    throw new ConfigurationFormatException(
+                        "The '" + dns.Name + "' property must be an object such as " +
+                        "{ \"mode\": \"Proxy\", \"proxyId\": \"office\" }, or be removed to keep DNS Direct.");
+                }
+
+                foreach (var setting in settings.Properties())
+                {
+                    var known = new[] { "mode", "proxyId", "serverOverride" }.FirstOrDefault(
+                        name => string.Equals(name, setting.Name, StringComparison.OrdinalIgnoreCase));
+                    if (known != null && (setting.Value.Type == JTokenType.Object || setting.Value.Type == JTokenType.Array))
+                    {
+                        throw new ConfigurationFormatException(
+                            "The '" + dns.Name + "." + setting.Name + "' property must be a string.");
+                    }
+                }
+            }
+        }
+
+        private static JProperty[] PropertiesNamed(JObject parent, string name)
+        {
+            return parent.Properties()
+                .Where(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+        }
+
         public ProxyRule CloneRule(ProxyRule rule)
         {
             if (rule == null)

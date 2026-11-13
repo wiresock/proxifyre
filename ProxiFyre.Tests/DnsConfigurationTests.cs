@@ -325,6 +325,80 @@ namespace ProxiFyre.Tests
             StringAssert.Contains("'dns'", exception.Message);
         }
 
+        [TestCase("{ \"dns\": {}, \"DNS\": \"8.8.8.8\" }", "'DNS'")]
+        [TestCase("{ \"dns\": { \"proxyId\": [1] } }", "'dns.proxyId'")]
+        [TestCase("{ \"dns\": { \"Mode\": {} } }", "'dns.Mode'")]
+        [TestCase("{ \"dns\": { \"serverOverride\": { \"a\": 1 } } }", "'dns.serverOverride'")]
+        public void MalformedDnsSettingsAreReportedByName(string json, string name)
+        {
+            var exception = Assert.Throws<ConfigurationFormatException>(() => _serializer.Deserialize(json));
+            StringAssert.Contains(name, exception.Message);
+        }
+
+        [TestCase("{}")]
+        [TestCase("[1]")]
+        public void RuleIdThatIsNotAStringStillLoadsAndIsOnlyAWarning(string id)
+        {
+            var json = "{ \"logLevel\": \"Info\", \"proxies\": [ { \"ID\": " + id +
+                       ", \"appNames\": [\"browser\"], \"socks5ProxyEndpoint\": \"proxy.example.com:1080\" } ] }";
+
+            var configuration = _serializer.Deserialize(json);
+            var result = _validator.Validate(configuration);
+
+            Assert.That(result.HasErrors, Is.False, string.Join("; ", result.Errors.Select(issue => issue.Code)));
+            HasWarning(result, "PROXY_ID_INVALID", "proxies[0].id");
+            Assert.That(_normalizer.Normalize(configuration).Proxies[0].Id, Is.Null);
+        }
+
+        [Test]
+        public void SavingDropsIdsThatOnlyCauseWarnings()
+        {
+            var configuration = TwoProxyConfiguration();
+            configuration.Proxies[0].Id = "has space";
+            var third = TestModels.ValidRule();
+            third.Id = " VPN ";
+            third.AppNames = new List<string> { "mail" };
+            configuration.Proxies.Insert(1, third);
+            configuration.Dns.ProxyId = "other";
+            configuration.Proxies[2].Id = "other";
+
+            var normalized = _normalizer.Normalize(configuration);
+
+            Assert.That(normalized.Proxies.Select(rule => rule.Id), Is.EqualTo(new[] { null, "VPN", "other" }));
+            Assert.That(_validator.Validate(normalized).Issues.Any(issue => issue.Code.StartsWith("PROXY_ID_")), Is.False);
+        }
+
+        [Test]
+        public void SavingKeepsIdsTheDnsProxyReferences()
+        {
+            var configuration = TwoProxyConfiguration();
+            configuration.Proxies[0].Id = "VPN";
+            configuration.Proxies.Add(TestModels.ValidRule());
+            configuration.Proxies[2].Id = "bad id";
+            configuration.Proxies[2].AppNames = new List<string> { "mail" };
+            configuration.Proxies.Insert(2, TestModels.ValidRule());
+            configuration.Proxies[2].Id = "bad id";
+            configuration.Proxies[2].AppNames = new List<string> { "news" };
+            configuration.Dns.ProxyId = "vpn";
+
+            var normalized = _normalizer.Normalize(configuration);
+
+            // Both copies of the referenced duplicate stay, so the error remains visible; the
+            // invalid id DNS does not use is removed from both rules.
+            Assert.That(normalized.Proxies.Select(rule => rule.Id), Is.EqualTo(new[] { "VPN", "vpn", null, null }));
+            HasError(_validator.Validate(normalized), "PROXY_ID_DUPLICATE", "proxies[1].id");
+        }
+
+        [Test]
+        public void SavingKeepsAnInvalidIdTheDnsProxyReferences()
+        {
+            var configuration = TwoProxyConfiguration();
+            configuration.Proxies[1].Id = "has space";
+            configuration.Dns.ProxyId = "has space";
+
+            Assert.That(_normalizer.Normalize(configuration).Proxies[1].Id, Is.EqualTo("has space"));
+        }
+
         [Test]
         public void NullDnsMeansDirect()
         {

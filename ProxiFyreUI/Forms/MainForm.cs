@@ -282,7 +282,8 @@ namespace ProxiFyreUI.Forms
                                " — " + FormatApplications(rule.AppNames) +
                                (string.IsNullOrWhiteSpace(rule.Id) ? string.Empty : " [id: " + rule.Id.Trim() + "]");
                     var itemIndex = dnsProxyComboBox.Items.Add(new DnsProxyChoice(rule, text));
-                    if (!string.IsNullOrWhiteSpace(selectedId) && rule.Id != null &&
+                    // The first rule with the id, as validation and the service resolve it.
+                    if (selectedIndex < 0 && !string.IsNullOrWhiteSpace(selectedId) && rule.Id != null &&
                         string.Equals(rule.Id.Trim(), selectedId.Trim(), StringComparison.OrdinalIgnoreCase))
                         selectedIndex = itemIndex;
                 }
@@ -316,7 +317,11 @@ namespace ProxiFyreUI.Forms
             if (ReferenceEquals(sender, dnsModeComboBox) && dnsModeComboBox.SelectedIndex >= 0)
                 dns.Mode = dnsModeComboBox.SelectedIndex == 1 ? DnsConfiguration.ProxyMode : DnsConfiguration.DirectMode;
 
-            if (ReferenceEquals(sender, dnsProxyComboBox) &&
+            // Choosing a rule, or switching to Proxy mode with a rule shown, (re)establishes the
+            // reference, so a shown rule whose id cannot be used is repaired without re-selecting it.
+            var referenceChanged = ReferenceEquals(sender, dnsProxyComboBox) ||
+                                   (ReferenceEquals(sender, dnsModeComboBox) && dnsModeComboBox.SelectedIndex == 1);
+            if (referenceChanged &&
                 dnsProxyComboBox.SelectedItem is DnsProxyChoice choice && choice.Rule != null)
             {
                 // Reference the rule by a stable id; assign a new one when the rule has none, or
@@ -338,8 +343,11 @@ namespace ProxiFyreUI.Forms
             configuration.Dns = dns;
             MarkConfigurationChanged();
 
-            if (ReferenceEquals(sender, dnsProxyComboBox))
-                BeginInvoke(new Action(RefreshDnsProxyChoices));
+            // Rule rows show id issues, which depend on the DNS settings; rebuilding the grid also
+            // refreshes the DNS proxy choices. Deferred so the combo box is not rebuilt inside its
+            // own change event.
+            if (ReferenceEquals(sender, dnsProxyComboBox) || ReferenceEquals(sender, dnsModeComboBox))
+                BeginInvoke(new Action(() => RefreshRoutingGrid(SelectedRuleIndex)));
         }
 
         private void UpdateDnsControlStates()

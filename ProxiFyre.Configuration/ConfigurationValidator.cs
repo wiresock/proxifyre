@@ -514,7 +514,7 @@ namespace ProxiFyre.Configuration
             // Earlier releases ignored a rule "id", so an id only stops the service when DNS Proxy
             // mode depends on it. Any other invalid or duplicate id is reported as a warning and has
             // no effect. An empty or whitespace id means no id, as the normalizer treats it.
-            var referencedId = ReferencedProxyId(dns);
+            var referencedId = DnsConfiguration.GetReferencedProxyId(dns);
             var seen = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             for (var index = 0; index < rules.Count; index++)
             {
@@ -535,8 +535,8 @@ namespace ProxiFyre.Configuration
                             RulePath(index) + ".id",
                             index)
                         : Warning("PROXY_ID_INVALID",
-                            message + " No DNS setting uses it, so it has no effect; remove it or give it a valid value " +
-                            "before selecting this rule as the DNS proxy.",
+                            message + " No DNS setting uses it, so it has no effect and is removed when the " +
+                            "configuration is saved.",
                             RulePath(index) + ".id",
                             index));
                     continue;
@@ -553,8 +553,8 @@ namespace ProxiFyre.Configuration
                             RulePath(index) + ".id",
                             index)
                         : Warning("PROXY_ID_DUPLICATE",
-                            message + " No DNS setting uses it, so it has no effect; make it unique before " +
-                            "selecting either rule as the DNS proxy.",
+                            message + " No DNS setting uses it, so it has no effect and is removed from this rule " +
+                            "when the configuration is saved.",
                             RulePath(index) + ".id",
                             index));
                     continue;
@@ -562,19 +562,6 @@ namespace ProxiFyre.Configuration
 
                 seen.Add(trimmed, index);
             }
-        }
-
-        /// <summary>
-        /// The trimmed proxy id that DNS Proxy mode routes through, or null when DNS does not
-        /// reference a rule (DNS omitted, Direct, an unknown mode, or no proxyId).
-        /// </summary>
-        private static string ReferencedProxyId(DnsSettings dns)
-        {
-            DnsRoutingMode mode;
-            if (dns == null || string.IsNullOrWhiteSpace(dns.ProxyId) ||
-                !DnsConfiguration.TryGetMode(dns.Mode, out mode) || mode != DnsRoutingMode.Proxy)
-                return null;
-            return dns.ProxyId.Trim();
         }
 
         private static void ValidateDns(DnsSettings dns, IList<ProxyRule> rules, ICollection<ValidationIssue> issues)

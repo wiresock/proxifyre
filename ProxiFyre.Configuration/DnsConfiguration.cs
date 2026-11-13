@@ -67,6 +67,19 @@ namespace ProxiFyre.Configuration
         public const int MaximumProxyIdLength = 64;
 
         /// <summary>
+        /// The trimmed proxy id that DNS Proxy mode routes through, or null when DNS does not
+        /// reference a rule (DNS omitted, Direct, an unknown mode, or no proxyId).
+        /// </summary>
+        public static string GetReferencedProxyId(DnsSettings settings)
+        {
+            DnsRoutingMode mode;
+            if (settings == null || string.IsNullOrWhiteSpace(settings.ProxyId) ||
+                !TryGetMode(settings.Mode, out mode) || mode != DnsRoutingMode.Proxy)
+                return null;
+            return settings.ProxyId.Trim();
+        }
+
+        /// <summary>
         /// Returns the effective mode. A missing DNS section or mode means Direct.
         /// </summary>
         public static DnsRoutingMode GetMode(DnsSettings settings)
