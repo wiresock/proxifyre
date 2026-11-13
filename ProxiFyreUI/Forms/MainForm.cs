@@ -319,8 +319,13 @@ namespace ProxiFyreUI.Forms
             if (ReferenceEquals(sender, dnsProxyComboBox) &&
                 dnsProxyComboBox.SelectedItem is DnsProxyChoice choice && choice.Rule != null)
             {
-                // Reference the rule by a stable id; assign one when the rule has none yet.
-                if (!DnsConfiguration.IsValidProxyId(choice.Rule.Id?.Trim()))
+                // Reference the rule by a stable id; assign a new one when the rule has none, or
+                // its id is invalid or shared with another rule (either would fail validation).
+                var currentId = choice.Rule.Id?.Trim();
+                var idSharedWithAnotherRule = configuration.Proxies.Any(rule =>
+                    rule != null && !ReferenceEquals(rule, choice.Rule) && rule.Id != null &&
+                    string.Equals(rule.Id.Trim(), currentId, StringComparison.OrdinalIgnoreCase));
+                if (!DnsConfiguration.IsValidProxyId(currentId) || idSharedWithAnotherRule)
                 {
                     choice.Rule.Id = DnsConfiguration.CreateUniqueProxyId(
                         configuration.Proxies.Where(rule => rule != null).Select(rule => rule.Id));

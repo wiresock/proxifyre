@@ -212,30 +212,71 @@ namespace ProxiFyre.Tests
             Assert.That(_validator.Validate(configuration).Issues.Any(issue => issue.Code == "DNS_PROXY_PROTOCOLS_UNSUPPORTED"), Is.False);
         }
 
-        [TestCase("")]
-        [TestCase("   ")]
         [TestCase("has space")]
         [TestCase("slash/id")]
         [TestCase("ünicode")]
-        public void InvalidProxyIdsAreRejected(string id)
+        public void InvalidProxyIdReferencedByDnsIsAnError(string id)
         {
+            var configuration = TwoProxyConfiguration();
+            configuration.Proxies[1].Id = id;
+            configuration.Dns.ProxyId = id;
+
+            HasError(_validator.Validate(configuration), "PROXY_ID_INVALID", "proxies[1].id");
+        }
+
+        [Test]
+        public void TooLongProxyIdReferencedByDnsIsAnError()
+        {
+            var configuration = TwoProxyConfiguration();
+            var id = new string('a', DnsConfiguration.MaximumProxyIdLength + 1);
+            configuration.Proxies[1].Id = id;
+            configuration.Dns.ProxyId = id;
+
+            HasError(_validator.Validate(configuration), "PROXY_ID_INVALID", "proxies[1].id");
+        }
+
+        [TestCase("has space")]
+        [TestCase("slash/id")]
+        [TestCase("ünicode")]
+        public void InvalidProxyIdThatDnsDoesNotUseIsOnlyAWarning(string id)
+        {
+            // Earlier releases ignored rule ids, so an id DNS does not use must not stop the service.
             var configuration = TwoProxyConfiguration();
             configuration.Proxies[0].Id = id;
 
-            HasError(_validator.Validate(configuration), "PROXY_ID_INVALID", "proxies[0].id");
+            var result = _validator.Validate(configuration);
+            Assert.That(result.HasErrors, Is.False, string.Join("; ", result.Errors.Select(issue => issue.Code)));
+            HasWarning(result, "PROXY_ID_INVALID", "proxies[0].id");
         }
 
         [Test]
-        public void TooLongProxyIdIsRejected()
+        public void InvalidProxyIdIsOnlyAWarningWithoutADnsSection()
         {
             var configuration = TwoProxyConfiguration();
+            configuration.Dns = null;
             configuration.Proxies[0].Id = new string('a', DnsConfiguration.MaximumProxyIdLength + 1);
 
-            HasError(_validator.Validate(configuration), "PROXY_ID_INVALID", "proxies[0].id");
+            var result = _validator.Validate(configuration);
+            Assert.That(result.HasErrors, Is.False);
+            HasWarning(result, "PROXY_ID_INVALID", "proxies[0].id");
+        }
+
+        [TestCase("")]
+        [TestCase("   ")]
+        public void EmptyProxyIdMeansNoId(string id)
+        {
+            var configuration = TwoProxyConfiguration();
+            configuration.Proxies[0].Id = id;
+            configuration.Proxies[1].Id = id;
+            configuration.Dns = null;
+
+            var result = _validator.Validate(configuration);
+            Assert.That(result.Issues.Any(issue => issue.Code.StartsWith("PROXY_ID_")), Is.False);
+            Assert.That(_normalizer.Normalize(configuration).Proxies[0].Id, Is.Null);
         }
 
         [Test]
-        public void DuplicateProxyIdsAreRejectedCaseInsensitively()
+        public void DuplicateProxyIdReferencedByDnsIsAnErrorCaseInsensitively()
         {
             var configuration = TwoProxyConfiguration();
             configuration.Proxies[1].Id = "OFFICE";
@@ -246,13 +287,50 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
-        public void ProxyIdsAreValidatedInDirectModeToo()
+        public void DuplicateProxyIdThatDnsDoesNotUseIsOnlyAWarning()
         {
             var configuration = TwoProxyConfiguration();
-            configuration.Dns = null;
+            configuration.Proxies[1].Id = "office";
+            var third = TestModels.ValidRule();
+            third.Id = "vpn";
+            third.AppNames = new List<string> { "mail" };
+            configuration.Proxies.Insert(1, third);
+
+            var result = _validator.Validate(configuration);
+            Assert.That(result.HasErrors, Is.False, string.Join("; ", result.Errors.Select(issue => issue.Code)));
+            HasWarning(result, "PROXY_ID_DUPLICATE", "proxies[2].id");
+        }
+
+        [TestCase(null)]
+        [TestCase("Direct")]
+        public void DuplicateProxyIdIsOnlyAWarningWhenDnsIsDirect(string mode)
+        {
+            var configuration = TwoProxyConfiguration();
+            configuration.Dns = mode == null ? null : new DnsSettings { Mode = mode, ProxyId = "office" };
             configuration.Proxies[1].Id = "office";
 
-            HasError(_validator.Validate(configuration), "PROXY_ID_DUPLICATE", "proxies[1].id");
+            var result = _validator.Validate(configuration);
+            Assert.That(result.HasErrors, Is.False);
+            HasWarning(result, "PROXY_ID_DUPLICATE", "proxies[1].id");
+        }
+
+        [TestCase("\"8.8.8.8\"")]
+        [TestCase("[]")]
+        [TestCase("true")]
+        public void DnsValueThatIsNotAnObjectIsReportedByName(string value)
+        {
+            var json = "{ \"logLevel\": \"Info\", \"proxies\": [], \"dns\": " + value + " }";
+
+            var exception = Assert.Throws<ConfigurationFormatException>(() => _serializer.Deserialize(json));
+            StringAssert.Contains("'dns'", exception.Message);
+        }
+
+        [Test]
+        public void NullDnsMeansDirect()
+        {
+            var configuration = _serializer.Deserialize("{ \"logLevel\": \"Info\", \"proxies\": [], \"dns\": null }");
+
+            Assert.That(configuration.Dns, Is.Null);
         }
 
         // ---------------------------------------------------------------- 6. server override
@@ -420,6 +498,16 @@ namespace ProxiFyre.Tests
             configuration.Dns.Mode = "Tunnel";
 
             Assert.That(_normalizer.Normalize(configuration).Dns.Mode, Is.EqualTo("Tunnel"));
+        }
+
+        private static ValidationIssue HasWarning(ValidationResult result, string code, string path)
+        {
+            var issue = result.Issues.FirstOrDefault(item => item.Code == code);
+            Assert.That(issue, Is.Not.Null,
+                "Expected " + code + "; found: " + string.Join(", ", result.Issues.Select(item => item.Code)));
+            Assert.That(issue.Severity, Is.EqualTo(ValidationSeverity.Warning));
+            Assert.That(issue.Path, Is.EqualTo(path));
+            return issue;
         }
 
         private static ValidationIssue HasError(ValidationResult result, string code, string path)

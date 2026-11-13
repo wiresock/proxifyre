@@ -70,7 +70,7 @@ Process ownership lookup is best effort for a standard user. ProxiFyre can route
 
 | Property | Description |
 | --- | --- |
-| `id` | Optional stable identifier used to reference this rule's proxy, for example from `dns.proxyId`. 1–64 letters, digits, `-`, `_`, or `.`; unique, case-insensitive. Unlike the rule position it survives reordering. |
+| `id` | Optional stable identifier used to reference this rule's proxy, for example from `dns.proxyId`. 1–64 letters, digits, `-`, `_`, or `.`; unique, case-insensitive. Unlike the rule position it survives reordering. An empty or whitespace id means no id. An invalid or duplicate id is an error only when `dns.proxyId` in `Proxy` mode refers to it; otherwise it is reported as a warning and has no effect. |
 | `appNames` | Application names or paths matched by this rule. An explicit empty string is the catch-all. |
 | `socks5ProxyEndpoint` | SOCKS5 hostname or IPv4 address plus port, for example `proxy.example.com:1080`. |
 | `username`, `password` | Optional SOCKS5 authentication. Configure both or neither. |
@@ -149,7 +149,10 @@ The optional `dns` object controls conventional DNS: UDP and TCP traffic to dest
 | `proxyId` | Required in `Proxy` mode: the `id` of the proxy rule whose SOCKS5 proxy carries DNS. That rule must support both `TCP` and `UDP` (omitting `supportedProtocols` means both). |
 | `serverOverride` | Optional, `Proxy` mode only: an IPv4 or IPv6 literal with an optional port that the SOCKS5 proxy queries instead of the server Windows addressed, for example `1.1.1.1`, `1.1.1.1:53`, `2606:4700:4700::1111`, or `[2606:4700:4700::1111]:53`. Host names are rejected so the override never needs DNS itself. |
 
-Configurations written before DNS routing existed load and save unchanged. The one exception is a configuration that already contained a rule property named `id` or a top-level property named `dns`: these were preserved but ignored by earlier releases and are now interpreted and validated.
+Configurations written before DNS routing existed load and save unchanged. The exceptions are configurations that already contained a rule property named `id` or a top-level property named `dns`. Earlier releases preserved and ignored both; they are now interpreted:
+
+- A rule `id` that is invalid or duplicated is only a warning unless DNS `Proxy` mode refers to it, so such a configuration still starts. An empty `id` means no id.
+- A `dns` value must be an object (or `null`). Any other value, such as `"dns": "8.8.8.8"`, is a configuration error that names `dns`, and the service does not start until it is removed or replaced with a DNS policy object.
 
 ### Direct mode
 
@@ -184,7 +187,7 @@ Windows retries a failed query and, for UDP answers marked truncated, retries ov
 
 If the selected proxy cannot be created when the service starts (for example its host name does not resolve or its listeners cannot be opened), the service still starts but **all DNS is blocked until the service is restarted** after the cause is fixed. The engine log says so explicitly. An unknown `mode` value stops the service from starting instead of being treated as `Direct`.
 
-The selection is made by `proxyId`, never by position, so reordering rules does not change the DNS proxy. If the referenced rule is removed or renamed, validation fails with `DNS_PROXY_NOT_FOUND`; ProxiFyre never silently switches to another proxy. The GUI assigns an id such as `proxy-1` to a rule when it is selected as the DNS proxy, and clears the id on a duplicated copy.
+The selection is made by `proxyId`, never by position, so reordering rules does not change the DNS proxy. If the referenced rule is removed or renamed, validation fails with `DNS_PROXY_NOT_FOUND`; ProxiFyre never silently switches to another proxy. The GUI assigns an id such as `proxy-1` to a rule when it is selected as the DNS proxy and the rule has no id, an invalid id, or an id another rule also uses, and it clears the id on a duplicated copy.
 
 ### Shared UDP association
 

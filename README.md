@@ -97,6 +97,8 @@ In `Proxy` mode DNS is not sent directly: if the selected proxy cannot carry a q
 
 > [!IMPORTANT]
 > **Upgrade note — DNS over TCP port 53.** In the default `Direct` DNS mode, which also applies to existing configurations without a `dns` section, DNS over TCP port 53 now always bypasses the proxies, as DNS over UDP port 53 already did. Rules that previously carried TCP port 53 through a proxy, for example a catch-all rule, no longer do so. To route DNS through a proxy, use DNS `Proxy` mode.
+>
+> **Upgrade note — `id` and `dns` keys.** Earlier releases ignored a rule property named `id` and a top-level property named `dns`; both are now interpreted. An invalid or duplicate `id` is only a warning unless DNS `Proxy` mode refers to it, and an empty `id` means no id. A `dns` value that is not an object, such as `"dns": "8.8.8.8"`, is a configuration error and the service does not start until it is removed or replaced with a DNS policy object.
 
 See the [configuration reference](docs/configuration.md) for matching rules, authentication, LAN bypass, DNS routing, logging, TLS options, and complete examples. The repository also includes a ready-to-edit [sample configuration](app-config.sample.json).
 

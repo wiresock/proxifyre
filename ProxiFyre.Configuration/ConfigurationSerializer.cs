@@ -65,6 +65,18 @@ namespace ProxiFyre.Configuration
                     "The configuration is not a valid JSON object.", ex);
             }
 
+            // Earlier releases kept an unknown top-level "dns" property and ignored it. It now selects
+            // DNS routing, so a value that is not an object is named in the error rather than
+            // reported as an anonymous invalid property value.
+            var dnsProperty = root.Properties().FirstOrDefault(
+                p => string.Equals(p.Name, "dns", StringComparison.OrdinalIgnoreCase));
+            if (dnsProperty != null && dnsProperty.Value.Type != JTokenType.Object && dnsProperty.Value.Type != JTokenType.Null)
+            {
+                throw new ConfigurationFormatException(
+                    "The 'dns' property must be an object such as { \"mode\": \"Proxy\", \"proxyId\": \"office\" }, " +
+                    "or be removed to keep DNS Direct.");
+            }
+
             ProxiFyreConfiguration configuration;
             try
             {

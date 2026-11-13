@@ -62,7 +62,7 @@ namespace ProxiFyre.Configuration
 
             ValidateCatchAllOrdering(configuration.Proxies, issues);
             ValidateApplicationOverlap(configuration.Proxies, issues);
-            ValidateProxyIds(configuration.Proxies, issues);
+            ValidateProxyIds(configuration.Proxies, configuration.Dns, issues);
             ValidateDns(configuration.Dns, configuration.Proxies, issues);
             return new ValidationResult(issues);
         }
@@ -509,41 +509,72 @@ namespace ProxiFyre.Configuration
                 : lastSlash < 0 ? value : string.Empty;
         }
 
-        private static void ValidateProxyIds(IList<ProxyRule> rules, ICollection<ValidationIssue> issues)
+        private static void ValidateProxyIds(IList<ProxyRule> rules, DnsSettings dns, ICollection<ValidationIssue> issues)
         {
+            // Earlier releases ignored a rule "id", so an id only stops the service when DNS Proxy
+            // mode depends on it. Any other invalid or duplicate id is reported as a warning and has
+            // no effect. An empty or whitespace id means no id, as the normalizer treats it.
+            var referencedId = ReferencedProxyId(dns);
             var seen = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             for (var index = 0; index < rules.Count; index++)
             {
                 var id = rules[index] == null ? null : rules[index].Id;
-                if (id == null)
+                if (string.IsNullOrWhiteSpace(id))
                     continue;
 
                 var trimmed = id.Trim();
+                var referenced = referencedId != null &&
+                                 string.Equals(trimmed, referencedId, StringComparison.OrdinalIgnoreCase);
                 if (!DnsConfiguration.IsValidProxyId(trimmed))
                 {
-                    issues.Add(Error(
-                        "PROXY_ID_INVALID",
-                        "A proxy id must contain 1 to " + DnsConfiguration.MaximumProxyIdLength +
-                        " letters, digits, '-', '_', or '.' characters. Remove the id or give it a valid value.",
-                        RulePath(index) + ".id",
-                        index));
+                    var message = "A proxy id must contain 1 to " + DnsConfiguration.MaximumProxyIdLength +
+                                  " letters, digits, '-', '_', or '.' characters.";
+                    issues.Add(referenced
+                        ? Error("PROXY_ID_INVALID",
+                            message + " dns.proxyId refers to this id; give the rule a valid id and update dns.proxyId.",
+                            RulePath(index) + ".id",
+                            index)
+                        : Warning("PROXY_ID_INVALID",
+                            message + " No DNS setting uses it, so it has no effect; remove it or give it a valid value " +
+                            "before selecting this rule as the DNS proxy.",
+                            RulePath(index) + ".id",
+                            index));
                     continue;
                 }
 
                 int firstIndex;
                 if (seen.TryGetValue(trimmed, out firstIndex))
                 {
-                    issues.Add(Error(
-                        "PROXY_ID_DUPLICATE",
-                        "The proxy id '" + trimmed + "' is already used by rule " + (firstIndex + 1) +
-                        "; proxy ids must be unique (case-insensitive).",
-                        RulePath(index) + ".id",
-                        index));
+                    var message = "The proxy id '" + trimmed + "' is already used by rule " + (firstIndex + 1) +
+                                  "; proxy ids must be unique (case-insensitive).";
+                    issues.Add(referenced
+                        ? Error("PROXY_ID_DUPLICATE",
+                            message + " dns.proxyId refers to this id, so the DNS proxy would be ambiguous.",
+                            RulePath(index) + ".id",
+                            index)
+                        : Warning("PROXY_ID_DUPLICATE",
+                            message + " No DNS setting uses it, so it has no effect; make it unique before " +
+                            "selecting either rule as the DNS proxy.",
+                            RulePath(index) + ".id",
+                            index));
                     continue;
                 }
 
                 seen.Add(trimmed, index);
             }
+        }
+
+        /// <summary>
+        /// The trimmed proxy id that DNS Proxy mode routes through, or null when DNS does not
+        /// reference a rule (DNS omitted, Direct, an unknown mode, or no proxyId).
+        /// </summary>
+        private static string ReferencedProxyId(DnsSettings dns)
+        {
+            DnsRoutingMode mode;
+            if (dns == null || string.IsNullOrWhiteSpace(dns.ProxyId) ||
+                !DnsConfiguration.TryGetMode(dns.Mode, out mode) || mode != DnsRoutingMode.Proxy)
+                return null;
+            return dns.ProxyId.Trim();
         }
 
         private static void ValidateDns(DnsSettings dns, IList<ProxyRule> rules, ICollection<ValidationIssue> issues)
