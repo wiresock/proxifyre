@@ -417,6 +417,34 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
+        public void RepeatedInvalidReferencedIdIsReportedAsAmbiguous()
+        {
+            var configuration = TwoProxyConfiguration();
+            configuration.Proxies[0].Id = "bad id";
+            configuration.Proxies[1].Id = "BAD ID";
+            configuration.Dns.ProxyId = "bad id";
+
+            var issues = _validator.Validate(configuration).Errors.Where(issue => issue.Code == "PROXY_ID_INVALID").ToList();
+
+            Assert.That(issues.Select(issue => issue.Path), Is.EqualTo(new[] { "proxies[0].id", "proxies[1].id" }));
+            StringAssert.DoesNotContain("ambiguous", issues[0].Message);
+            StringAssert.Contains("Rule 1 has the same id", issues[1].Message);
+            StringAssert.Contains("ambiguous", issues[1].Message);
+        }
+
+        [Test]
+        public void DirectModeDuplicateWarningNamesTheRuleTheGuiRepairs()
+        {
+            var configuration = TwoProxyConfiguration();
+            configuration.Dns = new DnsSettings { Mode = "Direct", ProxyId = "office" };
+            configuration.Proxies[1].Id = "office";
+
+            var warning = HasWarning(_validator.Validate(configuration), "PROXY_ID_DUPLICATE", "proxies[1].id");
+
+            StringAssert.Contains("assigns rule 1 a new id", warning.Message);
+        }
+
+        [Test]
         public void NormalizingIsIdempotentForIds()
         {
             var configuration = TwoProxyConfiguration();

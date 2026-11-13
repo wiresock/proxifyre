@@ -517,6 +517,7 @@ namespace ProxiFyre.Configuration
             var referencedId = DnsConfiguration.GetReferencedProxyId(dns);
             var namedId = DnsConfiguration.GetNamedProxyId(dns);
             var seen = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var seenInvalid = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             for (var index = 0; index < rules.Count; index++)
             {
                 var id = rules[index] == null ? null : rules[index].Id;
@@ -528,24 +529,38 @@ namespace ProxiFyre.Configuration
                                  string.Equals(trimmed, referencedId, StringComparison.OrdinalIgnoreCase);
                 var named = namedId != null &&
                             string.Equals(trimmed, namedId, StringComparison.OrdinalIgnoreCase);
+                int firstIndex;
                 if (!DnsConfiguration.IsValidProxyId(trimmed))
                 {
+                    // A repeated invalid id is reported against the first rule that has it, which is
+                    // the rule the DNS proxy selector, the validator and the service resolve it to.
+                    int? firstInvalidIndex = null;
+                    if (seenInvalid.TryGetValue(trimmed, out firstIndex))
+                        firstInvalidIndex = firstIndex;
+                    else
+                        seenInvalid.Add(trimmed, index);
+
                     var message = "A proxy id must contain 1 to " + DnsConfiguration.MaximumProxyIdLength +
                                   " letters, digits, '-', '_', or '.' characters.";
+                    if (firstInvalidIndex.HasValue)
+                        message += " Rule " + (firstInvalidIndex.Value + 1) + " has the same id.";
                     issues.Add(referenced
                         ? Error("PROXY_ID_INVALID",
-                            message + " dns.proxyId refers to this id. Select the rule as the DNS proxy again in " +
-                            "the GUI, which assigns a valid id, or give the rule a valid id and update dns.proxyId.",
+                            message + (firstInvalidIndex.HasValue
+                                ? " dns.proxyId refers to this id, so the DNS proxy would be ambiguous. Select the " +
+                                  "intended rule as the DNS proxy again in the GUI, which assigns it a valid id, or " +
+                                  "give the rules valid, unique ids and update dns.proxyId."
+                                : " dns.proxyId refers to this id. Select the rule as the DNS proxy again in the GUI, " +
+                                  "which assigns a valid id, or give the rule a valid id and update dns.proxyId."),
                             RulePath(index) + ".id",
                             index)
                         : Warning("PROXY_ID_INVALID",
-                            message + UnusedIdConsequence(named),
+                            message + UnusedIdConsequence(named, firstInvalidIndex),
                             RulePath(index) + ".id",
                             index));
                     continue;
                 }
 
-                int firstIndex;
                 if (seen.TryGetValue(trimmed, out firstIndex))
                 {
                     var message = "The proxy id '" + trimmed + "' is already used by rule " + (firstIndex + 1) +
@@ -558,7 +573,7 @@ namespace ProxiFyre.Configuration
                             RulePath(index) + ".id",
                             index)
                         : Warning("PROXY_ID_DUPLICATE",
-                            message + UnusedIdConsequence(named),
+                            message + UnusedIdConsequence(named, firstIndex),
                             RulePath(index) + ".id",
                             index));
                     continue;
@@ -568,12 +583,17 @@ namespace ProxiFyre.Configuration
             }
         }
 
-        private static string UnusedIdConsequence(bool namedByDirectModeDns)
+        /// <param name="namedByDirectModeDns">dns.proxyId names the id while DNS is not in Proxy mode.</param>
+        /// <param name="firstRuleWithId">The first rule with the same id when this rule repeats it;
+        /// the DNS proxy selector shows, and Proxy mode would use, that rule.</param>
+        private static string UnusedIdConsequence(bool namedByDirectModeDns, int? firstRuleWithId = null)
         {
-            return namedByDirectModeDns
-                ? " dns.proxyId names it, so it is kept, but DNS Proxy mode cannot use it as it is; switching DNS " +
-                  "to Proxy mode in the GUI assigns the rule a new id, or fix the id and dns.proxyId."
-                : " No DNS setting uses it, so it has no effect and is removed when the GUI saves the configuration.";
+            if (!namedByDirectModeDns)
+                return " No DNS setting uses it, so it has no effect and is removed when the GUI saves the configuration.";
+
+            var repaired = firstRuleWithId.HasValue ? "rule " + (firstRuleWithId.Value + 1) : "the rule";
+            return " dns.proxyId names it, so it is kept, but DNS Proxy mode cannot use it as it is; switching DNS " +
+                   "to Proxy mode in the GUI assigns " + repaired + " a new id, or fix the id and dns.proxyId.";
         }
 
         private static void ValidateDns(DnsSettings dns, IList<ProxyRule> rules, ICollection<ValidationIssue> issues)

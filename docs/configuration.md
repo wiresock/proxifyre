@@ -151,7 +151,7 @@ The optional `dns` object controls conventional DNS: UDP and TCP traffic to dest
 
 Configurations written before DNS routing existed load and save unchanged. The exceptions are configurations that already contained a rule property named `id` or a top-level property named `dns`. Earlier releases preserved and ignored both; they are now interpreted:
 
-- A rule `id` that is invalid or duplicated, including one written as a JSON object or array, is only a warning unless DNS `Proxy` mode refers to it, so such a configuration still starts; the GUI removes it on the next save unless `dns.proxyId` names it. An empty `id` means no id. A number or `true`/`false` is read as its text, for example `1.0` as `1`.
+- A rule `id` that is invalid or duplicated, including one written as a JSON object or array, is only a warning unless DNS `Proxy` mode refers to it, so such a configuration still starts; the GUI removes it on the next save unless `dns.proxyId` names it. An empty `id` means no id. A number or `true`/`false` is read as text the way .NET formats it, for example `1.0` as `1` and `true` as `True`.
 - A `dns` value must be an object (or `null`, which means `Direct`), and its `mode`, `proxyId`, and `serverOverride` must not be objects or arrays. Anything else, such as `"dns": "8.8.8.8"`, is a configuration error that names the property, and the service does not start until it is removed or replaced with a DNS policy object.
 - A `dns` object is validated like a new one: a `mode` other than `Direct` or `Proxy` (`DNS_MODE_UNKNOWN`), or `Proxy` mode whose `proxyId` is missing or names no rule (`DNS_PROXY_ID_MISSING`, `DNS_PROXY_NOT_FOUND`), also stops the service.
 
