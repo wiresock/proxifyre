@@ -296,9 +296,42 @@ TEST(DnsAssociationHealth, FailedOpensBackOffExponentiallyUpTo30Seconds)
         EXPECT_TRUE(health.may_open(t0 + delay));
     }
 
-    health.on_opened(t0);
+    // An association that stays open for the minimum age resets the backoff.
+    health.on_opened(t0 + 30s);
+    EXPECT_EQ(health.consecutive_failures(), 7u);
+    health.on_closed(t0 + 60s);
     EXPECT_EQ(health.consecutive_failures(), 0u);
-    EXPECT_TRUE(health.may_open(t0));
+    EXPECT_TRUE(health.may_open(t0 + 60s));
+}
+
+TEST(DnsAssociationHealth, AssociationClosingSoonAfterOpeningBacksOff)
+{
+    // A server that accepts UDP ASSOCIATE and then drops the control connection must not be
+    // reconnected in a tight loop.
+    proxy::dns_association_health<> health{ 3, 30s };
+    health.on_opened(t0);
+    health.on_closed(t0 + 1s);
+    EXPECT_EQ(health.consecutive_failures(), 1u);
+    EXPECT_FALSE(health.may_open(t0 + 1s));
+    EXPECT_TRUE(health.may_open(t0 + 2s));
+
+    health.on_opened(t0 + 2s);
+    health.on_closed(t0 + 3s);
+    EXPECT_EQ(health.consecutive_failures(), 2u);
+    EXPECT_FALSE(health.may_open(t0 + 4s));
+    EXPECT_TRUE(health.may_open(t0 + 5s));
+}
+
+TEST(DnsAssociationHealth, LongLivedAssociationResetsTheBackoffWhileOpen)
+{
+    proxy::dns_association_health<> health{ 3, 30s };
+    health.on_open_failed(t0);
+    health.on_open_failed(t0);
+    health.on_opened(t0 + 2s);
+    EXPECT_FALSE(health.on_unanswered(0, t0 + 31s));
+    EXPECT_EQ(health.consecutive_failures(), 1u + 1u);
+    EXPECT_FALSE(health.on_unanswered(0, t0 + 32s));
+    EXPECT_EQ(health.consecutive_failures(), 0u);
 }
 
 TEST(DnsAssociationHealth, SilentAssociationIsReopenedOnlyAfterUnansweredQueriesAndMinimumAge)
@@ -319,18 +352,33 @@ TEST(DnsAssociationHealth, YoungAssociationIsNotChurnedByAResolverThatNeverAnswe
     EXPECT_TRUE(health.on_unanswered(0, t0 + 30s));
 }
 
-TEST(DnsAssociationHealth, AnyRelayDatagramResetsTheUnansweredCount)
+TEST(DnsAssociationHealth, RelayDatagramResetsTheCountAndIsRemembered)
 {
     proxy::dns_association_health<> health{ 3, 30s };
     health.on_opened(t0);
+    EXPECT_FALSE(health.last_datagram().has_value());
     EXPECT_FALSE(health.on_unanswered(2, t0 + 40s));
-    health.on_relay_datagram();
+    health.on_relay_datagram(t0 + 41s);
+    EXPECT_EQ(health.last_datagram(), std::optional<time_point>{ t0 + 41s });
     EXPECT_FALSE(health.on_unanswered(2, t0 + 41s));
     EXPECT_TRUE(health.on_unanswered(1, t0 + 42s));
 
-    // Reopening resets the count and the age.
+    // Reopening resets the count, the age and the last datagram.
     health.on_opened(t0 + 50s);
+    EXPECT_FALSE(health.last_datagram().has_value());
     EXPECT_FALSE(health.on_unanswered(5, t0 + 60s));
+}
+
+TEST(DnsQueryTable, ExpireCountsOnlyQueriesSentAfterTheGivenTime)
+{
+    table_t table{ 10s, 1024 };
+    scripted_random random{ { 1, 2, 3 } };
+    (void)table.insert({ 1, 1 }, 1, t0, random);
+    (void)table.insert({ 2, 2 }, 1, t0 + 2s, random);
+    (void)table.insert({ 3, 3 }, 1, t0 + 3s, random);
+    // All three expire; only the two sent after t0 + 1 s are counted.
+    EXPECT_EQ(table.expire(t0 + 20s, t0 + 1s), 2u);
+    EXPECT_EQ(table.size(), 0u);
 }
 
 TEST(DnsQueryTable, InsertDoesNotSilentlyDiscardExpiredQueries)
@@ -440,4 +488,225 @@ TEST(DnsAnswerTruncation, ClientAnswerIsTruncatedToTheListenersLimit)
     ASSERT_TRUE(fits_view);
     EXPECT_EQ(proxy::build_dns_client_answer(*fits_view, v4_server.data(), 4, 53, 1, out.data(), out.size()),
         10u + proxy::dns_udp_answer_limit(1));
+}
+
+// --- Question check ---------------------------------------------------------------------------
+
+namespace
+{
+    /// A DNS message with header flags @p flags and one question for @p name (dot-separated).
+    std::vector<uint8_t> dns_with_question(const uint16_t id, const uint16_t flags, const std::string& name,
+        const uint16_t type = 1, const std::vector<uint8_t>& records = {})
+    {
+        std::vector<uint8_t> m{ static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id & 0xff),
+            static_cast<uint8_t>(flags >> 8), static_cast<uint8_t>(flags & 0xff), 0, 1,
+            0, static_cast<uint8_t>(records.empty() ? 0 : 1), 0, 0, 0, 0 };
+        std::size_t start = 0;
+        while (start <= name.size())
+        {
+            const auto dot = name.find('.', start);
+            const auto label = name.substr(start, dot == std::string::npos ? std::string::npos : dot - start);
+            m.push_back(static_cast<uint8_t>(label.size()));
+            m.insert(m.end(), label.begin(), label.end());
+            if (dot == std::string::npos)
+                break;
+            start = dot + 1;
+        }
+        m.push_back(0);
+        m.push_back(static_cast<uint8_t>(type >> 8));
+        m.push_back(static_cast<uint8_t>(type & 0xff));
+        m.push_back(0);
+        m.push_back(1);
+        m.insert(m.end(), records.begin(), records.end());
+        return m;
+    }
+
+    std::vector<uint8_t> query(const uint16_t id, const std::string& name, const uint16_t type = 1)
+    {
+        return dns_with_question(id, 0x0100, name, type);
+    }
+
+    std::vector<uint8_t> response(const uint16_t id, const std::string& name, const uint16_t type = 1)
+    {
+        return dns_with_question(id, 0x8180, name, type, { 0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 93, 184, 216, 34 });
+    }
+}
+
+TEST(DnsQuestionCheck, AnswerMustCarryTheQueriedQuestion)
+{
+    const auto asked = query(1, "example.com");
+    const auto fingerprint = proxy::dns_question_fingerprint(asked.data(), asked.size());
+    ASSERT_TRUE(fingerprint.has_value());
+
+    const auto same = response(2, "example.com");
+    EXPECT_TRUE(proxy::dns_answer_matches_question(same.data(), same.size(), *fingerprint));
+    // Names compare without regard to ASCII case (resolvers may randomize it).
+    const auto mixed_case = response(2, "ExAmPlE.CoM");
+    EXPECT_TRUE(proxy::dns_answer_matches_question(mixed_case.data(), mixed_case.size(), *fingerprint));
+
+    const auto other_name = response(2, "example.org");
+    EXPECT_FALSE(proxy::dns_answer_matches_question(other_name.data(), other_name.size(), *fingerprint));
+    const auto other_type = response(2, "example.com", 28);
+    EXPECT_FALSE(proxy::dns_answer_matches_question(other_type.data(), other_type.size(), *fingerprint));
+}
+
+TEST(DnsQuestionCheck, QuestionlessErrorResponsesAreAcceptedOtherQuestionlessMessagesAreNot)
+{
+    const auto asked = query(1, "example.com");
+    const auto fingerprint = *proxy::dns_question_fingerprint(asked.data(), asked.size());
+
+    // FORMERR / NOTIMP without a question section.
+    std::vector<uint8_t> error{ 0, 2, 0x81, 0x84, 0, 0, 0, 0, 0, 0, 0, 0 };
+    EXPECT_TRUE(proxy::dns_answer_matches_question(error.data(), error.size(), fingerprint));
+
+    std::vector<uint8_t> success_without_question{ 0, 2, 0x81, 0x80, 0, 0, 0, 0, 0, 0, 0, 0 };
+    EXPECT_FALSE(proxy::dns_answer_matches_question(success_without_question.data(), success_without_question.size(), fingerprint));
+    std::vector<uint8_t> query_without_question{ 0, 2, 0x01, 0x04, 0, 0, 0, 0, 0, 0, 0, 0 };
+    EXPECT_FALSE(proxy::dns_answer_matches_question(query_without_question.data(), query_without_question.size(), fingerprint));
+
+    // A query without a parsable question has no fingerprint.
+    EXPECT_FALSE(proxy::dns_question_fingerprint(success_without_question.data(), success_without_question.size()));
+    auto truncated = asked;
+    truncated.resize(truncated.size() - 2);
+    EXPECT_FALSE(proxy::dns_question_fingerprint(truncated.data(), truncated.size()));
+}
+
+// --- Relay session ------------------------------------------------------------------------------
+
+namespace
+{
+    using session_t = proxy::dns_relay_session<test_client>;
+
+    session_t make_session()
+    {
+        return session_t{ 10s, 4096, 3, 30s };
+    }
+
+    std::pair<const uint8_t*, std::size_t> address_bytes(const test_client& client)
+    {
+        return { reinterpret_cast<const uint8_t*>(&client.server), sizeof(client.server) };
+    }
+
+    /// Sends @p name from @p client through @p session; returns the relay ID used.
+    uint16_t send_query(session_t& session, const test_client& client, const uint16_t id, const std::string& name,
+        const time_point at, const uint16_t relay_id)
+    {
+        auto datagram = socks_datagram(v4_override, 53, query(id, name));
+        EXPECT_EQ(session.prepare_query(client, datagram.data(), datagram.size(), 1, at, [relay_id] { return relay_id; }),
+            proxy::dns_relay_query::send);
+        return static_cast<uint16_t>((datagram[10] << 8) | datagram[11]);
+    }
+
+    session_t::answer receive(session_t& session, const uint16_t relay_id, const std::string& name, const time_point at)
+    {
+        const auto relayed = socks_datagram(v4_override, 53, response(relay_id, name));
+        std::vector<uint8_t> out(1024);
+        return session.prepare_answer(relayed.data(), relayed.size(), address_bytes, out.data(), out.size(), at);
+    }
+}
+
+TEST(DnsRelaySession, QueryIsRewrittenAndItsAnswerDelivered)
+{
+    auto session = make_session();
+    const test_client client{ 0x0101A8C0, 50000 };
+    session.on_opened(t0);
+
+    EXPECT_EQ(send_query(session, client, 0x1234, "example.com", t0, 0x7777), 0x7777);
+    const auto answer = receive(session, 0x7777, "example.com", t0 + 1s);
+    EXPECT_EQ(answer.outcome, proxy::dns_relay_answer::deliver);
+    ASSERT_TRUE(answer.client.has_value());
+    EXPECT_EQ(*answer.client, client);
+    EXPECT_GT(answer.size, 10u + 12u);
+    EXPECT_EQ(receive(session, 0x7777, "example.com", t0 + 1s).outcome, proxy::dns_relay_answer::unmatched);
+}
+
+TEST(DnsRelaySession, MalformedQueriesAreRejected)
+{
+    auto session = make_session();
+    auto no_question = socks_datagram(v4_override, 53, std::vector<uint8_t>{ 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    EXPECT_EQ(session.prepare_query({ 1, 1 }, no_question.data(), no_question.size(), 1, t0, [] { return uint16_t{ 1 }; }),
+        proxy::dns_relay_query::malformed);
+    auto wrong_family = socks_datagram(v6_relay_source, 53, query(1, "example.com"));
+    EXPECT_EQ(session.prepare_query({ 1, 1 }, wrong_family.data(), wrong_family.size(), 1, t0, [] { return uint16_t{ 1 }; }),
+        proxy::dns_relay_query::malformed);
+    EXPECT_EQ(session.queries_in_flight(), 0u);
+}
+
+TEST(DnsRelaySession, AnswerToAnotherQuestionIsDroppedWithoutConsumingTheQuery)
+{
+    auto session = make_session();
+    session.on_opened(t0);
+    (void)send_query(session, { 1, 1 }, 0x1111, "example.com", t0, 0x2222);
+
+    // A late or forged answer carrying the same relay ID but another question.
+    EXPECT_EQ(receive(session, 0x2222, "attacker.example", t0 + 1s).outcome, proxy::dns_relay_answer::question_mismatch);
+    // The real answer still gets through.
+    EXPECT_EQ(receive(session, 0x2222, "example.com", t0 + 2s).outcome, proxy::dns_relay_answer::deliver);
+}
+
+TEST(DnsRelaySession, UnparsableRelayDatagramsAreMalformed)
+{
+    auto session = make_session();
+    std::vector<uint8_t> out(64);
+    const std::vector<uint8_t> garbage{ 1, 2, 3 };
+    EXPECT_EQ(session.prepare_answer(garbage.data(), garbage.size(), address_bytes, out.data(), out.size(), t0).outcome,
+        proxy::dns_relay_answer::malformed);
+}
+
+// The scenario behind a review finding: Windows also queries a resolver the proxy cannot reach.
+// Its queries expire unanswered while answers from a working resolver keep arriving; the
+// association must stay open, because the relay is clearly alive.
+TEST(DnsRelaySession, UnreachableResolverDoesNotRetireAWorkingAssociation)
+{
+    auto session = make_session();
+    session.on_opened(t0);
+
+    uint16_t relay_id = 0x100;
+    for (int round = 0; round < 12; ++round)
+    {
+        const auto at = t0 + std::chrono::seconds{ round * 5 };
+        // Three lookups to the dead resolver and one to the working resolver, sent together.
+        for (int dead = 0; dead < 3; ++dead)
+            (void)send_query(session, { 0xDEAD, static_cast<uint16_t>(60000 + round * 4 + dead) }, 1, "dead.example", at, ++relay_id);
+        const auto working = send_query(session, { 0x0808, static_cast<uint16_t>(61000 + round) }, 1, "ok.example", at, ++relay_id);
+        // The working resolver answers 50 ms later.
+        EXPECT_EQ(receive(session, working, "ok.example", at + 50ms).outcome, proxy::dns_relay_answer::deliver);
+        EXPECT_FALSE(session.expire(at + 1s)) << "round " << round;
+        EXPECT_FALSE(session.expire(at + 4s)) << "round " << round;
+    }
+}
+
+TEST(DnsRelaySession, SilentlyDeadAssociationIsRetired)
+{
+    auto session = make_session();
+    session.on_opened(t0);
+    // Nothing ever comes back from the relay.
+    for (int i = 0; i < 3; ++i)
+        (void)send_query(session, { 1, static_cast<uint16_t>(i) }, 1, "a.example", t0 + 25s, static_cast<uint16_t>(10 + i));
+    EXPECT_FALSE(session.expire(t0 + 30s));
+    EXPECT_TRUE(session.expire(t0 + 36s));
+}
+
+TEST(DnsRelaySession, AnswersAfterTheQueriesWereSentDoNotHideALaterSilence)
+{
+    auto session = make_session();
+    session.on_opened(t0);
+    const auto first = send_query(session, { 1, 1 }, 1, "a.example", t0 + 30s, 1);
+    EXPECT_EQ(receive(session, first, "a.example", t0 + 31s).outcome, proxy::dns_relay_answer::deliver);
+    // The relay goes silent after t0 + 31 s: three later queries expire unanswered.
+    for (int i = 0; i < 3; ++i)
+        (void)send_query(session, { 1, static_cast<uint16_t>(2 + i) }, 1, "a.example", t0 + 32s, static_cast<uint16_t>(2 + i));
+    EXPECT_TRUE(session.expire(t0 + 43s));
+}
+
+TEST(DnsRelaySession, ClosingForgetsQueriesInFlightAndBacksOffWhenEarly)
+{
+    auto session = make_session();
+    session.on_opened(t0);
+    (void)send_query(session, { 1, 1 }, 1, "a.example", t0, 5);
+    session.on_closed(t0 + 2s);
+    EXPECT_EQ(session.queries_in_flight(), 0u);
+    EXPECT_EQ(session.consecutive_failures(), 1u);
+    EXPECT_FALSE(session.may_open(t0 + 2s));
+    EXPECT_TRUE(session.may_open(t0 + 3s));
 }

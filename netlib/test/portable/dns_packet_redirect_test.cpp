@@ -37,10 +37,12 @@ namespace
     const uint8_t client_mac[6] = { 0x02, 0, 0, 0, 0, 0x10 };
     const uint8_t gateway_mac[6] = { 0x02, 0, 0, 0, 0, 0x01 };
 
+    /// A DNS message for "example.com" A IN followed by @p extra bytes standing for records.
     std::vector<uint8_t> dns_message(const uint16_t id, const size_t extra = 17)
     {
         std::vector<uint8_t> m{ static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id & 0xff),
-                                0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                                0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1 };
         for (size_t i = 0; i < extra; ++i)
             m.push_back(static_cast<uint8_t>(0x30 + i));
         return m;
@@ -214,11 +216,11 @@ namespace
             return frame::udp6(local_address, original_server, udp_listener, client_port, datagram);
     }
 
-    /// The DNS relay's listener step (socks5_dns_udp_relay.h), using the shipped bookkeeping:
-    /// forward() takes the datagram the redirect delivered to the listener, records the query and
-    /// returns the datagram sent through the shared SOCKS5 association, with the relay ID in
-    /// place of the client's message ID; answer() maps a relay datagram back and returns the
-    /// listener's reply frame to the client, or nothing when the answer matches no query.
+    /// The DNS relay's per-datagram steps (socks5_dns_udp_relay.h) through the shipped
+    /// dns_relay_session: forward() takes the datagram the redirect delivered to the listener and
+    /// returns the datagram sent through the shared SOCKS5 association, with the relay ID in place
+    /// of the client's message ID; answer() maps a relay datagram back and returns the listener's
+    /// reply frame to the client, or nothing when the session does not deliver it.
     template <typename Addr>
     struct dns_relay
     {
@@ -226,16 +228,14 @@ namespace
         static constexpr uint8_t address_type = std::is_same_v<Addr, v4> ? 1 : 4;
         static constexpr size_t address_size = std::is_same_v<Addr, v4> ? 4 : 16;
 
-        proxy::dns_query_table<client> queries{ std::chrono::seconds{ 10 }, 64 };
+        proxy::dns_relay_session<client> session{ std::chrono::seconds{ 10 }, 64, 3, std::chrono::seconds{ 30 } };
         std::chrono::steady_clock::time_point now{ std::chrono::seconds{ 1000 } };
+
+        dns_relay() { session.on_opened(now); }
 
         std::vector<uint8_t> forward(frame& redirected, const uint16_t relay_id)
         {
             auto datagram = redirected.payload();
-            const auto offset = proxy::socks5_dns_query_offset(datagram.data(), datagram.size(), address_type);
-            EXPECT_TRUE(offset.has_value());
-            if (!offset)
-                return {};
 
             // The listener's sender: the (swapped) queried server and the client port.
             Addr server;
@@ -245,38 +245,26 @@ namespace
                 server = Addr{ redirected.ip6()->ip6_src };
             const client sender{ server, ntohs(redirected.udp()->th_sport) };
 
-            const auto original_id = *proxy::dns_message_id(datagram.data() + *offset, datagram.size() - *offset);
-            const auto id = queries.insert(sender, original_id, now, [relay_id] { return relay_id; });
-            EXPECT_EQ(id, std::optional<uint16_t>{ relay_id });
-            proxy::set_dns_message_id(datagram.data() + *offset, relay_id);
+            EXPECT_EQ(session.prepare_query(sender, datagram.data(), datagram.size(), address_type, now,
+                [relay_id] { return relay_id; }), proxy::dns_relay_query::send);
             return datagram;
         }
 
-        std::optional<frame> answer(const std::vector<uint8_t>& relayed_bytes, const char* local_address)
+        std::optional<frame> answer(const std::vector<uint8_t>& relayed, const char* local_address)
         {
-            const auto relayed = proxy::parse_socks5_udp_datagram(relayed_bytes.data(), relayed_bytes.size());
-            if (!relayed)
+            std::vector<uint8_t> out(relayed.size() + 32);
+            const auto result = session.prepare_answer(relayed.data(), relayed.size(),
+                [](const client& c) { return std::pair{ reinterpret_cast<const uint8_t*>(&c.ip), address_size }; },
+                out.data(), out.size(), now);
+            if (result.outcome != proxy::dns_relay_answer::deliver)
                 return std::nullopt;
-            const auto relay_id = proxy::dns_message_id(relayed->data, relayed->data_size);
-            if (!relay_id)
-                return std::nullopt;
-            const auto query = queries.take(*relay_id, now);
-            if (!query)
-                return std::nullopt;
+            out.resize(result.size);
 
-            std::vector<uint8_t> out(relayed_bytes.size() + 32);
-            const auto size = proxy::build_dns_client_answer(*relayed,
-                reinterpret_cast<const uint8_t*>(&query->client.ip), address_size, 53, query->original_id,
-                out.data(), out.size());
-            if (size == 0)
-                return std::nullopt;
-            out.resize(size);
-
-            const std::string server{ query->client.ip };
+            const std::string server{ result.client->ip };
             if constexpr (std::is_same_v<Addr, v4>)
-                return frame::udp4(local_address, server.c_str(), udp_listener, query->client.port, out);
+                return frame::udp4(local_address, server.c_str(), udp_listener, result.client->port, out);
             else
-                return frame::udp6(local_address, server.c_str(), udp_listener, query->client.port, out);
+                return frame::udp6(local_address, server.c_str(), udp_listener, result.client->port, out);
         }
     };
 
@@ -579,7 +567,8 @@ TEST(DnsPacketRedirect, MalformedListenerRepliesAreRejectedUntouched)
 TEST(DnsPacketRedirect, UnredirectableUdpIsRejectedSoTheRouterDropsIt)
 {
     ndisapi::socks5_udp_local_redirect<v4> redirect{ log_level::error };
-    const auto big = dns_message(0x3333, MAX_ETHER_FRAME - ETHER_HEADER_LENGTH - sizeof(iphdr) - sizeof(udphdr) - 12 - 4);
+    // Room for everything but 4 of the 10 SOCKS5 header bytes (12-byte header, 17-byte question).
+    const auto big = dns_message(0x3333, MAX_ETHER_FRAME - ETHER_HEADER_LENGTH - sizeof(iphdr) - sizeof(udphdr) - 12 - 17 - 4);
     auto packet = frame::udp4("192.168.1.10", "192.168.1.1", client_port, 53, big);
     EXPECT_TRUE(redirect.is_new_endpoint(packet.buffer));
     EXPECT_FALSE(redirect.process_client_to_server_packet(packet.buffer, htons(udp_listener)));

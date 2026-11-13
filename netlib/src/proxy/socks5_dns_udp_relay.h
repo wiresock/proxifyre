@@ -7,9 +7,10 @@
 // header already prepended (socks5_udp_local_redirect.h), naming the server to ask: the server
 // the application queried, or the DNS server override. The relay replaces the query's message ID
 // with a unique random relay ID and sends it through the shared association. The answer carrying
-// that relay ID is returned to the client socket with its original ID and a SOCKS5 header naming
-// the server the client queried, so the redirect presents it as an answer from that server.
-// Bookkeeping and policy are in dns_udp_multiplexer.h.
+// that relay ID and the query's question is returned to the client socket with its original ID
+// and a SOCKS5 header naming the server the client queried, so the redirect presents it as an
+// answer from that server. The per-datagram logic is in dns_udp_multiplexer.h
+// (dns_relay_session), where it is unit tested; this file does the I/O.
 //
 // The association is opened on the first query and reopened, with backoff, after its control
 // connection closes, its relay socket fails, or it stops answering. While none is open, queries
@@ -19,7 +20,7 @@
 // completion port: the listener, the reader of the current relay socket, and maintenance (opens
 // associations, expires queries, checks health). Socket receives have short timeouts so every
 // thread notices stop() and a retired association; sockets are closed only after the threads
-// using them have been joined.
+// using them have been joined. stop() also interrupts an association being opened.
 
 #include <condition_variable>
 #include <deque>
@@ -44,7 +45,7 @@ namespace proxy
         /// Whether the router recently redirected a UDP DNS query from this local source port.
         using authorize_client_t = bool(uint16_t);
 
-        /// Observes each UDP relay endpoint the SOCKS5 server returns, before it is used.
+        /// Observes each UDP relay endpoint the SOCKS5 server returns, before anything is sent to it.
         using relay_endpoint_observed_t = void(const endpoint_t&);
 
         /// Queries in flight are forgotten after this long; Windows gives up on a query sooner.
@@ -56,10 +57,11 @@ namespace proxy
         /// Bound on queries held while an association is being opened.
         static constexpr std::size_t max_waiting_queries = 64;
 
-        /// Unanswered queries in a row (with no datagram from the relay) that retire an association.
+        /// Unanswered queries (sent after the last datagram from the relay) that retire an association.
         static constexpr std::size_t unanswered_limit = 3;
 
-        /// An association younger than this is not retired for unanswered queries.
+        /// An association younger than this is not retired for unanswered queries, and closing
+        /// sooner than this counts as a failed open for the backoff.
         static constexpr std::chrono::seconds minimum_association_age{ 30 };
 
         /**
@@ -104,7 +106,7 @@ namespace proxy
         /**
          * @brief Creates the listener and starts the threads. No association is opened until the
          *        first query arrives.
-         * @return false if the listener socket could not be created.
+         * @return false if the listener socket or a thread could not be created.
          */
         bool start()
         {
@@ -115,9 +117,23 @@ namespace proxy
                 return false;
 
             stopping_.store(false, std::memory_order_release);
+            try
+            {
+                listener_thread_ = std::thread(&socks5_dns_udp_relay::listener_loop, this);
+                maintenance_thread_ = std::thread(&socks5_dns_udp_relay::maintenance_loop, this);
+            }
+            catch (const std::exception& e)
+            {
+                NETLIB_ERROR("DNS relay: failed to start its threads: {}", e.what());
+                stopping_.store(true, std::memory_order_release);
+                if (listener_thread_.joinable())
+                    listener_thread_.join();
+                closesocket(listener_socket_);
+                listener_socket_ = INVALID_SOCKET;
+                return false;
+            }
+
             running_ = true;
-            listener_thread_ = std::thread(&socks5_dns_udp_relay::listener_loop, this);
-            maintenance_thread_ = std::thread(&socks5_dns_udp_relay::maintenance_loop, this);
             NETLIB_INFO("DNS relay: listening on UDP port {} for {} DNS queries via SOCKS5 server {}",
                 listener_port_, address_type_t::af_type == AF_INET ? "IPv4" : "IPv6", upstream_.to_string());
             return true;
@@ -130,6 +146,14 @@ namespace proxy
                 return;
 
             stopping_.store(true, std::memory_order_release);
+
+            // Interrupt an association being opened: the connect wait polls stopping_, and a
+            // connected control socket is shut down so a blocked negotiation returns at once.
+            {
+                std::scoped_lock lock(handshake_lock_);
+                if (handshake_socket_ != INVALID_SOCKET)
+                    shutdown(handshake_socket_, SD_BOTH);
+            }
             {
                 std::scoped_lock lock(lock_);
                 maintenance_cv_.notify_all();
@@ -144,14 +168,17 @@ namespace proxy
             {
                 std::scoped_lock lock(lock_);
                 current = std::move(association_);
+                dropped_unavailable_ += waiting_.size();
                 waiting_.clear();
-                queries_.clear();
+                session_.clear();
             }
             close_association(std::move(current));
 
             closesocket(listener_socket_);
             listener_socket_ = INVALID_SOCKET;
             running_ = false;
+
+            report_drops(std::chrono::steady_clock::now(), true);
         }
 
     private:
@@ -196,6 +223,7 @@ namespace proxy
         static constexpr std::size_t own_address_size = address_type_t::af_type == AF_INET ? 4 : 16;
         static constexpr DWORD receive_timeout_ms = 500;
         static constexpr std::size_t max_datagram_size = 65535;
+        static constexpr std::chrono::seconds report_interval{ 30 };
 
         // --- Configuration -------------------------------------------------------------------
 
@@ -212,9 +240,13 @@ namespace proxy
         std::condition_variable maintenance_cv_;
         std::unique_ptr<association> association_;
         std::deque<waiting_query> waiting_;
-        dns_query_table<client_t, client_hash> queries_{ query_ttl, max_queries_in_flight };
-        dns_association_health<> health_{ unanswered_limit, minimum_association_age };
+        dns_relay_session<client_t, client_hash> session_{ query_ttl, max_queries_in_flight, unanswered_limit,
+            minimum_association_age };
         std::random_device random_;
+
+        /// Control socket of an association being opened, so stop() can interrupt it.
+        std::mutex handshake_lock_;
+        SOCKET handshake_socket_{ INVALID_SOCKET };
 
         SOCKET listener_socket_{ INVALID_SOCKET };
         uint16_t listener_port_{ 0 };
@@ -252,6 +284,27 @@ namespace proxy
             DWORD bytes_returned = 0;
             WSAIoctl(socket, SIO_UDP_CONNRESET, &new_behavior, sizeof(new_behavior),
                 nullptr, 0, &bytes_returned, nullptr, nullptr);
+        }
+
+        /// Keepalive on the control connection, so a silently dropped connection (NAT timeout,
+        /// server crash) is detected and the association reopened.
+        static void enable_keepalive(const SOCKET socket) noexcept
+        {
+            const BOOL enabled = TRUE;
+            setsockopt(socket, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&enabled), sizeof(enabled));
+#if defined(TCP_KEEPIDLE) && defined(TCP_KEEPINTVL)
+            const DWORD idle_seconds = 60;
+            const DWORD interval_seconds = 10;
+            setsockopt(socket, IPPROTO_TCP, TCP_KEEPIDLE, reinterpret_cast<const char*>(&idle_seconds), sizeof(idle_seconds));
+            setsockopt(socket, IPPROTO_TCP, TCP_KEEPINTVL, reinterpret_cast<const char*>(&interval_seconds), sizeof(interval_seconds));
+#endif
+        }
+
+        /// Socket errors after which a UDP socket keeps working (ICMP-induced or oversized datagrams).
+        [[nodiscard]] static bool transient_udp_error(const int error) noexcept
+        {
+            return error == WSAETIMEDOUT || error == WSAECONNRESET || error == WSAENETRESET ||
+                error == WSAEMSGSIZE || error == WSAEINTR;
         }
 
         [[nodiscard]] static std::optional<client_t> client_from(const SOCKADDR_STORAGE& sender) noexcept
@@ -342,24 +395,30 @@ namespace proxy
         }
 
         /// Sends one query through the open association. Caller holds lock_.
-        void send_query_locked(const client_t& client, std::vector<uint8_t>& datagram, const std::size_t dns_offset)
+        void send_query_locked(const client_t& client, std::vector<uint8_t>& datagram)
         {
-            const auto original_id = *dns_message_id(datagram.data() + dns_offset, datagram.size() - dns_offset);
-            const auto relay_id = queries_.insert(client, original_id, std::chrono::steady_clock::now(),
-                [this] { return random_id(); });
-            if (!relay_id)
+            switch (session_.prepare_query(client, datagram.data(), datagram.size(), own_address_type,
+                std::chrono::steady_clock::now(), [this] { return random_id(); }))
             {
+            case dns_relay_query::send:
+                break;
+            case dns_relay_query::malformed:
+                ++dropped_malformed_;
+                return;
+            case dns_relay_query::no_id:
                 ++dropped_unavailable_;
                 return;
             }
 
-            set_dns_message_id(datagram.data() + dns_offset, *relay_id);
             if (send(association_->relay, reinterpret_cast<const char*>(datagram.data()),
                 static_cast<int>(datagram.size()), 0) == SOCKET_ERROR)
             {
                 ++dropped_send_failures_;
-                association_->failed.store(true, std::memory_order_release);
-                maintenance_cv_.notify_all();
+                if (!transient_udp_error(WSAGetLastError()))
+                {
+                    association_->failed.store(true, std::memory_order_release);
+                    maintenance_cv_.notify_all();
+                }
             }
         }
 
@@ -375,45 +434,65 @@ namespace proxy
                 int sender_size = static_cast<int>(sizeof(sender));
                 const auto received = recvfrom(listener_socket_, reinterpret_cast<char*>(buffer.data()),
                     static_cast<int>(buffer.size()), 0, reinterpret_cast<sockaddr*>(&sender), &sender_size);
-                if (received == SOCKET_ERROR || received <= 0)
-                    continue; // timeout (checks stopping_), or a spurious error on a UDP socket
-
-                const auto size = static_cast<std::size_t>(received);
-                const auto client = client_from(sender);
-                if (!client || client->endpoint.port == 0 || !authorize_client_ ||
-                    !authorize_client_(client->endpoint.port))
+                if (received == SOCKET_ERROR)
                 {
-                    ++dropped_unauthorized_;
+                    // A timeout lets the loop check stopping_. Back off on a persistent error
+                    // instead of spinning.
+                    if (!transient_udp_error(WSAGetLastError()))
+                        std::this_thread::sleep_for(std::chrono::milliseconds{ 100 });
                     continue;
                 }
-
-                const auto dns_offset = socks5_dns_query_offset(buffer.data(), size, own_address_type);
-                if (!dns_offset)
-                {
-                    ++dropped_malformed_;
+                if (received <= 0)
                     continue;
-                }
 
-                std::vector<uint8_t> datagram(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(size));
-
-                std::scoped_lock lock(lock_);
-                if (association_ && !association_->failed.load(std::memory_order_acquire))
+                try
                 {
-                    send_query_locked(*client, datagram, *dns_offset);
-                    continue;
+                    handle_listener_datagram(buffer, static_cast<std::size_t>(received), sender);
                 }
-
-                // No usable association: hold the query while one is opened, unless opening is
-                // backing off after a failure or too many queries are already waiting.
-                if (!health_.may_open(std::chrono::steady_clock::now()) || waiting_.size() >= max_waiting_queries)
+                catch (const std::exception& e)
                 {
                     ++dropped_unavailable_;
-                    continue;
+                    NETLIB_DEBUG("DNS relay: dropped a query: {}", e.what());
                 }
-
-                waiting_.push_back(waiting_query{ *client, std::move(datagram) });
-                maintenance_cv_.notify_all();
             }
+        }
+
+        void handle_listener_datagram(const std::vector<uint8_t>& buffer, const std::size_t size,
+            const SOCKADDR_STORAGE& sender)
+        {
+            const auto client = client_from(sender);
+            if (!client || client->endpoint.port == 0 || !authorize_client_ ||
+                !authorize_client_(client->endpoint.port))
+            {
+                ++dropped_unauthorized_;
+                return;
+            }
+
+            if (!socks5_dns_query_offset(buffer.data(), size, own_address_type))
+            {
+                ++dropped_malformed_;
+                return;
+            }
+
+            std::vector<uint8_t> datagram(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(size));
+
+            std::scoped_lock lock(lock_);
+            if (association_ && !association_->failed.load(std::memory_order_acquire))
+            {
+                send_query_locked(*client, datagram);
+                return;
+            }
+
+            // No usable association: hold the query while one is opened, unless opening is
+            // backing off after a failure or too many queries are already waiting.
+            if (!session_.may_open(std::chrono::steady_clock::now()) || waiting_.size() >= max_waiting_queries)
+            {
+                ++dropped_unavailable_;
+                return;
+            }
+
+            waiting_.push_back(waiting_query{ *client, std::move(datagram) });
+            maintenance_cv_.notify_all();
         }
 
         void reader_loop(association* const owner)
@@ -427,7 +506,7 @@ namespace proxy
                     static_cast<int>(buffer.size()), 0);
                 if (received == SOCKET_ERROR)
                 {
-                    if (WSAGetLastError() == WSAETIMEDOUT)
+                    if (transient_udp_error(WSAGetLastError()))
                         continue;
                     owner->failed.store(true, std::memory_order_release);
                     {
@@ -437,38 +516,25 @@ namespace proxy
                     return;
                 }
 
-                const auto relayed = parse_socks5_udp_datagram(buffer.data(), static_cast<std::size_t>(received));
-                const auto relay_id = relayed ? dns_message_id(relayed->data, relayed->data_size) : std::nullopt;
-                if (!relay_id)
-                {
-                    ++dropped_unmatched_answers_;
-                    continue;
-                }
-
-                std::optional<typename decltype(queries_)::pending> query;
+                typename dns_relay_session<client_t, client_hash>::answer result;
                 {
                     std::scoped_lock lock(lock_);
-                    health_.on_relay_datagram();
-                    query = queries_.take(*relay_id, std::chrono::steady_clock::now());
+                    result = session_.prepare_answer(buffer.data(), static_cast<std::size_t>(received),
+                        [](const client_t& client)
+                        {
+                            return std::pair{ reinterpret_cast<const uint8_t*>(&client.endpoint.ip), own_address_size };
+                        },
+                        answer.data(), answer.size(), std::chrono::steady_clock::now());
                 }
 
-                if (!query)
+                if (result.outcome != dns_relay_answer::deliver)
                 {
                     ++dropped_unmatched_answers_;
                     continue;
                 }
 
-                const auto answer_size = build_dns_client_answer(*relayed,
-                    reinterpret_cast<const uint8_t*>(&query->client.endpoint.ip), own_address_size, dns_port,
-                    query->original_id, answer.data(), answer.size());
-                if (answer_size == 0)
-                {
-                    ++dropped_unmatched_answers_;
-                    continue;
-                }
-
-                const auto [to, to_size] = sockaddr_from(query->client);
-                if (sendto(listener_socket_, reinterpret_cast<const char*>(answer.data()), static_cast<int>(answer_size),
+                const auto [to, to_size] = sockaddr_from(*result.client);
+                if (sendto(listener_socket_, reinterpret_cast<const char*>(answer.data()), static_cast<int>(result.size),
                     0, reinterpret_cast<const sockaddr*>(&to), to_size) == SOCKET_ERROR)
                 {
                     ++dropped_send_failures_;
@@ -487,48 +553,62 @@ namespace proxy
                 {
                     return stopping_.load(std::memory_order_acquire) ||
                         (association_ && association_->failed.load(std::memory_order_acquire)) ||
-                        (!association_ && !waiting_.empty() && health_.may_open(std::chrono::steady_clock::now()));
+                        (!association_ && !waiting_.empty() && session_.may_open(std::chrono::steady_clock::now()));
                 });
                 if (stopping_.load(std::memory_order_acquire))
                     break;
 
-                const auto now = std::chrono::steady_clock::now();
-
-                // Retire an association whose relay or control connection failed, or that has
-                // stopped answering.
-                if (association_)
+                try
                 {
-                    const auto unanswered = queries_.expire(now);
-                    const char* reason = nullptr;
-                    if (association_->failed.load(std::memory_order_acquire))
-                        reason = "the UDP relay socket failed";
-                    else if (control_channel_closed(association_->control))
-                        reason = "the SOCKS5 control connection closed";
-                    else if (health_.on_unanswered(unanswered, now))
-                        reason = "queries stopped being answered";
-
-                    if (reason)
-                    {
-                        NETLIB_INFO("DNS relay: closing the SOCKS5 UDP association because {}; it is reopened "
-                            "on the next query", reason);
-                        auto retired = std::move(association_);
-                        queries_.clear();
-                        lock.unlock();
-                        close_association(std::move(retired));
+                    maintain(lock);
+                }
+                catch (const std::exception& e)
+                {
+                    if (!lock.owns_lock())
                         lock.lock();
-                        continue;
-                    }
+                    NETLIB_ERROR("DNS relay: maintenance failed: {}", e.what());
                 }
-                else
-                {
-                    (void)queries_.expire(now);
-                }
-
-                if (!association_ && !waiting_.empty() && health_.may_open(now))
-                    open_association(lock);
-
-                report_drops(now);
             }
+        }
+
+        /// One maintenance pass. Called with lock_ held; may release it for blocking work.
+        void maintain(std::unique_lock<std::mutex>& lock)
+        {
+            const auto now = std::chrono::steady_clock::now();
+
+            // Retire an association whose relay or control connection failed, or that has
+            // stopped answering.
+            if (association_)
+            {
+                const char* reason = nullptr;
+                if (association_->failed.load(std::memory_order_acquire))
+                    reason = "the UDP relay socket failed";
+                else if (control_channel_closed(association_->control))
+                    reason = "the SOCKS5 control connection closed";
+                else if (session_.expire(now))
+                    reason = "queries stopped being answered";
+
+                if (reason)
+                {
+                    NETLIB_INFO("DNS relay: closing the SOCKS5 UDP association with {} because {}; it is reopened "
+                        "on the next query", upstream_.to_string(), reason);
+                    auto retired = std::move(association_);
+                    session_.on_closed(now);
+                    lock.unlock();
+                    close_association(std::move(retired));
+                    lock.lock();
+                    return;
+                }
+            }
+            else
+            {
+                session_.expire_closed(now);
+            }
+
+            if (!association_ && !waiting_.empty() && session_.may_open(now))
+                open_association(lock);
+
+            report_drops(now, false);
         }
 
         /// Opens an association for the waiting queries. Called with lock_ held; releases it
@@ -536,91 +616,112 @@ namespace proxy
         void open_association(std::unique_lock<std::mutex>& lock)
         {
             lock.unlock();
-
             auto opened = connect_association();
-
             lock.lock();
             const auto now = std::chrono::steady_clock::now();
 
+            if (opened && !stopping_.load(std::memory_order_acquire))
+            {
+                try
+                {
+                    opened->reader = std::thread(&socks5_dns_udp_relay::reader_loop, this, opened.get());
+                }
+                catch (const std::exception& e)
+                {
+                    NETLIB_ERROR("DNS relay: failed to start the UDP relay reader: {}", e.what());
+                    lock.unlock();
+                    close_association(std::move(opened));
+                    lock.lock();
+                }
+            }
+
             if (!opened || stopping_.load(std::memory_order_acquire))
             {
-                const bool failed = !opened;
                 if (opened)
                 {
                     lock.unlock();
                     close_association(std::move(opened));
                     lock.lock();
+                    return;
                 }
-                if (failed)
+
+                if (stopping_.load(std::memory_order_acquire))
+                    return;
+
+                session_.on_open_failed(now);
+                dropped_unavailable_ += waiting_.size();
+                waiting_.clear();
+                const auto retry = std::chrono::duration_cast<std::chrono::seconds>(session_.next_attempt() - now);
+                if (session_.consecutive_failures() == 1)
                 {
-                    health_.on_open_failed(now);
-                    dropped_unavailable_ += waiting_.size();
-                    waiting_.clear();
-                    const auto retry = std::chrono::duration_cast<std::chrono::seconds>(health_.next_attempt() - now);
-                    if (health_.consecutive_failures() == 1)
-                    {
-                        NETLIB_WARNING("DNS relay: could not open a SOCKS5 UDP association with {}; UDP DNS is "
-                            "dropped until one opens (next attempt in {} s)", upstream_.to_string(), retry.count());
-                    }
-                    else
-                    {
-                        NETLIB_DEBUG("DNS relay: SOCKS5 UDP association attempt {} failed; next attempt in {} s",
-                            health_.consecutive_failures(), retry.count());
-                    }
+                    NETLIB_WARNING("DNS relay: could not open a SOCKS5 UDP association with {}; UDP DNS is "
+                        "dropped until one opens (next attempt in {} s)", upstream_.to_string(), retry.count());
+                }
+                else
+                {
+                    NETLIB_DEBUG("DNS relay: SOCKS5 UDP association attempt {} failed; next attempt in {} s",
+                        session_.consecutive_failures(), retry.count());
                 }
                 return;
             }
 
-            if (health_.consecutive_failures() > 0)
-                NETLIB_INFO("DNS relay: SOCKS5 UDP association with {} opened", upstream_.to_string());
-            else
-                NETLIB_DEBUG("DNS relay: SOCKS5 UDP association with {} opened", upstream_.to_string());
-
-            health_.on_opened(now);
+            NETLIB_INFO("DNS relay: SOCKS5 UDP association with {} opened", upstream_.to_string());
+            session_.on_opened(now);
             association_ = std::move(opened);
-            association_->reader = std::thread(&socks5_dns_udp_relay::reader_loop, this, association_.get());
 
             auto waiting = std::move(waiting_);
             waiting_.clear();
             for (auto& query : waiting)
-            {
-                if (const auto offset = socks5_dns_query_offset(query.datagram.data(), query.datagram.size(),
-                    own_address_type))
-                {
-                    send_query_locked(query.client, query.datagram, *offset);
-                }
-            }
+                send_query_locked(query.client, query.datagram);
         }
 
-        /// Blocking: SOCKS5 connect, authentication, UDP ASSOCIATE and relay socket. Lock not held.
+        /// Blocking: SOCKS5 connect, authentication, UDP ASSOCIATE and relay socket. Lock not
+        /// held. stop() interrupts it (see stop()). The relay endpoint is reported before the
+        /// relay socket exists, so the recursion guard knows it before anything is sent to it.
         std::unique_ptr<association> connect_association()
         {
-            auto control = association_client_.connect_to_socks5_proxy(upstream_.ip, upstream_.port);
+            auto control = association_client_.connect_to_socks5_proxy(upstream_.ip, upstream_.port, &stopping_);
             if (control == INVALID_SOCKET)
                 return nullptr;
 
-            auto negotiate_ctx = std::make_unique<negotiate_context_t>(address_type_t{}, 0,
-                credentials_ ? std::optional(credentials_->first) : std::nullopt,
-                credentials_ ? std::optional(credentials_->second) : std::nullopt,
-                upstream_options_);
+            {
+                std::scoped_lock lock(handshake_lock_);
+                if (stopping_.load(std::memory_order_acquire))
+                {
+                    closesocket(control);
+                    return nullptr;
+                }
+                handshake_socket_ = control;
+            }
 
             std::optional<endpoint_t> relay_endpoint;
             try
             {
+                auto negotiate_ctx = std::make_unique<negotiate_context_t>(address_type_t{}, 0,
+                    credentials_ ? std::optional(credentials_->first) : std::nullopt,
+                    credentials_ ? std::optional(credentials_->second) : std::nullopt,
+                    upstream_options_);
                 relay_endpoint = association_client_.associate_to_socks5_proxy(control, upstream_.ip, negotiate_ctx);
             }
-            catch (...)
+            catch (const std::exception& e)
             {
+                NETLIB_DEBUG("DNS relay: SOCKS5 UDP ASSOCIATE failed: {}", e.what());
                 relay_endpoint.reset();
             }
 
-            if (!relay_endpoint)
+            {
+                std::scoped_lock lock(handshake_lock_);
+                handshake_socket_ = INVALID_SOCKET;
+            }
+
+            if (!relay_endpoint || stopping_.load(std::memory_order_acquire))
             {
                 closesocket(control);
                 return nullptr;
             }
 
-            // Report the relay endpoint before the relay socket exists (recursion guard).
+            enable_keepalive(control);
+
             if (relay_endpoint_observed_)
                 relay_endpoint_observed_(*relay_endpoint);
 
@@ -679,11 +780,9 @@ namespace proxy
             return true;
         }
 
-        /// Logs what was dropped since the last report, at most every 30 seconds.
-        void report_drops(const std::chrono::steady_clock::time_point now)
+        /// Logs what was dropped since the last report: at most every 30 seconds, and on stop().
+        void report_drops(const std::chrono::steady_clock::time_point now, const bool final_report)
         {
-            using namespace std::chrono_literals;
-
             const auto unauthorized = dropped_unauthorized_.load(std::memory_order_relaxed);
             const auto malformed = dropped_malformed_.load(std::memory_order_relaxed);
             const auto unavailable = dropped_unavailable_.load(std::memory_order_relaxed);
@@ -691,11 +790,11 @@ namespace proxy
             const auto send_failures = dropped_send_failures_.load(std::memory_order_relaxed);
             const auto total = unauthorized + malformed + unavailable + unmatched + send_failures;
 
-            if (total == reported_drops_ || now - last_report_ < 30s)
+            if (total == reported_drops_ || (!final_report && now - last_report_ < report_interval))
                 return;
 
             NETLIB_INFO("DNS relay: dropped so far: {} queries while no SOCKS5 UDP association was available, "
-                "{} not from a redirected DNS client, {} without a DNS header, {} answers matching no query, "
+                "{} not from a redirected DNS client, {} without a DNS question, {} answers matching no query, "
                 "{} send failures", unavailable, unauthorized, malformed, unmatched, send_failures);
             reported_drops_ = total;
             last_report_ = now;

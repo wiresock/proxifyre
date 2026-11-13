@@ -18,6 +18,7 @@
 #include <functional>
 #include <optional>
 #include <unordered_map>
+#include <utility>
 
 #include "dns_routing_policy.h"
 
@@ -70,6 +71,119 @@ namespace proxy
     }
 
     /**
+     * @brief Walks the question section of a DNS message (RFC 1035 section 4.1.2).
+     *
+     * @p visit is called, in order, for every byte range of the section: each QNAME label's
+     * length byte, its content (with @p is_label_text true), the terminating zero byte or
+     * two-byte compression pointer, and each question's QTYPE and QCLASS.
+     *
+     * @param limit The section must end at or before this offset.
+     * @return The offset just past the section, or std::nullopt when it is malformed, truncated,
+     *         or ends after @p limit.
+     */
+    template <typename Visitor>
+    [[nodiscard]] constexpr std::optional<std::size_t> walk_dns_questions(const uint8_t* message,
+        const std::size_t size, const std::size_t limit, Visitor&& visit)
+    {
+        if (message == nullptr || size < dns_header_size)
+            return std::nullopt;
+
+        const auto question_count = static_cast<std::size_t>((message[4] << 8) | message[5]);
+        std::size_t end = dns_header_size;
+        for (std::size_t question = 0; question < question_count; ++question)
+        {
+            // QNAME: labels ending with a zero byte, or a two-byte compression pointer.
+            while (true)
+            {
+                if (end >= size)
+                    return std::nullopt;
+                const auto length = static_cast<std::size_t>(message[end]);
+                if (length == 0)
+                {
+                    visit(message + end, 1, false);
+                    ++end;
+                    break;
+                }
+                if ((length & 0xC0) == 0xC0)
+                {
+                    if (size - end < 2)
+                        return std::nullopt;
+                    visit(message + end, 2, false);
+                    end += 2;
+                    break;
+                }
+                if ((length & 0xC0) != 0 || size - end < 1 + length)
+                    return std::nullopt;
+                visit(message + end, 1, false);
+                visit(message + end + 1, length, true);
+                end += 1 + length;
+            }
+            if (size - end < 4)
+                return std::nullopt;
+            visit(message + end, 4, false); // QTYPE, QCLASS
+            end += 4;
+            if (end > limit)
+                return std::nullopt;
+        }
+        return end;
+    }
+
+    /**
+     * @brief A 64-bit fingerprint of a DNS message's question section (count, names ignoring
+     *        ASCII case, types and classes), used to check that an answer belongs to the query
+     *        it claims to answer.
+     * @return std::nullopt when the message has no question or its question section is malformed.
+     */
+    [[nodiscard]] inline std::optional<uint64_t> dns_question_fingerprint(const uint8_t* message,
+        const std::size_t size) noexcept
+    {
+        if (message == nullptr || size < dns_header_size || ((message[4] << 8) | message[5]) == 0)
+            return std::nullopt;
+
+        uint64_t hash = 14695981039346656037ull; // FNV-1a
+        const auto mix = [&hash](const uint8_t byte) noexcept
+        {
+            hash ^= byte;
+            hash *= 1099511628211ull;
+        };
+        mix(message[4]);
+        mix(message[5]);
+        const auto end = walk_dns_questions(message, size, size,
+            [&mix](const uint8_t* bytes, const std::size_t count, const bool is_label_text) noexcept
+            {
+                for (std::size_t i = 0; i < count; ++i)
+                {
+                    const auto byte = bytes[i];
+                    mix(is_label_text && byte >= 'A' && byte <= 'Z' ? static_cast<uint8_t>(byte + ('a' - 'A')) : byte);
+                }
+            });
+        if (!end)
+            return std::nullopt;
+        return hash;
+    }
+
+    /**
+     * @brief Whether a DNS answer belongs to a query with question fingerprint @p question.
+     *
+     * The answer must carry the same question section (RFC 1035 servers copy it). An error
+     * response without a question section (QR set, non-zero RCODE, QDCOUNT 0), which some
+     * servers send for queries they cannot parse or do not implement, is also accepted.
+     */
+    [[nodiscard]] inline bool dns_answer_matches_question(const uint8_t* answer, const std::size_t size,
+        const uint64_t question) noexcept
+    {
+        if (answer == nullptr || size < dns_header_size)
+            return false;
+        if (const auto fingerprint = dns_question_fingerprint(answer, size))
+            return *fingerprint == question;
+
+        const bool is_response = (answer[2] & 0x80) != 0;
+        const bool is_error = (answer[3] & 0x0F) != 0;
+        const bool no_question = answer[4] == 0 && answer[5] == 0;
+        return is_response && is_error && no_question;
+    }
+
+    /**
      * @brief Truncates a DNS answer larger than @p limit the way a server does when an answer
      *        does not fit (RFC 1035 section 4.2.1, RFC 7766): the TC bit is set, and only the
      *        header and question section are kept, so the resolver repeats the query over TCP.
@@ -85,43 +199,8 @@ namespace proxy
         if (message == nullptr || size <= limit || size < dns_header_size)
             return size;
 
-        const auto question_count = static_cast<std::size_t>((message[4] << 8) | message[5]);
-        std::size_t end = dns_header_size;
-        bool parsed = true;
-        for (std::size_t question = 0; question < question_count && parsed; ++question)
-        {
-            // QNAME: labels ending with a zero byte, or a two-byte compression pointer.
-            while (true)
-            {
-                if (end >= size)
-                {
-                    parsed = false;
-                    break;
-                }
-                const auto length = message[end];
-                if (length == 0)
-                {
-                    ++end;
-                    break;
-                }
-                if ((length & 0xC0) == 0xC0)
-                {
-                    end += 2;
-                    break;
-                }
-                if ((length & 0xC0) != 0)
-                {
-                    parsed = false;
-                    break;
-                }
-                end += 1 + static_cast<std::size_t>(length);
-            }
-            end += 4; // QTYPE, QCLASS
-            if (end > size || end > limit)
-                parsed = false;
-        }
-
-        if (!parsed)
+        auto end = walk_dns_questions(message, size, limit, [](const uint8_t*, std::size_t, bool) noexcept {});
+        if (!end)
         {
             end = dns_header_size;
             message[4] = 0;
@@ -131,7 +210,7 @@ namespace proxy
         message[2] = static_cast<uint8_t>(message[2] | 0x02); // TC
         for (std::size_t field = 6; field < dns_header_size; ++field)
             message[field] = 0; // ANCOUNT, NSCOUNT, ARCOUNT
-        return end;
+        return *end;
     }
 
     /**
@@ -147,10 +226,10 @@ namespace proxy
      *
      * @param relayed The relay's datagram, already parsed (parse_socks5_udp_datagram()).
      * @param server_address Queried server address bytes (network byte order): 4 or 16 bytes.
-     * @param original_id The client's DNS message ID.
      * An answer larger than dns_udp_answer_limit() is truncated (truncate_dns_answer()), so the
      * resolver retries over TCP instead of receiving a fragmented reply it would never get.
      *
+     * @param original_id The client's DNS message ID.
      * @param out Output buffer.
      * @return Bytes written, or 0 when the answer does not fit, carries no DNS header, or
      *         @p address_size is not 4 or 16.
@@ -181,16 +260,19 @@ namespace proxy
             dns_udp_answer_limit(address_type));
     }
 
+
     /**
      * @brief Queries in flight through the shared association, keyed by relay ID.
      *
      * insert() replaces a query's message ID with a relay ID that is unique among the queries in
      * flight and chosen by the caller's random source, so the 16-bit ID keeps its full entropy
      * against forged answers. A retransmission (same client socket and original ID) reuses its
-     * relay ID, so duplicate answers map to it and it counts once as unanswered. Entries expire
-     * after the TTL; the table is bounded, and when full the oldest query is evicted.
+     * relay ID, so duplicate answers map to it and it counts once as unanswered. Each entry also
+     * keeps the query's question fingerprint (dns_question_fingerprint()) so an answer can be
+     * checked against it. Entries expire after the TTL; the table is bounded, and when full the
+     * oldest query is evicted.
      *
-     * Not thread-safe: the relay serializes access.
+     * Not thread-safe: the caller serializes access.
      *
      * @tparam Client Client socket identity (equality-comparable, hashed by @p Hash). The relay
      *         uses the listener's sender endpoint: the queried server address and the client port.
@@ -205,6 +287,7 @@ namespace proxy
         {
             Client client;
             uint16_t original_id{};
+            uint64_t question{};
         };
 
         dns_query_table(const std::chrono::seconds ttl, const std::size_t capacity)
@@ -214,19 +297,21 @@ namespace proxy
 
         /**
          * @brief Records a query and returns its relay ID.
+         * @param question The query's question fingerprint.
          * @param random Callable returning a uniformly distributed uint16_t.
          * @return The relay ID, or std::nullopt only if no ID could be found (cannot happen while
          *         the capacity is below 65536).
          */
         template <typename Random>
-        std::optional<uint16_t> insert(const Client& client, const uint16_t original_id, const time_point now,
-            Random&& random)
+        std::optional<uint16_t> insert(const Client& client, const uint16_t original_id, const uint64_t question,
+            const time_point now, Random&& random)
         {
             const key k{ client, original_id };
             if (const auto existing = by_client_.find(k); existing != by_client_.end())
             {
                 auto& entry = entries_.at(existing->second);
                 entry.sent_at = now;
+                entry.question = question;
                 return existing->second;
             }
 
@@ -257,9 +342,26 @@ namespace proxy
             if (!relay_id)
                 return std::nullopt;
 
-            entries_.emplace(*relay_id, entry{ client, original_id, now });
+            entries_.emplace(*relay_id, entry{ client, original_id, question, now });
             by_client_.emplace(k, *relay_id);
             return relay_id;
+        }
+
+        /// insert() for a query without a question fingerprint (fingerprint 0).
+        template <typename Random>
+        std::optional<uint16_t> insert(const Client& client, const uint16_t original_id, const time_point now,
+            Random&& random)
+        {
+            return insert(client, original_id, uint64_t{ 0 }, now, std::forward<Random>(random));
+        }
+
+        /// The live query with @p relay_id, without removing it.
+        [[nodiscard]] std::optional<pending> find(const uint16_t relay_id, const time_point now) const
+        {
+            const auto it = entries_.find(relay_id);
+            if (it == entries_.end() || now - it->second.sent_at > ttl_)
+                return std::nullopt;
+            return pending{ it->second.client, it->second.original_id, it->second.question };
         }
 
         /**
@@ -273,30 +375,35 @@ namespace proxy
                 return std::nullopt;
 
             const bool expired = now - it->second.sent_at > ttl_;
-            pending result{ it->second.client, it->second.original_id };
+            pending result{ it->second.client, it->second.original_id, it->second.question };
             erase(it);
             if (expired)
                 return std::nullopt;
             return result;
         }
 
-        /// Removes queries older than the TTL and returns how many expired unanswered.
-        std::size_t expire(const time_point now)
+        /**
+         * @brief Removes queries older than the TTL.
+         * @param counted_after When set, only expired queries sent after this time are counted.
+         * @return How many expired queries were counted.
+         */
+        std::size_t expire(const time_point now, const std::optional<time_point> counted_after = std::nullopt)
         {
-            std::size_t expired = 0;
+            std::size_t counted = 0;
             for (auto it = entries_.begin(); it != entries_.end();)
             {
                 if (now - it->second.sent_at > ttl_)
                 {
+                    if (!counted_after || it->second.sent_at > *counted_after)
+                        ++counted;
                     it = erase(it);
-                    ++expired;
                 }
                 else
                 {
                     ++it;
                 }
             }
-            return expired;
+            return counted;
         }
 
         void clear() noexcept
@@ -313,6 +420,7 @@ namespace proxy
         {
             Client client;
             uint16_t original_id{};
+            uint64_t question{};
             time_point sent_at{};
         };
 
@@ -357,14 +465,18 @@ namespace proxy
      * @brief Decides when the shared association is reopened and when a new one may be tried.
      *
      * - A failed open is retried after a backoff that doubles from 1 s up to 30 s; queries
-     *   arriving meanwhile are dropped (Proxy mode never sends DNS directly).
-     * - An open association is reopened when its SOCKS5 control connection closes or the relay
+     *   arriving meanwhile are dropped (Proxy mode never sends DNS directly). An association that
+     *   closes less than @p minimum_age after opening counts as a failed open, so a server that
+     *   accepts UDP ASSOCIATE and then drops the connection is not reconnected in a tight loop.
+     *   The backoff resets once an association has stayed open for @p minimum_age.
+     * - An open association is reopened when its SOCKS5 control connection closes or its relay
      *   socket fails (reported by the relay), or when it looks silently dead: at least
-     *   @p unanswered_limit queries in a row expired without any datagram arriving from the
-     *   relay in between, and the association is at least @p minimum_age old. The age limit
-     *   keeps a resolver that never answers from churning a working association.
+     *   @p unanswered_limit queries expired unanswered that were sent after the last datagram
+     *   from the relay, and the association is at least @p minimum_age old. A query sent before
+     *   a datagram that did arrive is not counted, so a resolver that never answers cannot
+     *   retire an association that keeps delivering other answers.
      *
-     * Not thread-safe: the relay serializes access.
+     * Not thread-safe: the caller serializes access.
      */
     template <typename Clock = std::chrono::steady_clock>
     class dns_association_health
@@ -393,19 +505,41 @@ namespace proxy
 
         void on_opened(const time_point now) noexcept
         {
-            failures_ = 0;
             unanswered_ = 0;
             opened_at_ = now;
+            last_datagram_.reset();
+        }
+
+        /// The association was closed at @p now (for any reason).
+        void on_closed(const time_point now) noexcept
+        {
+            if (now - opened_at_ < minimum_age_)
+                on_open_failed(now);
+            else
+                failures_ = 0;
         }
 
         /// Any datagram from the relay shows the association is alive.
-        void on_relay_datagram() noexcept { unanswered_ = 0; }
+        void on_relay_datagram(const time_point now) noexcept
+        {
+            unanswered_ = 0;
+            last_datagram_ = now;
+        }
 
-        /// Records queries that expired unanswered; true when the association should be reopened.
+        /// Time of the last datagram from the relay since the association opened, if any.
+        [[nodiscard]] std::optional<time_point> last_datagram() const noexcept { return last_datagram_; }
+
+        /**
+         * @brief Records @p count queries that expired unanswered (counted as expire() does with
+         *        last_datagram()); true when the association should be reopened.
+         */
         [[nodiscard]] bool on_unanswered(const std::size_t count, const time_point now) noexcept
         {
+            const bool old_enough = now - opened_at_ >= minimum_age_;
+            if (old_enough)
+                failures_ = 0; // the association has proved itself
             unanswered_ += count;
-            return unanswered_ >= unanswered_limit_ && now - opened_at_ >= minimum_age_;
+            return unanswered_ >= unanswered_limit_ && old_enough;
         }
 
         [[nodiscard]] std::size_t consecutive_failures() const noexcept { return failures_; }
@@ -420,5 +554,148 @@ namespace proxy
         std::size_t unanswered_{};
         time_point next_attempt_{};
         time_point opened_at_{};
+        std::optional<time_point> last_datagram_;
+    };
+
+    /// What happens to a query the DNS relay's listener received.
+    enum class dns_relay_query : uint8_t
+    {
+        send,      ///< rewritten with its relay ID: send it through the association
+        malformed, ///< no SOCKS5 header of the listener's family, or no parsable DNS question
+        no_id      ///< no free relay ID (cannot happen below 65536 queries in flight)
+    };
+
+    /// What happens to a datagram the SOCKS5 relay delivered.
+    enum class dns_relay_answer : uint8_t
+    {
+        deliver,           ///< return it to the client
+        malformed,         ///< no SOCKS5 UDP header, no DNS header, or does not fit the output
+        unmatched,         ///< matches no query in flight (late, duplicate or unsolicited)
+        question_mismatch  ///< its relay ID is in flight but its question is another query's
+    };
+
+    /**
+     * @brief The DNS relay's per-datagram logic for one shared association, free of sockets so
+     *        it is unit tested on any platform (socks5_dns_udp_relay.h does the I/O).
+     *
+     * Combines the table of queries in flight, the association health, the question check and
+     * the answer returned to the client. Not thread-safe: the relay serializes access.
+     */
+    template <typename Client, typename Hash = std::hash<Client>, typename Clock = std::chrono::steady_clock>
+    class dns_relay_session
+    {
+    public:
+        using time_point = typename Clock::time_point;
+        using table_t = dns_query_table<Client, Hash, Clock>;
+
+        struct answer
+        {
+            dns_relay_answer outcome{ dns_relay_answer::malformed };
+            std::optional<Client> client;
+            std::size_t size{}; ///< bytes written to the output buffer when delivered
+        };
+
+        dns_relay_session(const std::chrono::seconds query_ttl, const std::size_t max_queries,
+            const std::size_t unanswered_limit, const std::chrono::seconds minimum_association_age)
+            : queries_(query_ttl, max_queries), health_(unanswered_limit, minimum_association_age)
+        {
+        }
+
+        /**
+         * @brief Prepares a query from the listener for the association: validates it, records
+         *        it, and replaces its DNS message ID with the relay ID in place.
+         * @param datagram SOCKS5 UDP header of the listener's family (@p address_type) followed
+         *        by the DNS query, as the local redirect delivered it.
+         */
+        template <typename Random>
+        dns_relay_query prepare_query(const Client& client, uint8_t* datagram, const std::size_t size,
+            const uint8_t address_type, const time_point now, Random&& random)
+        {
+            const auto offset = socks5_dns_query_offset(datagram, size, address_type);
+            if (!offset)
+                return dns_relay_query::malformed;
+
+            auto* const message = datagram + *offset;
+            const auto message_size = size - *offset;
+            const auto question = dns_question_fingerprint(message, message_size);
+            if (!question)
+                return dns_relay_query::malformed;
+
+            const auto original_id = *dns_message_id(message, message_size);
+            const auto relay_id = queries_.insert(client, original_id, *question, now, std::forward<Random>(random));
+            if (!relay_id)
+                return dns_relay_query::no_id;
+
+            set_dns_message_id(message, *relay_id);
+            return dns_relay_query::send;
+        }
+
+        /**
+         * @brief Maps a datagram from the SOCKS5 relay back to its client.
+         *
+         * Every datagram from the relay counts as a sign of life. An answer is delivered only if
+         * its relay ID is in flight and its question section matches that query's
+         * (dns_answer_matches_question()); a mismatch does not consume the query.
+         *
+         * @param address_of (const Client&) -> std::pair<const uint8_t*, std::size_t>: the
+         *        address bytes of the server the client queried.
+         * @param out Output buffer for the datagram returned to the client
+         *        (build_dns_client_answer()).
+         */
+        template <typename AddressOf>
+        answer prepare_answer(const uint8_t* relayed, const std::size_t size, AddressOf&& address_of,
+            uint8_t* out, const std::size_t out_capacity, const time_point now)
+        {
+            health_.on_relay_datagram(now);
+
+            const auto view = parse_socks5_udp_datagram(relayed, size);
+            const auto relay_id = view ? dns_message_id(view->data, view->data_size) : std::nullopt;
+            if (!relay_id)
+                return { dns_relay_answer::malformed, std::nullopt, 0 };
+
+            const auto query = queries_.find(*relay_id, now);
+            if (!query)
+                return { dns_relay_answer::unmatched, std::nullopt, 0 };
+            if (!dns_answer_matches_question(view->data, view->data_size, query->question))
+                return { dns_relay_answer::question_mismatch, std::nullopt, 0 };
+
+            (void)queries_.take(*relay_id, now);
+            const auto [address, address_size] = address_of(query->client);
+            const auto written = build_dns_client_answer(*view, address, address_size, dns_port,
+                query->original_id, out, out_capacity);
+            if (written == 0)
+                return { dns_relay_answer::malformed, std::nullopt, 0 };
+            return { dns_relay_answer::deliver, query->client, written };
+        }
+
+        /// Expires queries; true when the association looks silently dead and should be reopened.
+        [[nodiscard]] bool expire(const time_point now)
+        {
+            return health_.on_unanswered(queries_.expire(now, health_.last_datagram()), now);
+        }
+
+        /// Expires queries while no association is open (nothing is counted).
+        void expire_closed(const time_point now) { (void)queries_.expire(now); }
+
+        [[nodiscard]] bool may_open(const time_point now) const noexcept { return health_.may_open(now); }
+        void on_open_failed(const time_point now) noexcept { health_.on_open_failed(now); }
+        void on_opened(const time_point now) noexcept { health_.on_opened(now); }
+
+        /// The association closed: its queries in flight can no longer be answered.
+        void on_closed(const time_point now) noexcept
+        {
+            queries_.clear();
+            health_.on_closed(now);
+        }
+
+        void clear() noexcept { queries_.clear(); }
+
+        [[nodiscard]] std::size_t queries_in_flight() const noexcept { return queries_.size(); }
+        [[nodiscard]] std::size_t consecutive_failures() const noexcept { return health_.consecutive_failures(); }
+        [[nodiscard]] time_point next_attempt() const noexcept { return health_.next_attempt(); }
+
+    private:
+        table_t queries_;
+        dns_association_health<Clock> health_;
     };
 }

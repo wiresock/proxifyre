@@ -86,9 +86,11 @@ namespace proxy
          *
          * @param socks_server_address The address of the SOCKS5 proxy server to connect to.
          * @param socks_server_port The port of the SOCKS5 proxy server.
+         * @param cancel Optional flag that abandons the connect attempt once set.
          * @return A connected TCP SOCKET handle, or INVALID_SOCKET on failure.
          */
-        SOCKET connect_to_socks5_proxy(address_type_t socks_server_address, const uint16_t socks_server_port)
+        SOCKET connect_to_socks5_proxy(address_type_t socks_server_address, const uint16_t socks_server_port,
+            const std::atomic_bool* const cancel = nullptr)
         {
             auto socks_tcp_socket = WSASocket(address_type_t::af_type, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
                 WSA_FLAG_OVERLAPPED);
@@ -165,7 +167,7 @@ namespace proxy
                 sa_service.sin_port = htons(socks_server_port);
 
                 if (!connect_with_timeout(socks_tcp_socket, reinterpret_cast<SOCKADDR*>(&sa_service),
-                    sizeof(sa_service), 5000))
+                    sizeof(sa_service), 5000, cancel))
                 {
                     closesocket(socks_tcp_socket);
                     return INVALID_SOCKET;
@@ -179,7 +181,7 @@ namespace proxy
                 sa_service.sin6_port = htons(socks_server_port);
 
                 if (!connect_with_timeout(socks_tcp_socket, reinterpret_cast<SOCKADDR*>(&sa_service),
-                    sizeof(sa_service), 5000))
+                    sizeof(sa_service), 5000, cancel))
                 {
                     closesocket(socks_tcp_socket);
                     return INVALID_SOCKET;
@@ -201,7 +203,7 @@ namespace proxy
          * @return true if the connection completed within the timeout, false otherwise.
          */
         static bool connect_with_timeout(const SOCKET s, const sockaddr* const addr, const int addr_len,
-                                         const DWORD timeout_ms) noexcept
+                                         const DWORD timeout_ms, const std::atomic_bool* const cancel = nullptr) noexcept
         {
             u_long non_blocking = 1;
             if (ioctlsocket(s, FIONBIO, &non_blocking) == SOCKET_ERROR)
@@ -214,27 +216,43 @@ namespace proxy
             }
             else if (WSAGetLastError() == WSAEWOULDBLOCK)
             {
-                fd_set write_set;
-                FD_ZERO(&write_set);
-                FD_SET(s, &write_set);
-                fd_set error_set;
-                FD_ZERO(&error_set);
-                FD_SET(s, &error_set);
-
-                timeval tv;
-                tv.tv_sec = static_cast<long>(timeout_ms / 1000);
-                tv.tv_usec = static_cast<long>((timeout_ms % 1000) * 1000);
-
-                if (const auto sel = select(0, nullptr, &write_set, &error_set, &tv);
-                    sel > 0 && FD_ISSET(s, &write_set))
+                // Wait in slices of at most 100 ms so that a caller's @p cancel flag ends the
+                // wait promptly; without a flag this is the same single bounded wait.
+                const auto deadline = GetTickCount64() + timeout_ms;
+                while (true)
                 {
-                    auto so_error = 0;
-                    auto len = static_cast<int>(sizeof(so_error));
-                    if (getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so_error), &len) == 0 &&
-                        so_error == 0)
+                    const auto now = GetTickCount64();
+                    if (now >= deadline || (cancel && cancel->load(std::memory_order_acquire)))
+                        break;
+                    auto slice = deadline - now;
+                    if (cancel && slice > 100)
+                        slice = 100;
+
+                    fd_set write_set;
+                    FD_ZERO(&write_set);
+                    FD_SET(s, &write_set);
+                    fd_set error_set;
+                    FD_ZERO(&error_set);
+                    FD_SET(s, &error_set);
+
+                    timeval tv;
+                    tv.tv_sec = static_cast<long>(slice / 1000);
+                    tv.tv_usec = static_cast<long>((slice % 1000) * 1000);
+
+                    const auto sel = select(0, nullptr, &write_set, &error_set, &tv);
+                    if (sel == 0)
+                        continue;
+                    if (sel > 0 && FD_ISSET(s, &write_set))
                     {
-                        succeeded = true;
+                        auto so_error = 0;
+                        auto len = static_cast<int>(sizeof(so_error));
+                        if (getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so_error), &len) == 0 &&
+                            so_error == 0)
+                        {
+                            succeeded = true;
+                        }
                     }
+                    break;
                 }
             }
 
