@@ -344,3 +344,100 @@ TEST(DnsQueryTable, InsertDoesNotSilentlyDiscardExpiredQueries)
     EXPECT_EQ(table.expire(t0 + 20s), 1u);
     EXPECT_EQ(table.size(), 1u);
 }
+
+// --- Answers too large for one unfragmented packet ---------------------------------------------
+
+namespace
+{
+    /// A DNS answer for "example.com" A with @p answer_bytes bytes of answer records.
+    std::vector<uint8_t> large_answer(const uint16_t id, const std::size_t answer_bytes)
+    {
+        std::vector<uint8_t> m{ static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id & 0xff),
+            0x81, 0x80, 0, 1, 0, 9, 0, 1, 0, 2 };
+        const std::vector<uint8_t> question{ 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1 };
+        m.insert(m.end(), question.begin(), question.end());
+        m.insert(m.end(), answer_bytes, 0x5a);
+        return m;
+    }
+}
+
+TEST(DnsAnswerTruncation, LimitKeepsTheListenerReplyWithinTheMinimumMtu)
+{
+    // 1280 bytes = IP + UDP (8) + SOCKS5 header + DNS answer.
+    EXPECT_EQ(proxy::dns_udp_answer_limit(1), 1280u - 20 - 8 - 10);
+    EXPECT_EQ(proxy::dns_udp_answer_limit(4), 1280u - 40 - 8 - 22);
+}
+
+TEST(DnsAnswerTruncation, AnswersWithinTheLimitAreUnchanged)
+{
+    auto answer = large_answer(0x1234, 100);
+    const auto original = answer;
+    EXPECT_EQ(proxy::truncate_dns_answer(answer.data(), answer.size(), answer.size()), answer.size());
+    EXPECT_EQ(answer, original);
+}
+
+TEST(DnsAnswerTruncation, LargeAnswerKeepsHeaderAndQuestionWithTheTcBit)
+{
+    auto answer = large_answer(0x1234, 2000);
+    const auto size = proxy::truncate_dns_answer(answer.data(), answer.size(), 1242);
+
+    ASSERT_EQ(size, 12u + 17u);
+    EXPECT_EQ(answer[0], 0x12);
+    EXPECT_EQ(answer[1], 0x34);
+    EXPECT_EQ(answer[2], 0x81 | 0x02); // QR, RD kept; TC set
+    EXPECT_EQ(answer[3], 0x80);
+    EXPECT_EQ(answer[4], 0);           // QDCOUNT 1 kept
+    EXPECT_EQ(answer[5], 1);
+    for (std::size_t i = 6; i < 12; ++i)
+        EXPECT_EQ(answer[i], 0) << i;  // ANCOUNT, NSCOUNT, ARCOUNT zeroed
+    const std::vector<uint8_t> question(answer.begin() + 12, answer.begin() + static_cast<std::ptrdiff_t>(size));
+    EXPECT_EQ(question, (std::vector<uint8_t>{ 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1 }));
+}
+
+TEST(DnsAnswerTruncation, CompressedQuestionNameIsKept)
+{
+    std::vector<uint8_t> answer{ 0, 1, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0, 0xC0, 0x0C, 0, 1, 0, 1 };
+    answer.insert(answer.end(), 2000, 0x5a);
+    EXPECT_EQ(proxy::truncate_dns_answer(answer.data(), answer.size(), 1242), 12u + 6u);
+    EXPECT_EQ(answer[5], 1);
+}
+
+TEST(DnsAnswerTruncation, UnparsableQuestionLeavesOnlyTheHeader)
+{
+    // A label length that runs past the end of the message, and a reserved label type (0x80).
+    for (const uint8_t bad_label : { uint8_t{ 0x3f }, uint8_t{ 0x80 } })
+    {
+        std::vector<uint8_t> answer{ 0, 1, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0, bad_label };
+        answer.resize(bad_label == 0x3f ? 40 : 2000, 0x5a);
+        answer[12] = bad_label;
+        const auto limit = std::size_t{ 30 };
+        const auto size = proxy::truncate_dns_answer(answer.data(), answer.size(), limit);
+        EXPECT_EQ(size, 12u) << int{ bad_label };
+        EXPECT_EQ(answer[2] & 0x02, 0x02);
+        EXPECT_EQ(answer[4], 0);
+        EXPECT_EQ(answer[5], 0);
+    }
+}
+
+TEST(DnsAnswerTruncation, ClientAnswerIsTruncatedToTheListenersLimit)
+{
+    const auto big = large_answer(0x7777, 1500);
+    const auto relayed_bytes = socks_datagram(v4_override, 53, big);
+    const auto relayed = proxy::parse_socks5_udp_datagram(relayed_bytes.data(), relayed_bytes.size());
+    ASSERT_TRUE(relayed);
+
+    std::vector<uint8_t> out(4096);
+    const auto size = proxy::build_dns_client_answer(*relayed, v4_server.data(), 4, 53, 0x1234, out.data(), out.size());
+    ASSERT_EQ(size, 10u + 12u + 17u);
+    EXPECT_EQ(out[10], 0x12);           // original ID restored
+    EXPECT_EQ(out[11], 0x34);
+    EXPECT_EQ(out[12] & 0x02, 0x02);    // TC set
+
+    // An answer that fits is delivered whole.
+    const auto fits = large_answer(0x7777, proxy::dns_udp_answer_limit(1) - 12 - 17);
+    const auto fits_bytes = socks_datagram(v4_override, 53, fits);
+    const auto fits_view = proxy::parse_socks5_udp_datagram(fits_bytes.data(), fits_bytes.size());
+    ASSERT_TRUE(fits_view);
+    EXPECT_EQ(proxy::build_dns_client_answer(*fits_view, v4_server.data(), 4, 53, 1, out.data(), out.size()),
+        10u + proxy::dns_udp_answer_limit(1));
+}

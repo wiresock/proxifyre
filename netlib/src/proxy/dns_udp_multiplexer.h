@@ -55,6 +55,86 @@ namespace proxy
     }
 
     /**
+     * @brief Largest DNS answer the relay returns over UDP: the size that keeps the listener's
+     *        reply (IP + UDP + SOCKS5 header + answer) within a 1280-byte packet, the IPv6
+     *        minimum MTU, so it is never fragmented. A fragmented listener reply cannot be
+     *        delivered: its first fragment is dropped.
+     * @param address_type SOCKS5 ATYP of the listener's family: 1 (IPv4) or 4 (IPv6).
+     */
+    [[nodiscard]] constexpr std::size_t dns_udp_answer_limit(const uint8_t address_type) noexcept
+    {
+        constexpr std::size_t minimum_mtu = 1280;
+        constexpr std::size_t udp_header = 8;
+        const std::size_t ip_header = address_type == 1 ? 20 : 40;
+        return minimum_mtu - ip_header - udp_header - socks5_udp_header_size(address_type);
+    }
+
+    /**
+     * @brief Truncates a DNS answer larger than @p limit the way a server does when an answer
+     *        does not fit (RFC 1035 section 4.2.1, RFC 7766): the TC bit is set, and only the
+     *        header and question section are kept, so the resolver repeats the query over TCP.
+     *
+     * The answer, authority and additional counts are zeroed. If the question section cannot be
+     * parsed, only the header is kept, with a zero question count.
+     *
+     * @return The new size (unchanged when @p size <= @p limit or the message has no header).
+     */
+    [[nodiscard]] constexpr std::size_t truncate_dns_answer(uint8_t* message, const std::size_t size,
+        const std::size_t limit) noexcept
+    {
+        if (message == nullptr || size <= limit || size < dns_header_size)
+            return size;
+
+        const auto question_count = static_cast<std::size_t>((message[4] << 8) | message[5]);
+        std::size_t end = dns_header_size;
+        bool parsed = true;
+        for (std::size_t question = 0; question < question_count && parsed; ++question)
+        {
+            // QNAME: labels ending with a zero byte, or a two-byte compression pointer.
+            while (true)
+            {
+                if (end >= size)
+                {
+                    parsed = false;
+                    break;
+                }
+                const auto length = message[end];
+                if (length == 0)
+                {
+                    ++end;
+                    break;
+                }
+                if ((length & 0xC0) == 0xC0)
+                {
+                    end += 2;
+                    break;
+                }
+                if ((length & 0xC0) != 0)
+                {
+                    parsed = false;
+                    break;
+                }
+                end += 1 + static_cast<std::size_t>(length);
+            }
+            end += 4; // QTYPE, QCLASS
+            if (end > size || end > limit)
+                parsed = false;
+        }
+
+        if (!parsed)
+        {
+            end = dns_header_size;
+            message[4] = 0;
+            message[5] = 0;
+        }
+
+        message[2] = static_cast<uint8_t>(message[2] | 0x02); // TC
+        for (std::size_t field = 6; field < dns_header_size; ++field)
+            message[field] = 0; // ANCOUNT, NSCOUNT, ARCOUNT
+        return end;
+    }
+
+    /**
      * @brief Builds the datagram the DNS relay returns to a local client from an answer the
      *        SOCKS5 relay delivered.
      *
@@ -68,6 +148,9 @@ namespace proxy
      * @param relayed The relay's datagram, already parsed (parse_socks5_udp_datagram()).
      * @param server_address Queried server address bytes (network byte order): 4 or 16 bytes.
      * @param original_id The client's DNS message ID.
+     * An answer larger than dns_udp_answer_limit() is truncated (truncate_dns_answer()), so the
+     * resolver retries over TCP instead of receiving a fragmented reply it would never get.
+     *
      * @param out Output buffer.
      * @return Bytes written, or 0 when the answer does not fit, carries no DNS header, or
      *         @p address_size is not 4 or 16.
@@ -94,7 +177,8 @@ namespace proxy
         out[4 + address_size + 1] = static_cast<uint8_t>(server_port & 0xff);
         std::memmove(out + header_size, relayed.data, relayed.data_size);
         set_dns_message_id(out + header_size, original_id);
-        return header_size + relayed.data_size;
+        return header_size + truncate_dns_answer(out + header_size, relayed.data_size,
+            dns_udp_answer_limit(address_type));
     }
 
     /**

@@ -1026,3 +1026,53 @@ TEST(RedirectCleanup, CleanupThreadsRestartAfterStop)
     EXPECT_FALSE(tcp.cleanup_running());
     EXPECT_FALSE(udp.cleanup_running());
 }
+
+// 12. A UDP answer too large for one unfragmented 1280-byte packet would leave the DNS relay's
+//     listener fragmented, and the first fragment of a listener reply is never delivered. The
+//     relay returns it truncated instead (TC set, question kept), within the limit, so the
+//     resolver retries over TCP through the proxy.
+TEST(DnsPacketRedirect, OversizedUdpAnswerIsDeliveredTruncatedSoTheResolverRetriesOverTcp)
+{
+    for (const bool ipv6 : { false, true })
+    {
+        std::vector<uint8_t> big{ 0x2b, 0x2b, 0x81, 0x80, 0, 1, 0, 40, 0, 0, 0, 0,
+            7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1 };
+        big.resize(1400, 0x5a);
+
+        std::optional<frame> reply;
+        if (!ipv6)
+        {
+            ndisapi::socks5_udp_local_redirect<v4> redirect{ log_level::error };
+            dns_relay<v4> relay;
+            auto query = frame::udp4("192.168.1.10", "8.8.8.8", client_port, 53, dns_message(0x2b2b));
+            ASSERT_TRUE(redirect.is_new_endpoint(query.buffer));
+            ASSERT_TRUE(redirect.process_client_to_server_packet(query.buffer, htons(udp_listener)));
+            (void)relay.forward(query, 0x0e0e);
+            reply = relay.answer(relay_answer(v4{ std::string{ "8.8.8.8" } }, 53, big, 0x0e0e), "192.168.1.10");
+            ASSERT_TRUE(reply.has_value());
+            EXPECT_LE(ntohs(reply->ip4()->ip_len), 1280);
+            ASSERT_TRUE(redirect.process_server_to_client_packet(reply->buffer));
+            EXPECT_TRUE(reply->ip4_checksum_valid());
+        }
+        else
+        {
+            ndisapi::socks5_udp_local_redirect<v6> redirect{ log_level::error };
+            dns_relay<v6> relay;
+            auto query = frame::udp6("fd00::10", "2001:4860:4860::8888", client_port, 53, dns_message(0x2b2b));
+            ASSERT_TRUE(redirect.is_new_endpoint(query.buffer));
+            ASSERT_TRUE(redirect.process_client_to_server_packet(query.buffer, htons(udp_listener)));
+            (void)relay.forward(query, 0x0e0e);
+            reply = relay.answer(relay_answer(v6{ std::string{ "2001:4860:4860::8888" } }, 53, big, 0x0e0e), "fd00::10");
+            ASSERT_TRUE(reply.has_value());
+            EXPECT_LE(sizeof(ipv6hdr) + ntohs(reply->ip6()->ip6_len), 1280u);
+            ASSERT_TRUE(redirect.process_server_to_client_packet(reply->buffer));
+        }
+
+        const auto payload = reply->payload();
+        ASSERT_EQ(payload.size(), 12u + 17u) << ipv6;
+        EXPECT_EQ(proxy::dns_message_id(payload.data(), payload.size()), std::optional<uint16_t>{ 0x2b2b });
+        EXPECT_EQ(payload[2] & 0x02, 0x02);
+        EXPECT_EQ(ntohs(reply->udp()->th_sport), 53);
+        EXPECT_TRUE(reply->l4_checksum_valid());
+    }
+}
