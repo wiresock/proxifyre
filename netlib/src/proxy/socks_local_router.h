@@ -995,6 +995,17 @@ namespace proxy
             // Proxy-mode DNS must take precedence over the LAN-bypass PASS filters: (re)install
             // the front-of-table REDIRECT filters with the current listener ports. If that fails,
             // fail start() instead of running with DNS able to bypass the policy.
+            // stop() joined the redirects' cleanup threads; a later start() must run them again
+            // so expired TCP and UDP entries (including closed and reset connections) are removed.
+            if (tcp_redirect_)
+                tcp_redirect_->restart();
+            if (udp_redirect_)
+                udp_redirect_->restart();
+            if (tcp_redirect_v6_)
+                tcp_redirect_v6_->restart();
+            if (udp_redirect_v6_)
+                udp_redirect_v6_->restart();
+
             start_dns_udp_relays();
             dns_blocked_packets_.store(0, std::memory_order_relaxed);
             untranslated_listener_replies_.store(0, std::memory_order_relaxed);

@@ -609,5 +609,24 @@ namespace ndisapi
                 }
             }
         }
+
+        /**
+         * @brief Restarts the cleanup thread after stop(), for a router that is started again
+         *        in the same process. Without it, expired entries would never be removed.
+         * @note No effect while the cleanup thread is running. Not to be called concurrently
+         *       with stop().
+         */
+        void restart()
+        {
+            if (bool expected = true; terminate_.compare_exchange_strong(expected, false, std::memory_order_acq_rel))
+                start_cleanup_thread();
+        }
+
+        /// Whether the cleanup thread is running (it is until stop()). For the thread that
+        /// calls stop() and restart().
+        [[nodiscard]] bool cleanup_running() const noexcept
+        {
+            return !terminate_.load(std::memory_order_acquire) && cleanup_thread_.joinable();
+        }
     };
 }

@@ -998,3 +998,31 @@ TEST(DnsTcpResetTracking, UnknownConnectionsStillReportUnknown)
     tcp_redirect4 redirect{ log_level::error };
     EXPECT_EQ(listener_segment_result(redirect, TH_ACK), segment_result::unknown);
 }
+
+// The router's stop() joins the redirects' cleanup threads, and a later start() in the same
+// process restarts them; otherwise closed, reset and idle entries would never expire again.
+TEST(RedirectCleanup, CleanupThreadsRestartAfterStop)
+{
+    ndisapi::tcp_local_redirect<v4> tcp{ log_level::error };
+    ndisapi::socks5_udp_local_redirect<v4> udp{ log_level::error };
+    EXPECT_TRUE(tcp.cleanup_running());
+    EXPECT_TRUE(udp.cleanup_running());
+
+    tcp.stop();
+    udp.stop();
+    EXPECT_FALSE(tcp.cleanup_running());
+    EXPECT_FALSE(udp.cleanup_running());
+
+    tcp.restart();
+    udp.restart();
+    EXPECT_TRUE(tcp.cleanup_running());
+    EXPECT_TRUE(udp.cleanup_running());
+
+    // Restarting a running redirect has no effect; stop() still joins the one thread.
+    tcp.restart();
+    udp.restart();
+    tcp.stop();
+    udp.stop();
+    EXPECT_FALSE(tcp.cleanup_running());
+    EXPECT_FALSE(udp.cleanup_running());
+}
