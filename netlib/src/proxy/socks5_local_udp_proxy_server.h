@@ -106,16 +106,8 @@ namespace proxy
          */
         constexpr static size_t connections_array_size = 64;
 
-        /**
-         * @brief Requested UDP socket buffer size for QUIC-sized bursts.
-         *
-         * Browser QUIC can emit many ~1200 byte datagrams immediately. The first
-         * datagram for a local UDP source port may need to establish a SOCKS5 TCP
-         * control connection and complete UDP ASSOCIATE before it can be forwarded;
-         * while that happens, the local UDP proxy socket relies on the kernel
-         * receive buffer to hold the rest of the burst.
-         */
-        constexpr static int udp_socket_buffer_size = 4 * 1024 * 1024;
+        /** Requested UDP socket buffer size (see socks5_udp_association_client). */
+        constexpr static int udp_socket_buffer_size = socks5_udp_association_client<address_type_t>::udp_socket_buffer_size;
 
         /** Number of blocking SOCKS5 UDP ASSOCIATE operations allowed in parallel. */
         constexpr static size_t association_worker_count = 4;
