@@ -989,6 +989,31 @@ TEST(DnsAssociationHealth, ClosuresWithoutAnswersAreReportedOncePerCause)
     EXPECT_EQ(health.on_closed(t0 + 162s), report::ended_early);
 }
 
+TEST(DnsAssociationHealth, CausesAreReportedIndependentlyInEitherOrder)
+{
+    // no_answer first, then ended_early in the same outage.
+    proxy::dns_association_health<> health{ 3, 30s, 10s };
+    health.on_opened(t0);
+    health.on_query_sent(t0 + 1s);
+    ASSERT_TRUE(health.on_unanswered(3, t0 + 40s));
+    EXPECT_EQ(health.on_closed(t0 + 40s, silent_close), report::no_answer);
+    health.on_opened(t0 + 42s);
+    health.on_query_sent(t0 + 43s);
+    EXPECT_EQ(health.on_closed(t0 + 45s), report::ended_early);
+
+    // relay_unusable, then no_answer, then ended_early in the same outage.
+    proxy::dns_association_health<> other{ 3, 30s, 10s };
+    other.on_opened(t0);
+    EXPECT_EQ(other.on_closed(t0 + 1s, proxy::dns_association_close::relay_failed), report::relay_unusable);
+    other.on_opened(t0 + 2s);
+    other.on_query_sent(t0 + 3s);
+    ASSERT_TRUE(other.on_unanswered(3, t0 + 40s));
+    EXPECT_EQ(other.on_closed(t0 + 40s, silent_close), report::no_answer);
+    other.on_opened(t0 + 70s);
+    other.on_query_sent(t0 + 71s);
+    EXPECT_EQ(other.on_closed(t0 + 72s, proxy::dns_association_close::relay_failed), report::ended_early);
+}
+
 TEST(DnsAssociationHealth, AnswerTimeIsMeasuredFromTheFirstQuerySent)
 {
     // Open 21 s, but its first query was sent only 1 s before the close: ended early.

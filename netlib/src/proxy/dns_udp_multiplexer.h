@@ -543,7 +543,8 @@ namespace proxy
         none,          ///< nothing to report
         no_answer,     ///< queries had time to be answered and none was: the relay does not work,
                        ///< or the DNS servers queried cannot be reached from the proxy
-        ended_early,   ///< the server ended it soon after queries were sent, before any answer
+        ended_early,   ///< it ended (control connection or relay socket) soon after queries were
+                       ///< sent, before any answer
         relay_unusable ///< its UDP relay socket failed before any query could be sent
     };
 
