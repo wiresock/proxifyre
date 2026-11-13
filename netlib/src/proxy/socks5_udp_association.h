@@ -103,15 +103,15 @@ namespace proxy
             // Set socket timeouts to prevent indefinite blocking in recv/send calls
             // This prevents deadlock where IOCP worker holds lock_ while blocked on network I/O
             constexpr DWORD timeout_ms = 5000; // 5 second timeout
-            if (setsockopt(socks_tcp_socket, SOL_SOCKET, SO_RCVTIMEO, 
+            if (setsockopt(socks_tcp_socket, SOL_SOCKET, SO_RCVTIMEO,
                           reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) == SOCKET_ERROR)
             {
                 NETLIB_WARNING("Failed to set socket receive timeout: {}", WSAGetLastError());
                 closesocket(socks_tcp_socket);
                 return INVALID_SOCKET;
             }
-            
-            if (setsockopt(socks_tcp_socket, SOL_SOCKET, SO_SNDTIMEO, 
+
+            if (setsockopt(socks_tcp_socket, SOL_SOCKET, SO_SNDTIMEO,
                           reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) == SOCKET_ERROR)
             {
                 NETLIB_WARNING("Failed to set socket send timeout: {}", WSAGetLastError());
@@ -456,7 +456,7 @@ namespace proxy
                     return {};
                 }
 
-                if (negotiate_ctx->socks5_username.value().length() > socks5_username_max_length || 
+                if (negotiate_ctx->socks5_username.value().length() > socks5_username_max_length ||
                     negotiate_ctx->socks5_username.value().length() < 1)
                 {
                     NETLIB_INFO(
@@ -471,7 +471,7 @@ namespace proxy
                     return {};
                 }
 
-                if (negotiate_ctx->socks5_password.value().length() > socks5_username_max_length || 
+                if (negotiate_ctx->socks5_password.value().length() > socks5_username_max_length ||
                     negotiate_ctx->socks5_password.value().length() < 1)
                 {
                     NETLIB_INFO(
@@ -485,7 +485,7 @@ namespace proxy
                 );
 
                 if (!send_control(reinterpret_cast<const char*>(&auth_req),
-                    3 + static_cast<int>(negotiate_ctx->socks5_username.value().length()) + 
+                    3 + static_cast<int>(negotiate_ctx->socks5_username.value().length()) +
                     static_cast<int>(negotiate_ctx->socks5_password.value().length())))
                 {
                     NETLIB_INFO(

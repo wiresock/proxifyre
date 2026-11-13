@@ -536,9 +536,9 @@ namespace proxy
      *   closes less than @p minimum_age after opening, or is retired because it stopped
      *   answering, also delays the next attempt: from the shortest delay again if it worked,
      *   growing if it delivered nothing or died within seconds (see on_closed()), so a server
-     *   that accepts UDP ASSOCIATE and then fails is not reconnected in a tight loop. The backoff also resets when an association proves
-     *   itself: a datagram arrives from the relay once it is at least @p minimum_age old, or it
-     *   closes normally at that age.
+     *   that accepts UDP ASSOCIATE and then fails is not reconnected in a tight loop. The
+     *   backoff also resets when an association proves itself: a datagram arrives from the
+     *   relay once it is at least @p minimum_age old, or it closes normally at that age.
      * - An open association is reopened when its SOCKS5 control connection closes or its relay
      *   socket fails (reported by the relay), or when it looks silently dead: at least
      *   @p unanswered_limit queries expired unanswered that were sent after the last datagram
@@ -591,6 +591,9 @@ namespace proxy
 
         /// A query was sent through the open association.
         void on_query_sent() noexcept { query_sent_ = true; }
+
+        /// When the current (or last) association was opened.
+        [[nodiscard]] time_point opened_at() const noexcept { return opened_at_; }
 
         /**
          * @brief The association was closed at @p now.
@@ -754,7 +757,6 @@ namespace proxy
                 return dns_relay_query::no_id;
 
             set_dns_message_id(message, *relay_id);
-            health_.on_query_sent();
             return dns_relay_query::send;
         }
 
@@ -806,6 +808,13 @@ namespace proxy
         void expire_closed(const time_point now) { (void)queries_.expire(now); }
 
         [[nodiscard]] bool may_open(const time_point now) const noexcept { return health_.may_open(now); }
+        /// A prepared query was sent through the association (see dns_association_health).
+        void on_query_sent() noexcept { health_.on_query_sent(); }
+        /// How long the current (or last) association has been open at @p now.
+        [[nodiscard]] typename Clock::duration association_age(const time_point now) const noexcept
+        {
+            return now - health_.opened_at();
+        }
         /// See dns_association_health::on_open_failed().
         bool on_open_failed(const time_point now) noexcept { return health_.on_open_failed(now); }
         void on_opened(const time_point now) noexcept { health_.on_opened(now); }

@@ -996,8 +996,16 @@ TEST(DnsRelaySession, ClosureAfterUnansweredQueriesIsReportedButNotAnIdleOne)
     idle.on_opened(t0);
     EXPECT_FALSE(idle.on_closed(t0 + 60s));
 
+    // Prepared but never sent (the send failed): not reported either.
+    auto unsent = make_session();
+    unsent.on_opened(t0);
+    (void)send_query(unsent, { 1, 1 }, 1, "a.example", t0 + 1s, 7);
+    EXPECT_FALSE(unsent.on_closed(t0 + 60s));
+
     auto unanswered = make_session();
     unanswered.on_opened(t0);
     (void)send_query(unanswered, { 1, 1 }, 1, "a.example", t0 + 1s, 7);
+    unanswered.on_query_sent();
+    EXPECT_EQ(unanswered.association_age(t0 + 60s), 60s);
     EXPECT_TRUE(unanswered.on_closed(t0 + 60s));
 }
