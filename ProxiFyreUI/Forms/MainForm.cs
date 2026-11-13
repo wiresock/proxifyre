@@ -527,6 +527,10 @@ namespace ProxiFyreUI.Forms
                     return;
                 if (!CanCommitDialogMutation(configuration))
                     return;
+                // The editor returns a copy (with the same id); keep following the rule if the DNS
+                // proxy selector gave it its id, so moving the selection on still restores it.
+                if (ReferenceEquals(_dnsIdAssignedRule, configuration.Proxies[index]))
+                    _dnsIdAssignedRule = editor.ResultRule;
                 configuration.Proxies[index] = editor.ResultRule;
                 MarkConfigurationChanged();
                 RefreshRoutingGrid(index);
@@ -562,6 +566,8 @@ namespace ProxiFyreUI.Forms
                 return;
             if (!CanCommitDialogMutation(configuration))
                 return;
+            if (ReferenceEquals(_dnsIdAssignedRule, configuration.Proxies[index]))
+                _dnsIdAssignedRule = null;
             configuration.Proxies.RemoveAt(index);
             MarkConfigurationChanged();
             RefreshRoutingGrid(Math.Min(index, configuration.Proxies.Count - 1));

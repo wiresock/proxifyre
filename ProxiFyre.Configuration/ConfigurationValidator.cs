@@ -571,8 +571,8 @@ namespace ProxiFyre.Configuration
         private static string UnusedIdConsequence(bool namedByDirectModeDns)
         {
             return namedByDirectModeDns
-                ? " dns.proxyId names it, so it is kept, but DNS Proxy mode cannot use it as it is; select the rule " +
-                  "as the DNS proxy again in the GUI, which assigns a new id, or fix the id and dns.proxyId."
+                ? " dns.proxyId names it, so it is kept, but DNS Proxy mode cannot use it as it is; switching DNS " +
+                  "to Proxy mode in the GUI assigns the rule a new id, or fix the id and dns.proxyId."
                 : " No DNS setting uses it, so it has no effect and is removed when the GUI saves the configuration.";
         }
 
