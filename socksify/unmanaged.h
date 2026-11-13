@@ -69,6 +69,7 @@
 #include "../netlib/src/proxy/socks5_tcp_proxy_socket.h"
 #include "../netlib/src/proxy/tcp_proxy_server.h"
 #include "../netlib/src/proxy/socks5_udp_proxy_socket.h"
+#include "../netlib/src/proxy/socks5_udp_association.h"
 #include "../netlib/src/proxy/socks5_local_udp_proxy_server.h"
 #include "../netlib/src/iphelper/network_adapter_info.h"
 #include "../netlib/src/iphelper/process_lookup.h"
