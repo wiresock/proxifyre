@@ -325,7 +325,7 @@ namespace ProxiFyre.Tests
             StringAssert.Contains("'dns'", exception.Message);
         }
 
-        [TestCase("{ \"dns\": {}, \"DNS\": \"8.8.8.8\" }", "'DNS'")]
+        [TestCase("{ \"DNS\": \"8.8.8.8\" }", "'DNS'")]
         [TestCase("{ \"dns\": { \"proxyId\": [1] } }", "'dns.proxyId'")]
         [TestCase("{ \"dns\": { \"Mode\": {} } }", "'dns.Mode'")]
         [TestCase("{ \"dns\": { \"serverOverride\": { \"a\": 1 } } }", "'dns.serverOverride'")]
@@ -333,6 +333,15 @@ namespace ProxiFyre.Tests
         {
             var exception = Assert.Throws<ConfigurationFormatException>(() => _serializer.Deserialize(json));
             StringAssert.Contains(name, exception.Message);
+        }
+
+        [TestCase("{ \"proxies\": [ { \"appNames\": [\"a\"] }, { \"ID\": \"x\", \"id\": \"y\" } ] }", "Proxy rule 2", "'ID', 'id'")]
+        [TestCase("{ \"dns\": { \"mode\": \"Direct\" }, \"Dns\": null }", "The configuration", "'dns', 'Dns'")]
+        public void KeysDifferingOnlyInCaseAreReportedInsteadOfDiscarded(string json, string owner, string names)
+        {
+            var exception = Assert.Throws<ConfigurationFormatException>(() => _serializer.Deserialize(json));
+            StringAssert.Contains(owner, exception.Message);
+            StringAssert.Contains(names, exception.Message);
         }
 
         [TestCase("{}")]

@@ -70,7 +70,7 @@ Process ownership lookup is best effort for a standard user. ProxiFyre can route
 
 | Property | Description |
 | --- | --- |
-| `id` | Optional stable identifier used to reference this rule's proxy, for example from `dns.proxyId`. 1–64 letters, digits, `-`, `_`, or `.`; unique, case-insensitive. Unlike the rule position it survives reordering. An empty or whitespace id means no id. An invalid or duplicate id is an error only when `dns.proxyId` in `Proxy` mode refers to it; otherwise it is reported as a warning, has no effect, and is removed when the GUI saves the configuration, unless `dns.proxyId` names it (the first rule with a duplicated id keeps it). |
+| `id` | Optional stable identifier used to reference this rule's proxy, for example from `dns.proxyId`. 1–64 letters, digits, `-`, `_`, or `.`; unique, case-insensitive. Unlike the rule position it survives reordering. An empty or whitespace id means no id. An invalid or duplicate id is an error only when `dns.proxyId` in `Proxy` mode refers to it; otherwise it is reported as a warning, has no effect, and is removed when the GUI saves the configuration. Two exceptions: every rule with an id that `dns.proxyId` names keeps it, and of rules sharing any other valid id, the first keeps it. |
 | `appNames` | Application names or paths matched by this rule. An explicit empty string is the catch-all. |
 | `socks5ProxyEndpoint` | SOCKS5 hostname or IPv4 address plus port, for example `proxy.example.com:1080`. |
 | `username`, `password` | Optional SOCKS5 authentication. Configure both or neither. |
@@ -153,6 +153,7 @@ Configurations written before DNS routing existed load and save unchanged. The e
 
 - A rule `id` that is invalid or duplicated, including one written as a JSON object or array, is only a warning unless DNS `Proxy` mode refers to it, so such a configuration still starts; the GUI removes it on the next save unless `dns.proxyId` names it. An empty `id` means no id. A number or `true`/`false` is read as text the way .NET formats it, for example `1.0` as `1` and `true` as `True`.
 - A `dns` value must be an object (or `null`, which means `Direct`), and its `mode`, `proxyId`, and `serverOverride` must not be objects or arrays. Anything else, such as `"dns": "8.8.8.8"`, is a configuration error that names the property, and the service does not start until it is removed or replaced with a DNS policy object.
+- A rule with two `id` keys that differ only in case (`id` and `ID`), or two top-level `dns` keys, is a configuration error that names them, because reading one would discard the other.
 - A `dns` object is validated like a new one: a `mode` other than `Direct` or `Proxy` (`DNS_MODE_UNKNOWN`), or `Proxy` mode whose `proxyId` is missing or names no rule (`DNS_PROXY_ID_MISSING`, `DNS_PROXY_NOT_FOUND`), also stops the service.
 
 ### Direct mode
