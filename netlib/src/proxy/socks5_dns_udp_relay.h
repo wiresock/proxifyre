@@ -547,6 +547,8 @@ namespace proxy
                 typename dns_relay_session<client_t, client_hash>::answer result;
                 {
                     std::scoped_lock lock(lock_);
+                    if (owner->retiring.load(std::memory_order_acquire))
+                        return;
                     result = session_.prepare_answer(buffer.data(), static_cast<std::size_t>(received),
                         [](const client_t& client)
                         {
@@ -623,7 +625,18 @@ namespace proxy
                 if (reason)
                 {
                     auto retired = std::move(association_);
+                    // Fence off the retiring reader (it checks this under lock_), so a late
+                    // datagram cannot touch the session after the closure is recorded.
+                    retired->retiring.store(true, std::memory_order_release);
                     const bool unusable = session_.on_closed(now, silent);
+                    if (unusable)
+                    {
+                        NETLIB_WARNING("DNS relay: no answer came back through the SOCKS5 UDP association with {} "
+                            "(closed because {}): either its UDP relay does not work, or the DNS servers Windows "
+                            "queries cannot be reached from the proxy (consider a DNS serverOverride). UDP DNS is "
+                            "dropped until an answer arrives.", upstream_.to_string(), reason);
+                    }
+
                     if (session_.may_open(now))
                     {
                         NETLIB_INFO("DNS relay: closing the SOCKS5 UDP association with {} because {}; it is "
@@ -632,17 +645,8 @@ namespace proxy
                     else
                     {
                         const auto retry = std::chrono::duration_cast<std::chrono::seconds>(session_.next_attempt() - now);
-                        if (unusable)
-                        {
-                            NETLIB_WARNING("DNS relay: closing the SOCKS5 UDP association with {} because {}, without "
-                                "it having delivered anything; UDP DNS is dropped until an association works (next "
-                                "attempt in {} s)", upstream_.to_string(), reason, retry.count());
-                        }
-                        else
-                        {
-                            NETLIB_INFO("DNS relay: closing the SOCKS5 UDP association with {} because {}; next "
-                                "attempt in {} s", upstream_.to_string(), reason, retry.count());
-                        }
+                        NETLIB_INFO("DNS relay: closing the SOCKS5 UDP association with {} because {}; next "
+                            "attempt in {} s", upstream_.to_string(), reason, retry.count());
                         // Queries queued meanwhile cannot wait out a backoff.
                         dropped_unavailable_ += waiting_.drop_all();
                     }

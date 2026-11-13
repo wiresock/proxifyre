@@ -533,11 +533,10 @@ namespace proxy
      *
      * - A failed open is retried after a backoff that doubles from 1 s up to 30 s; queries
      *   arriving meanwhile are dropped (Proxy mode never sends DNS directly). An association that
-     *   closes less than @p minimum_age after opening counts as a failed open, so a server that
-     *   accepts UDP ASSOCIATE and then drops the connection is not reconnected in a tight loop,
-     *   and so does one retired because it stopped answering. A closed association that had
-     *   worked restarts the backoff at its shortest delay; one that never delivered anything
-     *   lets it grow (see on_closed()). The backoff also resets when an association proves
+     *   closes less than @p minimum_age after opening, or is retired because it stopped
+     *   answering, also delays the next attempt: from the shortest delay again if it worked,
+     *   growing if it delivered nothing or died within seconds (see on_closed()), so a server
+     *   that accepts UDP ASSOCIATE and then fails is not reconnected in a tight loop. The backoff also resets when an association proves
      *   itself: a datagram arrives from the relay once it is at least @p minimum_age old, or it
      *   closes normally at that age.
      * - An open association is reopened when its SOCKS5 control connection closes or its relay
@@ -569,8 +568,10 @@ namespace proxy
 
         /**
          * @brief Records a failed attempt to open an association and backs off.
-         * @return true for the first failed attempt since the last successful open (or since
-         *         the relay started), which the relay reports as a warning.
+         * @return true for the first failed attempt since an association last received
+         *         something from the relay (or since the relay started), which the relay reports
+         *         as a warning. A server that alternates between refusing and accepting without
+         *         ever working is therefore reported once, not on every cycle.
          */
         bool on_open_failed(const time_point now) noexcept
         {
@@ -585,8 +586,11 @@ namespace proxy
             unanswered_ = 0;
             opened_at_ = now;
             last_datagram_.reset();
-            open_failure_reported_ = false;
+            query_sent_ = false;
         }
+
+        /// A query was sent through the open association.
+        void on_query_sent() noexcept { query_sent_ = true; }
 
         /**
          * @brief The association was closed at @p now.
@@ -602,9 +606,9 @@ namespace proxy
          *   that delivered nothing, or died within seconds, makes the backoff grow, so a server
          *   that accepts UDP ASSOCIATE and then fails is not reconnected in a tight loop.
          *
-         * @return true when this closure should be reported as a warning: the association
-         *         delivered nothing, and no such closure has been reported since the last
-         *         association that delivered something (the relay looks unusable).
+         * @return true when this closure should be reported as a warning: queries were sent
+         *         through the association and nothing came back, and no such closure has been
+         *         reported since an association last received something.
          */
         bool on_closed(const time_point now, const bool failed = false) noexcept
         {
@@ -612,16 +616,15 @@ namespace proxy
             const bool delivered = last_datagram_.has_value();
 
             if (!failed && age >= minimum_age_)
-            {
                 failures_ = 0;
-                return false;
+            else
+            {
+                if (delivered && age >= minimum_working_life)
+                    failures_ = 0;
+                back_off(now);
             }
 
-            if (delivered && age >= minimum_working_life)
-                failures_ = 0;
-            back_off(now);
-
-            if (delivered || unusable_reported_)
+            if (delivered || !query_sent_ || unusable_reported_)
                 return false;
             unusable_reported_ = true;
             return true;
@@ -634,6 +637,7 @@ namespace proxy
             unanswered_ = 0;
             last_datagram_ = now;
             unusable_reported_ = false;
+            open_failure_reported_ = false;
             if (now - opened_at_ >= minimum_age_)
                 failures_ = 0;
         }
@@ -670,6 +674,7 @@ namespace proxy
 
         bool open_failure_reported_{ false };
         bool unusable_reported_{ false };
+        bool query_sent_{ false };
         std::size_t unanswered_limit_;
         std::chrono::seconds minimum_age_;
         std::size_t failures_{};
@@ -749,6 +754,7 @@ namespace proxy
                 return dns_relay_query::no_id;
 
             set_dns_message_id(message, *relay_id);
+            health_.on_query_sent();
             return dns_relay_query::send;
         }
 
