@@ -428,7 +428,7 @@ namespace proxy
             if (send(association_->relay, reinterpret_cast<const char*>(datagram.data()),
                 static_cast<int>(datagram.size()), 0) != SOCKET_ERROR)
             {
-                session_.on_query_sent();
+                session_.on_query_sent(std::chrono::steady_clock::now());
             }
             else
             {
@@ -615,15 +615,20 @@ namespace proxy
             if (association_)
             {
                 const char* reason = nullptr;
-                bool silent = false;
+                auto close = dns_association_close::normal;
                 if (association_->failed.load(std::memory_order_acquire))
+                {
                     reason = "the UDP relay socket failed";
+                    close = dns_association_close::relay_failed;
+                }
                 else if (control_channel_closed(association_->control))
+                {
                     reason = "the SOCKS5 control connection closed";
+                }
                 else if (session_.expire(now))
                 {
                     reason = "queries stopped being answered";
-                    silent = true;
+                    close = dns_association_close::silent;
                 }
 
                 if (reason)
@@ -633,7 +638,7 @@ namespace proxy
                     // datagram cannot touch the session after the closure is recorded.
                     retired->retiring.store(true, std::memory_order_release);
                     const auto age = std::chrono::duration_cast<std::chrono::seconds>(session_.association_age(now));
-                    const bool unusable = session_.on_closed(now, silent);
+                    const auto report = session_.on_closed(now, close);
 
                     if (session_.may_open(now))
                     {
@@ -649,19 +654,25 @@ namespace proxy
                         dropped_unavailable_ += waiting_.drop_all();
                     }
 
-                    if (unusable && (silent || age >= query_ttl))
+                    switch (report)
                     {
-                        // Queries had time to be answered and none was.
+                    case dns_association_report::no_answer:
                         NETLIB_WARNING("DNS relay: no answer came back through the SOCKS5 UDP association with {}: "
                             "either its UDP relay does not work, or the DNS servers Windows queries cannot be "
                             "reached from the proxy (consider a DNS serverOverride). UDP DNS fails until an "
                             "answer arrives.", upstream_.to_string());
-                    }
-                    else if (unusable)
-                    {
+                        break;
+                    case dns_association_report::ended_early:
                         NETLIB_WARNING("DNS relay: the SOCKS5 UDP association with {} ended {} s after it opened ({}), "
                             "before any answer arrived. UDP DNS fails until an association works.",
                             upstream_.to_string(), age.count(), reason);
+                        break;
+                    case dns_association_report::relay_unusable:
+                        NETLIB_WARNING("DNS relay: no query could be sent through the SOCKS5 UDP relay of {} (the "
+                            "relay socket failed). UDP DNS fails until an association works.", upstream_.to_string());
+                        break;
+                    case dns_association_report::none:
+                        break;
                     }
                     lock.unlock();
                     close_association(std::move(retired));

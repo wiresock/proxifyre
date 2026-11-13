@@ -11,6 +11,7 @@
 // be unit tested on any platform. The relay supplies time, randomness and raw datagrams.
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -528,6 +529,24 @@ namespace proxy
         std::size_t capacity_;
     };
 
+    /// Why the shared association was closed (dns_association_health::on_closed()).
+    enum class dns_association_close : uint8_t
+    {
+        normal,       ///< its SOCKS5 control connection closed
+        silent,       ///< retired because queries stopped being answered
+        relay_failed  ///< its UDP relay socket failed
+    };
+
+    /// What a closure of the shared association should be reported as.
+    enum class dns_association_report : uint8_t
+    {
+        none,          ///< nothing to report
+        no_answer,     ///< queries had time to be answered and none was: the relay does not work,
+                       ///< or the DNS servers queried cannot be reached from the proxy
+        ended_early,   ///< the server ended it soon after queries were sent, before any answer
+        relay_unusable ///< its UDP relay socket failed before any query could be sent
+    };
+
     /**
      * @brief Decides when the shared association is reopened and when a new one may be tried.
      *
@@ -554,9 +573,15 @@ namespace proxy
     public:
         using time_point = typename Clock::time_point;
 
+        /**
+         * @param answer_wait How long a sent query has to be answered before a closure without
+         *        answers is attributed to the relay or the queried servers (the query lifetime).
+         */
         explicit dns_association_health(const std::size_t unanswered_limit = 3,
-            const std::chrono::seconds minimum_age = std::chrono::seconds{ 30 })
-            : unanswered_limit_(std::max<std::size_t>(unanswered_limit, 1)), minimum_age_(minimum_age)
+            const std::chrono::seconds minimum_age = std::chrono::seconds{ 30 },
+            const std::chrono::seconds answer_wait = std::chrono::seconds{ 10 })
+            : unanswered_limit_(std::max<std::size_t>(unanswered_limit, 1)), minimum_age_(minimum_age),
+            answer_wait_(answer_wait)
         {
         }
 
@@ -589,36 +614,47 @@ namespace proxy
             query_sent_ = false;
         }
 
-        /// A query was sent through the open association.
-        void on_query_sent() noexcept { query_sent_ = true; }
+        /// A query was sent through the open association at @p now.
+        void on_query_sent(const time_point now) noexcept
+        {
+            if (!query_sent_)
+            {
+                query_sent_ = true;
+                first_sent_at_ = now;
+            }
+        }
 
         /// When the current (or last) association was opened.
         [[nodiscard]] time_point opened_at() const noexcept { return opened_at_; }
 
         /**
-         * @brief The association was closed at @p now.
+         * @brief The association was closed at @p now, for @p close.
          *
          * - A normal close (control connection or relay socket) of an association at least the
          *   minimum age old resets the backoff: the next query reopens at once.
-         * - Otherwise (it was retired for unanswered queries, @p failed, or it closed younger
-         *   than the minimum age) the next attempt backs off. If the association worked, that
-         *   is, something arrived from the relay and it lived at least minimum_working_life,
-         *   the closure is a new outage and the backoff restarts at its shortest delay, so a
-         *   relay that keeps answering after every reopen (one whose UDP path dies on idle, or
-         *   a server that ends associations early) is never kept waiting long. An association
-         *   that delivered nothing, or died within seconds, makes the backoff grow, so a server
-         *   that accepts UDP ASSOCIATE and then fails is not reconnected in a tight loop.
+         * - Otherwise (it was retired for unanswered queries, or it closed younger than the
+         *   minimum age) the next attempt backs off. If the association worked, that is,
+         *   something arrived from the relay and it lived at least minimum_working_life, the
+         *   closure is a new outage and the backoff restarts at its shortest delay, so a relay
+         *   that keeps answering after every reopen (one whose UDP path dies on idle, or a server
+         *   that ends associations early) is never kept waiting long. An association that
+         *   delivered nothing, or died within seconds, makes the backoff grow, so a server that
+         *   accepts UDP ASSOCIATE and then fails is not reconnected in a tight loop.
          *
-         * @return true when this closure should be reported as a warning: queries were sent
-         *         through the association and nothing came back, and no such closure has been
-         *         reported since an association last received something.
+         * @return What to report, if the association received nothing: no_answer when a sent
+         *         query had answer_wait to be answered (or it was retired for silence),
+         *         ended_early when it closed sooner, relay_unusable when its relay socket failed
+         *         before any query was sent. Each is reported once until an association receives
+         *         something; otherwise none.
          */
-        bool on_closed(const time_point now, const bool failed = false) noexcept
+        dns_association_report on_closed(const time_point now,
+            const dns_association_close close = dns_association_close::normal) noexcept
         {
             const auto age = now - opened_at_;
             const bool delivered = last_datagram_.has_value();
+            const bool silent = close == dns_association_close::silent;
 
-            if (!failed && age >= minimum_age_)
+            if (!silent && age >= minimum_age_)
                 failures_ = 0;
             else
             {
@@ -627,10 +663,27 @@ namespace proxy
                 back_off(now);
             }
 
-            if (delivered || !query_sent_ || unusable_reported_)
-                return false;
-            unusable_reported_ = true;
-            return true;
+            if (delivered)
+                return dns_association_report::none;
+
+            auto report = dns_association_report::none;
+            if (!query_sent_)
+            {
+                if (close == dns_association_close::relay_failed)
+                    report = dns_association_report::relay_unusable;
+            }
+            else if (silent || now - first_sent_at_ >= answer_wait_)
+                report = dns_association_report::no_answer;
+            else
+                report = dns_association_report::ended_early;
+
+            if (report == dns_association_report::none)
+                return report;
+            auto& reported = reported_[static_cast<std::size_t>(report)];
+            if (reported)
+                return dns_association_report::none;
+            reported = true;
+            return report;
         }
 
         /// Any datagram from the relay shows the association is alive; once it is also at least
@@ -639,7 +692,7 @@ namespace proxy
         {
             unanswered_ = 0;
             last_datagram_ = now;
-            unusable_reported_ = false;
+            reported_ = {};
             open_failure_reported_ = false;
             if (now - opened_at_ >= minimum_age_)
                 failures_ = 0;
@@ -676,10 +729,12 @@ namespace proxy
         }
 
         bool open_failure_reported_{ false };
-        bool unusable_reported_{ false };
+        std::array<bool, 4> reported_{}; ///< per dns_association_report value
         bool query_sent_{ false };
+        time_point first_sent_at_{}; ///< valid while query_sent_
         std::size_t unanswered_limit_;
         std::chrono::seconds minimum_age_;
+        std::chrono::seconds answer_wait_;
         std::size_t failures_{};
         std::size_t unanswered_{};
         time_point next_attempt_{};
@@ -727,7 +782,7 @@ namespace proxy
 
         dns_relay_session(const std::chrono::seconds query_ttl, const std::size_t max_queries,
             const std::size_t unanswered_limit, const std::chrono::seconds minimum_association_age)
-            : queries_(query_ttl, max_queries), health_(unanswered_limit, minimum_association_age)
+            : queries_(query_ttl, max_queries), health_(unanswered_limit, minimum_association_age, query_ttl)
         {
         }
 
@@ -808,8 +863,8 @@ namespace proxy
         void expire_closed(const time_point now) { (void)queries_.expire(now); }
 
         [[nodiscard]] bool may_open(const time_point now) const noexcept { return health_.may_open(now); }
-        /// A prepared query was sent through the association (see dns_association_health).
-        void on_query_sent() noexcept { health_.on_query_sent(); }
+        /// A prepared query was sent through the association at @p now.
+        void on_query_sent(const time_point now) noexcept { health_.on_query_sent(now); }
         /// How long the current (or last) association has been open at @p now.
         [[nodiscard]] typename Clock::duration association_age(const time_point now) const noexcept
         {
@@ -820,11 +875,12 @@ namespace proxy
         void on_opened(const time_point now) noexcept { health_.on_opened(now); }
 
         /// The association closed: its queries in flight can no longer be answered. See
-        /// dns_association_health::on_closed() for @p failed and the result.
-        bool on_closed(const time_point now, const bool failed = false) noexcept
+        /// dns_association_health::on_closed() for @p close and the result.
+        dns_association_report on_closed(const time_point now,
+            const dns_association_close close = dns_association_close::normal) noexcept
         {
             queries_.clear();
-            return health_.on_closed(now, failed);
+            return health_.on_closed(now, close);
         }
 
         void clear() noexcept { queries_.clear(); }

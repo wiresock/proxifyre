@@ -48,6 +48,8 @@ namespace
     using table_t = proxy::dns_query_table<test_client>;
 
     const time_point t0{ std::chrono::seconds{ 1000 } };
+    constexpr auto silent_close = proxy::dns_association_close::silent;
+    using report = proxy::dns_association_report;
 
     /// Deterministic "random" source returning the given values in order, then repeating the last.
     struct scripted_random
@@ -770,7 +772,7 @@ TEST(DnsAssociationHealth, AssociationRetiredForSilenceBacksOffWhateverItsAge)
 {
     proxy::dns_association_health<> health{ 3, 30s };
     health.on_opened(t0);
-    health.on_closed(t0 + 60s, true);
+    health.on_closed(t0 + 60s, silent_close);
     EXPECT_EQ(health.consecutive_failures(), 1u);
     EXPECT_FALSE(health.may_open(t0 + 60s));
     EXPECT_TRUE(health.may_open(t0 + 61s));
@@ -784,7 +786,7 @@ TEST(DnsAssociationHealth, AssociationRetiredForSilenceBacksOffWhateverItsAge)
         health.on_opened(at);
         at += 40s;
         ASSERT_TRUE(health.on_unanswered(3, at));
-        health.on_closed(at, true);
+        health.on_closed(at, silent_close);
         EXPECT_FALSE(health.may_open(at + delay - 1ms));
         EXPECT_TRUE(health.may_open(at + delay));
         at += delay;
@@ -812,7 +814,7 @@ TEST(DnsAssociationHealth, AssociationThatAnsweredBeforeGoingSilentRestartsTheBa
             health.on_relay_datagram(at + std::chrono::seconds{ i }); // busy for 20 s
         at += 320s;                                                   // idle, then silent
         ASSERT_TRUE(health.on_unanswered(3, at)) << cycle;
-        health.on_closed(at, true);
+        health.on_closed(at, silent_close);
         EXPECT_FALSE(health.may_open(at + 999ms)) << cycle;
         EXPECT_TRUE(health.may_open(at + 1s)) << cycle;
         at += 1s;
@@ -828,9 +830,9 @@ TEST(DnsAssociationHealth, FirstOpenFailureSinceAnAssociationLastWorkedIsReporte
     // An association that works re-arms the report; a silent retirement does not use it up.
     health.on_opened(t0 + 3s);
     health.on_relay_datagram(t0 + 4s);
-    health.on_query_sent();
+    health.on_query_sent(t0 + 5s);
     ASSERT_TRUE(health.on_unanswered(3, t0 + 40s));
-    (void)health.on_closed(t0 + 40s, true);
+    (void)health.on_closed(t0 + 40s, silent_close);
     EXPECT_TRUE(health.on_open_failed(t0 + 41s));
     EXPECT_FALSE(health.on_open_failed(t0 + 43s));
 }
@@ -848,8 +850,8 @@ TEST(DnsAssociationHealth, FlappingServerThatNeverWorksIsReportedOnce)
         open_failure_reports += health.on_open_failed(at) ? 1 : 0;
         at = health.next_attempt();
         health.on_opened(at);
-        health.on_query_sent();
-        unusable_reports += health.on_closed(at + 100ms) ? 1 : 0;
+        health.on_query_sent(at);
+        unusable_reports += health.on_closed(at + 100ms) != report::none ? 1 : 0;
         at = health.next_attempt();
     }
     EXPECT_EQ(open_failure_reports, 1);
@@ -923,7 +925,7 @@ TEST(DnsAssociationHealth, AssociationThatWorkedThenClosedYoungRestartsTheBackof
         health.on_opened(at);
         health.on_relay_datagram(at + 1s);
         at += 20s;
-        EXPECT_FALSE(health.on_closed(at)) << cycle;
+        EXPECT_EQ(health.on_closed(at), report::none) << cycle;
         EXPECT_FALSE(health.may_open(at + 999ms)) << cycle;
         EXPECT_TRUE(health.may_open(at + 1s)) << cycle;
         at += 1s;
@@ -949,63 +951,96 @@ TEST(DnsAssociationHealth, AssociationsDyingWithinSecondsStillBackOffFurther)
     }
 }
 
-// An association that closes without ever delivering anything is reported once as a warning
-// (the relay looks unusable), and again only after some association has delivered something.
-TEST(DnsAssociationHealth, UnusableAssociationIsReportedOncePerOutage)
+// A closure after sent queries got no answer is reported once per cause until an association
+// receives something: "no answer" when the queries had time to be answered (the relay does not
+// work, or the queried servers cannot be reached), "ended early" when the server ended the
+// association sooner. One cause does not hide the other.
+TEST(DnsAssociationHealth, ClosuresWithoutAnswersAreReportedOncePerCause)
 {
-    proxy::dns_association_health<> health{ 3, 30s };
+    proxy::dns_association_health<> health{ 3, 30s, 10s };
+
+    // Ended 3 s after the first query was sent: ended early.
     health.on_opened(t0);
-    health.on_query_sent();
-    ASSERT_TRUE(health.on_unanswered(3, t0 + 40s));
-    EXPECT_TRUE(health.on_closed(t0 + 40s, true));
+    health.on_query_sent(t0 + 1s);
+    EXPECT_EQ(health.on_closed(t0 + 4s), report::ended_early);
 
-    health.on_opened(t0 + 42s);
-    health.on_query_sent();
-    EXPECT_FALSE(health.on_closed(t0 + 43s));          // still the same outage: not again
+    // Then an unreachable resolver: retired for silence. Still reported, as no_answer.
+    health.on_opened(t0 + 10s);
+    health.on_query_sent(t0 + 11s);
+    ASSERT_TRUE(health.on_unanswered(3, t0 + 45s));
+    EXPECT_EQ(health.on_closed(t0 + 45s, silent_close), report::no_answer);
 
-    health.on_opened(t0 + 50s);
-    health.on_query_sent();
-    health.on_relay_datagram(t0 + 51s);                // it worked
-    EXPECT_FALSE(health.on_closed(t0 + 90s, true));    // delivered something: not unusable
+    // Each cause is reported once per outage.
+    health.on_opened(t0 + 60s);
+    health.on_query_sent(t0 + 61s);
+    EXPECT_EQ(health.on_closed(t0 + 62s), report::none);
+    health.on_opened(t0 + 70s);
+    health.on_query_sent(t0 + 71s);
+    ASSERT_TRUE(health.on_unanswered(3, t0 + 105s));
+    EXPECT_EQ(health.on_closed(t0 + 105s, silent_close), report::none);
 
-    health.on_opened(t0 + 91s);
-    health.on_query_sent();
-    EXPECT_TRUE(health.on_closed(t0 + 92s));           // a new outage is reported again
+    // An association that receives something ends the outage and re-arms both.
+    health.on_opened(t0 + 110s);
+    health.on_query_sent(t0 + 111s);
+    health.on_relay_datagram(t0 + 112s);
+    EXPECT_EQ(health.on_closed(t0 + 150s, silent_close), report::none);
+    health.on_opened(t0 + 160s);
+    health.on_query_sent(t0 + 161s);
+    EXPECT_EQ(health.on_closed(t0 + 162s), report::ended_early);
 }
 
-TEST(DnsAssociationHealth, UnusableIsReportedWhateverEndsTheAssociationButOnlyIfQueriesWereSent)
+TEST(DnsAssociationHealth, AnswerTimeIsMeasuredFromTheFirstQuerySent)
 {
-    // A normal close at any age, after queries got no answer: reported (and the backoff resets).
-    proxy::dns_association_health<> health{ 3, 30s };
+    // Open 21 s, but its first query was sent only 1 s before the close: ended early.
+    proxy::dns_association_health<> health{ 3, 30s, 10s };
     health.on_opened(t0);
-    health.on_query_sent();
-    EXPECT_TRUE(health.on_closed(t0 + 60s));
-    EXPECT_TRUE(health.may_open(t0 + 60s));
+    health.on_query_sent(t0 + 20s);
+    health.on_query_sent(t0 + 20500ms);
+    EXPECT_EQ(health.on_closed(t0 + 21s), report::ended_early);
 
-    // No query was sent through it (a restart before the first query): not reported.
-    proxy::dns_association_health<> idle{ 3, 30s };
+    // A normal close at any age, 10 s or more after the first query: no answer (and the
+    // backoff resets for an old association).
+    proxy::dns_association_health<> other{ 3, 30s, 10s };
+    other.on_opened(t0);
+    other.on_query_sent(t0 + 1s);
+    EXPECT_EQ(other.on_closed(t0 + 60s), report::no_answer);
+    EXPECT_TRUE(other.may_open(t0 + 60s));
+}
+
+TEST(DnsAssociationHealth, NothingSentIsNotReportedUnlessTheRelaySocketFailed)
+{
+    // Closed before its first query (a restart): not reported.
+    proxy::dns_association_health<> idle{ 3, 30s, 10s };
     idle.on_opened(t0);
-    EXPECT_FALSE(idle.on_closed(t0 + 2s));
+    EXPECT_EQ(idle.on_closed(t0 + 2s), report::none);
     idle.on_opened(t0 + 10s);
-    EXPECT_FALSE(idle.on_closed(t0 + 100s));
+    EXPECT_EQ(idle.on_closed(t0 + 100s), report::none);
+
+    // The relay socket failed before any query could be sent: reported, once per outage.
+    proxy::dns_association_health<> broken{ 3, 30s, 10s };
+    broken.on_opened(t0);
+    EXPECT_EQ(broken.on_closed(t0 + 1s, proxy::dns_association_close::relay_failed), report::relay_unusable);
+    EXPECT_FALSE(broken.may_open(t0 + 1s));
+    broken.on_opened(t0 + 2s);
+    EXPECT_EQ(broken.on_closed(t0 + 3s, proxy::dns_association_close::relay_failed), report::none);
 }
 
 TEST(DnsRelaySession, ClosureAfterUnansweredQueriesIsReportedButNotAnIdleOne)
 {
     auto idle = make_session();
     idle.on_opened(t0);
-    EXPECT_FALSE(idle.on_closed(t0 + 60s));
+    EXPECT_EQ(idle.on_closed(t0 + 60s), report::none);
 
     // Prepared but never sent (the send failed): not reported either.
     auto unsent = make_session();
     unsent.on_opened(t0);
     (void)send_query(unsent, { 1, 1 }, 1, "a.example", t0 + 1s, 7);
-    EXPECT_FALSE(unsent.on_closed(t0 + 60s));
+    EXPECT_EQ(unsent.on_closed(t0 + 60s), report::none);
 
     auto unanswered = make_session();
     unanswered.on_opened(t0);
     (void)send_query(unanswered, { 1, 1 }, 1, "a.example", t0 + 1s, 7);
-    unanswered.on_query_sent();
+    unanswered.on_query_sent(t0 + 1s);
     EXPECT_EQ(unanswered.association_age(t0 + 60s), 60s);
-    EXPECT_TRUE(unanswered.on_closed(t0 + 60s));
+    EXPECT_EQ(unanswered.on_closed(t0 + 60s), report::no_answer);
 }
