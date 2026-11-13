@@ -59,7 +59,7 @@ namespace proxy
 
         /// A query held longer than this while an association is opened is dropped instead of
         /// being sent late; Windows retransmits a query after about a second.
-        static constexpr std::chrono::seconds max_wait{ 3 };
+        static constexpr std::chrono::milliseconds max_wait{ 3000 };
 
         /// Unanswered queries (sent after the last datagram from the relay) that retire an association.
         static constexpr std::size_t unanswered_limit = 3;
@@ -176,7 +176,7 @@ namespace proxy
             {
                 std::scoped_lock lock(lock_);
                 current = std::move(association_);
-                drop_waiting_locked(waiting_.size());
+                dropped_unavailable_ += waiting_.drop_all();
                 session_.clear();
             }
             close_association(std::move(current));
@@ -224,7 +224,6 @@ namespace proxy
         {
             client_t client;
             std::vector<uint8_t> datagram;
-            std::chrono::steady_clock::time_point queued_at;
         };
 
         static constexpr uint8_t own_address_type = address_type_t::af_type == AF_INET ? 1 : 4;
@@ -248,7 +247,7 @@ namespace proxy
         std::mutex lock_;
         std::condition_variable maintenance_cv_;
         std::unique_ptr<association> association_;
-        std::deque<waiting_query> waiting_;
+        dns_waiting_queue<waiting_query> waiting_{ max_waiting_queries, max_wait };
         dns_relay_session<client_t, client_hash> session_{ query_ttl, max_queries_in_flight, unanswered_limit,
             minimum_association_age };
         std::random_device random_;
@@ -267,6 +266,7 @@ namespace proxy
         // --- Statistics, reported by the maintenance thread at a throttled rate ---------------
 
         std::atomic<uint64_t> dropped_unauthorized_{ 0 };
+        std::atomic<uint64_t> dropped_refused_{ 0 };
         std::atomic<uint64_t> dropped_malformed_{ 0 };
         std::atomic<uint64_t> dropped_unavailable_{ 0 };
         std::atomic<uint64_t> dropped_unmatched_answers_{ 0 };
@@ -297,20 +297,17 @@ namespace proxy
 
         /// Keepalive on the control connection (first probe after 60 s idle, then every 10 s),
         /// so a silently dropped connection (NAT timeout, server crash) is detected and the
-        /// association reopened. SIO_KEEPALIVE_VALS works on every supported Windows version;
-        /// its definitions are repeated here because <mstcpip.h> is not reliably included.
+        /// association reopened. SIO_KEEPALIVE_VALS (<mstcpip.h>) works on every supported
+        /// Windows version.
         void enable_keepalive(const SOCKET socket) const noexcept
         {
-            struct keepalive_values
-            {
-                ULONG onoff;
-                ULONG keepalivetime;
-                ULONG keepaliveinterval;
-            } values{ 1, 60 * 1000, 10 * 1000 };
-            constexpr DWORD sio_keepalive_vals = _WSAIOW(IOC_VENDOR, 4);
+            tcp_keepalive values{};
+            values.onoff = 1;
+            values.keepalivetime = 60 * 1000;
+            values.keepaliveinterval = 10 * 1000;
 
             DWORD bytes_returned = 0;
-            if (WSAIoctl(socket, sio_keepalive_vals, &values, sizeof(values), nullptr, 0, &bytes_returned,
+            if (WSAIoctl(socket, SIO_KEEPALIVE_VALS, &values, sizeof(values), nullptr, 0, &bytes_returned,
                 nullptr, nullptr) == SOCKET_ERROR)
             {
                 NETLIB_DEBUG("DNS relay: failed to set keepalive on the SOCKS5 control connection: {}",
@@ -440,23 +437,6 @@ namespace proxy
             }
         }
 
-        /// Drops the oldest @p count waiting queries. Caller holds lock_.
-        void drop_waiting_locked(std::size_t count)
-        {
-            count = (std::min)(count, waiting_.size());
-            dropped_unavailable_ += count;
-            waiting_.erase(waiting_.begin(), waiting_.begin() + static_cast<std::ptrdiff_t>(count));
-        }
-
-        /// Drops waiting queries held longer than max_wait. Caller holds lock_.
-        void drop_stale_waiting_locked(const std::chrono::steady_clock::time_point now)
-        {
-            std::size_t stale = 0;
-            while (stale < waiting_.size() && now - waiting_[stale].queued_at > max_wait)
-                ++stale;
-            drop_waiting_locked(stale);
-        }
-
         // --- Threads ----------------------------------------------------------------------------
 
         void listener_loop()
@@ -503,21 +483,22 @@ namespace proxy
                 return;
             }
 
-            if (!socks5_dns_query_offset(buffer.data(), size, own_address_type))
+            // The redirect's SOCKS5 header (of the listener's family) and a DNS header.
+            const auto header = parse_socks5_udp_datagram(buffer.data(), size);
+            if (!header || header->address_type != own_address_type || header->data_size < dns_header_size)
             {
                 ++dropped_malformed_;
                 return;
             }
 
-            const auto header = parse_socks5_udp_datagram(buffer.data(), size);
             const auto* override_address = server_override_
                 ? reinterpret_cast<const uint8_t*>(&server_override_->ip)
                 : nullptr;
-            if (!header || !dns_relay_destination_allowed(*header,
+            if (!dns_relay_destination_allowed(*header,
                 reinterpret_cast<const uint8_t*>(&client->endpoint.ip), own_address_size,
                 override_address, own_address_size, server_override_ ? server_override_->port : 0))
             {
-                ++dropped_unauthorized_;
+                ++dropped_refused_;
                 return;
             }
 
@@ -532,13 +513,13 @@ namespace proxy
 
             // No usable association: hold the query while one is opened, unless opening is
             // backing off after a failure or too many queries are already waiting.
-            if (!session_.may_open(std::chrono::steady_clock::now()) || waiting_.size() >= max_waiting_queries)
+            const auto now = std::chrono::steady_clock::now();
+            if (!session_.may_open(now) || !waiting_.push(waiting_query{ *client, std::move(datagram) }, now))
             {
                 ++dropped_unavailable_;
                 return;
             }
 
-            waiting_.push_back(waiting_query{ *client, std::move(datagram), std::chrono::steady_clock::now() });
             maintenance_cv_.notify_all();
         }
 
@@ -647,7 +628,7 @@ namespace proxy
                     session_.on_closed(now, silent);
                     // Queries queued meanwhile cannot wait out a backoff.
                     if (!session_.may_open(now))
-                        drop_waiting_locked(waiting_.size());
+                        dropped_unavailable_ += waiting_.drop_all();
                     lock.unlock();
                     close_association(std::move(retired));
                     lock.lock();
@@ -659,7 +640,7 @@ namespace proxy
                 session_.expire_closed(now);
             }
 
-            drop_stale_waiting_locked(now);
+            dropped_unavailable_ += waiting_.drop_stale(now);
             if (!association_ && !waiting_.empty() && session_.may_open(now))
                 open_association(lock);
 
@@ -703,10 +684,10 @@ namespace proxy
                 if (stopping_.load(std::memory_order_acquire))
                     return;
 
-                session_.on_open_failed(now);
-                drop_waiting_locked(waiting_.size());
+                const bool first_failure = session_.on_open_failed(now);
+                dropped_unavailable_ += waiting_.drop_all();
                 const auto retry = std::chrono::duration_cast<std::chrono::seconds>(session_.next_attempt() - now);
-                if (session_.consecutive_failures() == 1)
+                if (first_failure)
                 {
                     NETLIB_WARNING("DNS relay: could not open a SOCKS5 UDP association with {}; UDP DNS is "
                         "dropped until one opens (next attempt in {} s)", upstream_.to_string(), retry.count());
@@ -724,11 +705,8 @@ namespace proxy
             association_ = std::move(opened);
 
             // Opening can take seconds; queries Windows has given up on are not sent late.
-            drop_stale_waiting_locked(now);
-
-            auto waiting = std::move(waiting_);
-            waiting_.clear();
-            for (auto& query : waiting)
+            dropped_unavailable_ += waiting_.drop_stale(now);
+            for (auto& query : waiting_.take_all())
                 send_query_locked(query.client, query.datagram);
         }
 
@@ -841,18 +819,20 @@ namespace proxy
         void report_drops(const std::chrono::steady_clock::time_point now, const bool final_report)
         {
             const auto unauthorized = dropped_unauthorized_.load(std::memory_order_relaxed);
+            const auto refused = dropped_refused_.load(std::memory_order_relaxed);
             const auto malformed = dropped_malformed_.load(std::memory_order_relaxed);
             const auto unavailable = dropped_unavailable_.load(std::memory_order_relaxed);
             const auto unmatched = dropped_unmatched_answers_.load(std::memory_order_relaxed);
             const auto send_failures = dropped_send_failures_.load(std::memory_order_relaxed);
-            const auto total = unauthorized + malformed + unavailable + unmatched + send_failures;
+            const auto total = unauthorized + refused + malformed + unavailable + unmatched + send_failures;
 
             if (total == reported_drops_ || (!final_report && now - last_report_ < report_interval))
                 return;
 
             NETLIB_INFO("DNS relay: dropped so far: {} queries while no SOCKS5 UDP association was available, "
-                "{} not from a redirected DNS client, {} without a DNS question, {} answers matching no query, "
-                "{} send failures", unavailable, unauthorized, malformed, unmatched, send_failures);
+                "{} not from a redirected DNS client, {} naming a destination other than the queried server or the "
+                "override, or from a loopback address, {} without a DNS question, {} answers matching no query, "
+                "{} send failures", unavailable, unauthorized, refused, malformed, unmatched, send_failures);
             reported_drops_ = total;
             last_report_ = now;
         }

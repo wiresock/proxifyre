@@ -322,15 +322,17 @@ TEST(DnsAssociationHealth, AssociationClosingSoonAfterOpeningBacksOff)
     EXPECT_TRUE(health.may_open(t0 + 5s));
 }
 
-TEST(DnsAssociationHealth, LongLivedAssociationResetsTheBackoffWhileOpen)
+TEST(DnsAssociationHealth, AssociationThatDeliversOnceOldEnoughResetsTheBackoff)
 {
     proxy::dns_association_health<> health{ 3, 30s };
-    health.on_open_failed(t0);
-    health.on_open_failed(t0);
+    (void)health.on_open_failed(t0);
+    (void)health.on_open_failed(t0);
     health.on_opened(t0 + 2s);
-    EXPECT_FALSE(health.on_unanswered(0, t0 + 31s));
-    EXPECT_EQ(health.consecutive_failures(), 1u + 1u);
-    EXPECT_FALSE(health.on_unanswered(0, t0 + 32s));
+    // Age alone, or a datagram while young, does not prove the association.
+    EXPECT_FALSE(health.on_unanswered(0, t0 + 40s));
+    health.on_relay_datagram(t0 + 31s);
+    EXPECT_EQ(health.consecutive_failures(), 2u);
+    health.on_relay_datagram(t0 + 32s);
     EXPECT_EQ(health.consecutive_failures(), 0u);
 }
 
@@ -773,9 +775,92 @@ TEST(DnsAssociationHealth, AssociationRetiredForSilenceBacksOffWhateverItsAge)
     EXPECT_FALSE(health.may_open(t0 + 60s));
     EXPECT_TRUE(health.may_open(t0 + 61s));
 
+    // Repeated silent associations (a relay that never answers behind a working control
+    // connection) back off further each time, through the normal retirement path.
+    auto at = t0 + 61s;
+    for (const auto delay : { 2s, 4s, 8s, 16s, 30s, 30s })
+    {
+        ASSERT_TRUE(health.may_open(at));
+        health.on_opened(at);
+        at += 40s;
+        ASSERT_TRUE(health.on_unanswered(3, at));
+        health.on_closed(at, true);
+        EXPECT_FALSE(health.may_open(at + delay - 1ms));
+        EXPECT_TRUE(health.may_open(at + delay));
+        at += delay;
+    }
+
     // A long-lived association closed for another reason reopens at once.
     health.on_opened(t0 + 61s);
     health.on_closed(t0 + 200s);
     EXPECT_EQ(health.consecutive_failures(), 0u);
     EXPECT_TRUE(health.may_open(t0 + 200s));
+}
+
+TEST(DnsAssociationHealth, FirstOpenFailureSinceEachSuccessfulOpenIsReported)
+{
+    proxy::dns_association_health<> health{ 3, 30s };
+    EXPECT_TRUE(health.on_open_failed(t0));
+    EXPECT_FALSE(health.on_open_failed(t0 + 1s));
+    health.on_opened(t0 + 3s);
+
+    // A silent retirement is not an open failure and does not use up the report.
+    ASSERT_TRUE(health.on_unanswered(3, t0 + 40s));
+    health.on_closed(t0 + 40s, true);
+    EXPECT_TRUE(health.on_open_failed(t0 + 41s));
+    EXPECT_FALSE(health.on_open_failed(t0 + 43s));
+}
+
+// --- Queries waiting for the association --------------------------------------------------------
+
+TEST(DnsWaitingQueue, IsBoundedAndKeepsArrivalOrder)
+{
+    proxy::dns_waiting_queue<int> queue{ 3, 3000ms };
+    EXPECT_TRUE(queue.push(1, t0));
+    EXPECT_TRUE(queue.push(2, t0 + 1s));
+    EXPECT_TRUE(queue.push(3, t0 + 2s));
+    EXPECT_FALSE(queue.push(4, t0 + 2s));
+    EXPECT_EQ(queue.size(), 3u);
+    EXPECT_EQ(queue.take_all(), (std::vector<int>{ 1, 2, 3 }));
+    EXPECT_TRUE(queue.empty());
+}
+
+TEST(DnsWaitingQueue, QueriesHeldTooLongAreDroppedOldestFirst)
+{
+    proxy::dns_waiting_queue<int> queue{ 64, 3000ms };
+    (void)queue.push(1, t0);
+    (void)queue.push(2, t0 + 1s);
+    (void)queue.push(3, t0 + 2500ms);
+    EXPECT_EQ(queue.drop_stale(t0 + 3s), 0u);
+    EXPECT_EQ(queue.drop_stale(t0 + 4001ms), 2u);
+    EXPECT_EQ(queue.take_all(), (std::vector<int>{ 3 }));
+
+    (void)queue.push(4, t0);
+    (void)queue.push(5, t0);
+    EXPECT_EQ(queue.drop_all(), 2u);
+    EXPECT_TRUE(queue.empty());
+}
+
+TEST(DnsRelayDestination, Ipv6QueriesFollowTheSameRules)
+{
+    const std::vector<uint8_t> link_local{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    const std::vector<uint8_t> v6_override{ 0x26, 0x06, 0x47, 0, 0x47, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11 };
+    const auto check = [](const std::vector<uint8_t>& header_address, const uint16_t header_port,
+        const std::vector<uint8_t>& sender, const std::vector<uint8_t>* override_address)
+    {
+        const auto datagram = socks_datagram(header_address, header_port, query(1, "example.com"));
+        const auto view = proxy::parse_socks5_udp_datagram(datagram.data(), datagram.size());
+        return view && proxy::dns_relay_destination_allowed(*view, sender.data(), sender.size(),
+            override_address ? override_address->data() : nullptr, 16, 53);
+    };
+
+    // A link-local resolver: the scope id is not part of the address bytes.
+    EXPECT_TRUE(check(link_local, 53, link_local, nullptr));
+    EXPECT_TRUE(check(v6_override, 53, link_local, &v6_override));
+    EXPECT_FALSE(check(link_local, 53, link_local, &v6_override));
+    EXPECT_FALSE(check(v6_relay_source, 53, link_local, nullptr));
+
+    std::vector<uint8_t> loopback(16, 0);
+    loopback[15] = 1;
+    EXPECT_FALSE(check(loopback, 53, loopback, nullptr));
 }

@@ -15,10 +15,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <optional>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "dns_routing_policy.h"
 
@@ -533,8 +535,9 @@ namespace proxy
      *   arriving meanwhile are dropped (Proxy mode never sends DNS directly). An association that
      *   closes less than @p minimum_age after opening counts as a failed open, so a server that
      *   accepts UDP ASSOCIATE and then drops the connection is not reconnected in a tight loop,
-     *   and so does one retired because it stopped answering. The backoff resets once an
-     *   association has stayed open for @p minimum_age.
+     *   and so does one retired because it stopped answering. The backoff resets only when an
+     *   association proves itself: a datagram arrives from the relay once it is at least
+     *   @p minimum_age old, or it closes normally at that age.
      * - An open association is reopened when its SOCKS5 control connection closes or its relay
      *   socket fails (reported by the relay), or when it looks silently dead: at least
      *   @p unanswered_limit queries expired unanswered that were sent after the last datagram
@@ -562,11 +565,17 @@ namespace proxy
             return failures_ == 0 || now >= next_attempt_;
         }
 
-        void on_open_failed(const time_point now) noexcept
+        /**
+         * @brief Records a failed attempt to open an association and backs off.
+         * @return true for the first failed attempt since the last successful open (or since
+         *         the relay started), which the relay reports as a warning.
+         */
+        bool on_open_failed(const time_point now) noexcept
         {
-            ++failures_;
-            const auto shift = std::min<std::size_t>(failures_ - 1, 5); // 1, 2, 4, 8, 16, 32 s
-            next_attempt_ = now + (std::min)(std::chrono::seconds{ 1 } * (1u << shift), max_backoff);
+            back_off(now);
+            const bool first = !open_failure_reported_;
+            open_failure_reported_ = true;
+            return first;
         }
 
         void on_opened(const time_point now) noexcept
@@ -574,6 +583,7 @@ namespace proxy
             unanswered_ = 0;
             opened_at_ = now;
             last_datagram_.reset();
+            open_failure_reported_ = false;
         }
 
         /**
@@ -585,16 +595,19 @@ namespace proxy
         void on_closed(const time_point now, const bool failed = false) noexcept
         {
             if (failed || now - opened_at_ < minimum_age_)
-                on_open_failed(now);
+                back_off(now);
             else
                 failures_ = 0;
         }
 
-        /// Any datagram from the relay shows the association is alive.
+        /// Any datagram from the relay shows the association is alive; once it is also at least
+        /// the minimum age, it has proved itself and the backoff resets.
         void on_relay_datagram(const time_point now) noexcept
         {
             unanswered_ = 0;
             last_datagram_ = now;
+            if (now - opened_at_ >= minimum_age_)
+                failures_ = 0;
         }
 
         /// Time of the last datagram from the relay since the association opened, if any.
@@ -606,11 +619,8 @@ namespace proxy
          */
         [[nodiscard]] bool on_unanswered(const std::size_t count, const time_point now) noexcept
         {
-            const bool old_enough = now - opened_at_ >= minimum_age_;
-            if (old_enough)
-                failures_ = 0; // the association has proved itself
             unanswered_ += count;
-            return unanswered_ >= unanswered_limit_ && old_enough;
+            return unanswered_ >= unanswered_limit_ && now - opened_at_ >= minimum_age_;
         }
 
         [[nodiscard]] std::size_t consecutive_failures() const noexcept { return failures_; }
@@ -619,6 +629,14 @@ namespace proxy
         static constexpr std::chrono::seconds max_backoff{ 30 };
 
     private:
+        void back_off(const time_point now) noexcept
+        {
+            ++failures_;
+            const auto shift = std::min<std::size_t>(failures_ - 1, 5); // 1, 2, 4, 8, 16, 32 s
+            next_attempt_ = now + (std::min)(std::chrono::seconds{ 1 } * (1u << shift), max_backoff);
+        }
+
+        bool open_failure_reported_{ false };
         std::size_t unanswered_limit_;
         std::chrono::seconds minimum_age_;
         std::size_t failures_{};
@@ -749,7 +767,8 @@ namespace proxy
         void expire_closed(const time_point now) { (void)queries_.expire(now); }
 
         [[nodiscard]] bool may_open(const time_point now) const noexcept { return health_.may_open(now); }
-        void on_open_failed(const time_point now) noexcept { health_.on_open_failed(now); }
+        /// See dns_association_health::on_open_failed().
+        bool on_open_failed(const time_point now) noexcept { return health_.on_open_failed(now); }
         void on_opened(const time_point now) noexcept { health_.on_opened(now); }
 
         /// The association closed: its queries in flight can no longer be answered. See
@@ -769,5 +788,70 @@ namespace proxy
     private:
         table_t queries_;
         dns_association_health<Clock> health_;
+    };
+
+    /**
+     * @brief Queries held while the shared association is being opened: bounded in number, and
+     *        each held at most @p max_wait, so nothing is sent long after the client gave up.
+     *        Items stay in arrival order. Not thread-safe: the relay serializes access.
+     */
+    template <typename Item, typename Clock = std::chrono::steady_clock>
+    class dns_waiting_queue
+    {
+    public:
+        using time_point = typename Clock::time_point;
+
+        dns_waiting_queue(const std::size_t capacity, const std::chrono::milliseconds max_wait)
+            : capacity_(capacity), max_wait_(max_wait)
+        {
+        }
+
+        /// Queues @p item; false (and @p item is not queued) when the queue is full.
+        bool push(Item item, const time_point now)
+        {
+            if (items_.size() >= capacity_)
+                return false;
+            items_.emplace_back(now, std::move(item));
+            return true;
+        }
+
+        /// Drops items held longer than max_wait; returns how many.
+        std::size_t drop_stale(const time_point now)
+        {
+            std::size_t stale = 0;
+            while (!items_.empty() && now - items_.front().first > max_wait_)
+            {
+                items_.pop_front();
+                ++stale;
+            }
+            return stale;
+        }
+
+        /// Drops everything; returns how many.
+        std::size_t drop_all() noexcept
+        {
+            const auto dropped = items_.size();
+            items_.clear();
+            return dropped;
+        }
+
+        /// Removes and returns every item, oldest first.
+        std::vector<Item> take_all()
+        {
+            std::vector<Item> taken;
+            taken.reserve(items_.size());
+            for (auto& [queued_at, item] : items_)
+                taken.push_back(std::move(item));
+            items_.clear();
+            return taken;
+        }
+
+        [[nodiscard]] bool empty() const noexcept { return items_.empty(); }
+        [[nodiscard]] std::size_t size() const noexcept { return items_.size(); }
+
+    private:
+        std::deque<std::pair<time_point, Item>> items_;
+        std::size_t capacity_;
+        std::chrono::milliseconds max_wait_;
     };
 }

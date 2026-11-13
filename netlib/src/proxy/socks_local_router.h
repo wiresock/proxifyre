@@ -293,9 +293,10 @@ namespace proxy
         std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v4>> dns_udp_relay_v4_;
         std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v6>> dns_udp_relay_v6_;
 
-        /// Set from the moment the DNS relays start stopping until stop() has stopped the packet
-        /// filter: new UDP DNS is blocked, but the relays' listener ports are still recognized so
-        /// their last answers are translated. Guarded by lock_.
+        /// Set from the moment the DNS relays start stopping until stop() no longer processes
+        /// packets: new UDP DNS is blocked, but the relays' listener ports are still recognized
+        /// so their last answers are translated. Cleared again by start_dns_udp_relays().
+        /// Guarded by lock_.
         bool dns_udp_relays_stopping_{ false };
 
         /**
@@ -1108,15 +1109,14 @@ namespace proxy
 
             // Step 0: Stop the DNS relays while the packet filter still runs, so answers they
             // send while stopping are still translated (or dropped) instead of reaching the
-            // network. They stay registered until the filter has stopped (release below), and
-            // new UDP DNS is blocked meanwhile.
+            // network. They stay registered until no packet is processed any more (release
+            // after Step 2), and new UDP DNS is blocked meanwhile.
             stop_dns_udp_relays();
 
             // Step 1: Stop the packet filter
             // This prevents new packets from being processed and queued
             NETLIB_DEBUG("Stopping packet filter");
             packet_filter_->stop_filter();
-            release_dns_udp_relays();
 
             // Step 2: Signal and join the process resolve thread
             // This ensures no more packets are being queued for processing.
@@ -1131,6 +1131,10 @@ namespace proxy
 
             if (process_resolve_thread_.joinable())
                 process_resolve_thread_.join();
+
+            // No packet is processed any more (deferred packets included), so the stopped DNS
+            // relays can be released.
+            release_dns_udp_relays();
 
             // Report the last DNS and listener drop counts, which the resolver thread may not
             // have reached.
@@ -2746,6 +2750,13 @@ namespace proxy
          */
         void start_dns_udp_relays()
         {
+            {
+                // A stop() that did not finish (for example stop_filter() threw) must not leave
+                // UDP DNS silently blocked after this start.
+                std::unique_lock lock(lock_);
+                dns_udp_relays_stopping_ = false;
+            }
+
             std::optional<net::ip_endpoint<net::ip_address_v4>> upstream;
             proxy_session_settings settings;
             std::optional<net::ip_endpoint<net::ip_address_v4>> override_v4;
@@ -2808,8 +2819,9 @@ namespace proxy
         }
 
         /**
-         * @brief Destroys the stopped DNS relays and ends the stopping state. Called after the
-         *        packet filter has stopped (or never started), under lifecycle_mutex_.
+         * @brief Destroys the stopped DNS relays and ends the stopping state. Called once no
+         *        packet is processed any more (the packet filter and the resolver thread have
+         *        stopped, or never started), under lifecycle_mutex_.
          */
         void release_dns_udp_relays()
         {
