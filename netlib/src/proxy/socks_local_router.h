@@ -2287,13 +2287,10 @@ namespace proxy
                 }
                 else
                 {
-                    // Dual-stack IPv6 listeners reach the IPv4 upstream through its IPv4-mapped form.
-                    in6_addr mapped{};
-                    mapped.u.Byte[10] = 0xff;
-                    mapped.u.Byte[11] = 0xff;
-                    const in_addr v4 = upstream.ip;
-                    memcpy(&mapped.u.Byte[12], &v4, sizeof(v4));
-                    return destination == net::ip_address_v6{ mapped };
+                    // SOCKS5 servers are IPv4 (add_socks5_proxy()). IPv6 sockets reach them through
+                    // IPv4-mapped addresses, which leave the host as IPv4 packets, so no IPv6 packet
+                    // is addressed to one.
+                    return false;
                 }
             });
         }
@@ -2517,9 +2514,9 @@ namespace proxy
 
             if (route.decision.action != dns_route_action::proxy)
             {
-                // `defer` is handled by the caller (queued for deferred resolution); anything
-                // else that is not a redirect must fail closed.
-                note_dns_block<AddrT, dns_transport::udp>(dns_block_reason::upstream_sender_unknown);
+                // Unreachable: `defer` is handled by the caller (queued for deferred resolution)
+                // and decide_dns() returns no other action for port 53. Fail closed regardless.
+                note_dns_block<AddrT, dns_transport::udp>(dns_block_reason::redirect_failed);
                 return packet_filter::packet_action{ action_type::drop };
             }
 
@@ -2584,9 +2581,9 @@ namespace proxy
 
             if (route.decision.action != dns_route_action::proxy)
             {
-                // `defer` is handled by the caller (queued for deferred resolution); anything
-                // else that is not a redirect must fail closed.
-                note_dns_block<AddrT, dns_transport::tcp>(dns_block_reason::upstream_sender_unknown);
+                // Unreachable: `defer` is handled by the caller (queued for deferred resolution)
+                // and decide_dns() returns no other action for port 53. Fail closed regardless.
+                note_dns_block<AddrT, dns_transport::tcp>(dns_block_reason::redirect_failed);
                 return packet_filter::packet_action{ action_type::drop };
             }
 
