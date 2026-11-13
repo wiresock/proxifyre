@@ -622,13 +622,30 @@ namespace proxy
 
                 if (reason)
                 {
-                    NETLIB_INFO("DNS relay: closing the SOCKS5 UDP association with {} because {}; it is reopened "
-                        "on the next query", upstream_.to_string(), reason);
                     auto retired = std::move(association_);
-                    session_.on_closed(now, silent);
-                    // Queries queued meanwhile cannot wait out a backoff.
-                    if (!session_.may_open(now))
+                    const bool unusable = session_.on_closed(now, silent);
+                    if (session_.may_open(now))
+                    {
+                        NETLIB_INFO("DNS relay: closing the SOCKS5 UDP association with {} because {}; it is "
+                            "reopened on the next query", upstream_.to_string(), reason);
+                    }
+                    else
+                    {
+                        const auto retry = std::chrono::duration_cast<std::chrono::seconds>(session_.next_attempt() - now);
+                        if (unusable)
+                        {
+                            NETLIB_WARNING("DNS relay: closing the SOCKS5 UDP association with {} because {}, without "
+                                "it having delivered anything; UDP DNS is dropped until an association works (next "
+                                "attempt in {} s)", upstream_.to_string(), reason, retry.count());
+                        }
+                        else
+                        {
+                            NETLIB_INFO("DNS relay: closing the SOCKS5 UDP association with {} because {}; next "
+                                "attempt in {} s", upstream_.to_string(), reason, retry.count());
+                        }
+                        // Queries queued meanwhile cannot wait out a backoff.
                         dropped_unavailable_ += waiting_.drop_all();
+                    }
                     lock.unlock();
                     close_association(std::move(retired));
                     lock.lock();

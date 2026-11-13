@@ -535,11 +535,11 @@ namespace proxy
      *   arriving meanwhile are dropped (Proxy mode never sends DNS directly). An association that
      *   closes less than @p minimum_age after opening counts as a failed open, so a server that
      *   accepts UDP ASSOCIATE and then drops the connection is not reconnected in a tight loop,
-     *   and so does one retired because it stopped answering. A retired association that had
-     *   delivered something restarts the backoff at its shortest delay; one that never did
-     *   lets it grow. The backoff also resets when an association proves itself: a datagram
-     *   arrives from the relay once it is at least @p minimum_age old, or it closes normally at
-     *   that age.
+     *   and so does one retired because it stopped answering. A closed association that had
+     *   worked restarts the backoff at its shortest delay; one that never delivered anything
+     *   lets it grow (see on_closed()). The backoff also resets when an association proves
+     *   itself: a datagram arrives from the relay once it is at least @p minimum_age old, or it
+     *   closes normally at that age.
      * - An open association is reopened when its SOCKS5 control connection closes or its relay
      *   socket fails (reported by the relay), or when it looks silently dead: at least
      *   @p unanswered_limit queries expired unanswered that were sent after the last datagram
@@ -590,30 +590,41 @@ namespace proxy
 
         /**
          * @brief The association was closed at @p now.
-         * @param failed The association stopped working (for example it was retired for
-         *        unanswered queries): back off before the next attempt whatever its age. An
-         *        association younger than the minimum age always counts as a failed open. An
-         *        association that worked (something arrived from the relay) and later stopped
-         *        working at or past the minimum age starts a new outage: the backoff restarts
-         *        at its shortest delay instead of growing, so a relay that answers after every
-         *        reopen is never kept waiting long.
+         *
+         * - A normal close (control connection or relay socket) of an association at least the
+         *   minimum age old resets the backoff: the next query reopens at once.
+         * - Otherwise (it was retired for unanswered queries, @p failed, or it closed younger
+         *   than the minimum age) the next attempt backs off. If the association worked, that
+         *   is, something arrived from the relay and it lived at least minimum_working_life,
+         *   the closure is a new outage and the backoff restarts at its shortest delay, so a
+         *   relay that keeps answering after every reopen (one whose UDP path dies on idle, or
+         *   a server that ends associations early) is never kept waiting long. An association
+         *   that delivered nothing, or died within seconds, makes the backoff grow, so a server
+         *   that accepts UDP ASSOCIATE and then fails is not reconnected in a tight loop.
+         *
+         * @return true when this closure should be reported as a warning: the association
+         *         delivered nothing, and no such closure has been reported since the last
+         *         association that delivered something (the relay looks unusable).
          */
-        void on_closed(const time_point now, const bool failed = false) noexcept
+        bool on_closed(const time_point now, const bool failed = false) noexcept
         {
-            const bool young = now - opened_at_ < minimum_age_;
-            if (failed && !young && last_datagram_)
+            const auto age = now - opened_at_;
+            const bool delivered = last_datagram_.has_value();
+
+            if (!failed && age >= minimum_age_)
             {
                 failures_ = 0;
-                back_off(now);
+                return false;
             }
-            else if (failed || young)
-            {
-                back_off(now);
-            }
-            else
-            {
+
+            if (delivered && age >= minimum_working_life)
                 failures_ = 0;
-            }
+            back_off(now);
+
+            if (delivered || unusable_reported_)
+                return false;
+            unusable_reported_ = true;
+            return true;
         }
 
         /// Any datagram from the relay shows the association is alive; once it is also at least
@@ -622,6 +633,7 @@ namespace proxy
         {
             unanswered_ = 0;
             last_datagram_ = now;
+            unusable_reported_ = false;
             if (now - opened_at_ >= minimum_age_)
                 failures_ = 0;
         }
@@ -644,6 +656,10 @@ namespace proxy
 
         static constexpr std::chrono::seconds max_backoff{ 30 };
 
+        /// An association that delivered something and lived at least this long worked: its
+        /// closure restarts the backoff instead of growing it.
+        static constexpr std::chrono::seconds minimum_working_life{ 5 };
+
     private:
         void back_off(const time_point now) noexcept
         {
@@ -653,6 +669,7 @@ namespace proxy
         }
 
         bool open_failure_reported_{ false };
+        bool unusable_reported_{ false };
         std::size_t unanswered_limit_;
         std::chrono::seconds minimum_age_;
         std::size_t failures_{};
@@ -788,11 +805,11 @@ namespace proxy
         void on_opened(const time_point now) noexcept { health_.on_opened(now); }
 
         /// The association closed: its queries in flight can no longer be answered. See
-        /// dns_association_health::on_closed() for @p failed.
-        void on_closed(const time_point now, const bool failed = false) noexcept
+        /// dns_association_health::on_closed() for @p failed and the result.
+        bool on_closed(const time_point now, const bool failed = false) noexcept
         {
             queries_.clear();
-            health_.on_closed(now, failed);
+            return health_.on_closed(now, failed);
         }
 
         void clear() noexcept { queries_.clear(); }

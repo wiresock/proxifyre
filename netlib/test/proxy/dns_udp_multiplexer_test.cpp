@@ -886,3 +886,66 @@ TEST(DnsRelayDestination, Ipv6QueriesFollowTheSameRules)
     loopback[15] = 1;
     EXPECT_FALSE(check(loopback, 53, loopback, nullptr));
 }
+
+// A server that ends every UDP association after 20 s (an early idle timeout or a fixed
+// lifetime): each association answers, then closes young. That is a new outage each time, so the
+// delay must not grow towards 30 s.
+TEST(DnsAssociationHealth, AssociationThatWorkedThenClosedYoungRestartsTheBackoff)
+{
+    proxy::dns_association_health<> health{ 3, 30s };
+    auto at = t0;
+    for (int cycle = 0; cycle < 8; ++cycle)
+    {
+        ASSERT_TRUE(health.may_open(at)) << cycle;
+        health.on_opened(at);
+        health.on_relay_datagram(at + 1s);
+        at += 20s;
+        EXPECT_FALSE(health.on_closed(at)) << cycle;
+        EXPECT_FALSE(health.may_open(at + 999ms)) << cycle;
+        EXPECT_TRUE(health.may_open(at + 1s)) << cycle;
+        at += 1s;
+    }
+}
+
+// Associations that die within seconds still make the backoff grow, whether or not a datagram
+// arrived first, so such a server is not reconnected in a tight loop.
+TEST(DnsAssociationHealth, AssociationsDyingWithinSecondsStillBackOffFurther)
+{
+    proxy::dns_association_health<> health{ 3, 30s };
+    auto at = t0;
+    for (const auto delay : { 1s, 2s, 4s, 8s, 16s, 30s })
+    {
+        ASSERT_TRUE(health.may_open(at));
+        health.on_opened(at);
+        health.on_relay_datagram(at + 1s);
+        at += 3s;
+        (void)health.on_closed(at);
+        EXPECT_FALSE(health.may_open(at + delay - 1ms));
+        EXPECT_TRUE(health.may_open(at + delay));
+        at += delay;
+    }
+}
+
+// An association that closes without ever delivering anything is reported once as a warning
+// (the relay looks unusable), and again only after some association has delivered something.
+TEST(DnsAssociationHealth, UnusableAssociationIsReportedOncePerOutage)
+{
+    proxy::dns_association_health<> health{ 3, 30s };
+    health.on_opened(t0);
+    ASSERT_TRUE(health.on_unanswered(3, t0 + 40s));
+    EXPECT_TRUE(health.on_closed(t0 + 40s, true));
+
+    health.on_opened(t0 + 42s);
+    EXPECT_FALSE(health.on_closed(t0 + 43s));          // young, delivered nothing: not again
+
+    health.on_opened(t0 + 50s);
+    health.on_relay_datagram(t0 + 51s);                // it worked
+    EXPECT_FALSE(health.on_closed(t0 + 90s, true));    // delivered something: not unusable
+
+    health.on_opened(t0 + 91s);
+    EXPECT_TRUE(health.on_closed(t0 + 92s));           // a new outage is reported again
+
+    // A normal close of an old association is never reported.
+    health.on_opened(t0 + 200s);
+    EXPECT_FALSE(health.on_closed(t0 + 300s));
+}
