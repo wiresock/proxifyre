@@ -73,8 +73,18 @@ namespace ProxiFyre.Configuration
         public static string GetReferencedProxyId(DnsSettings settings)
         {
             DnsRoutingMode mode;
-            if (settings == null || string.IsNullOrWhiteSpace(settings.ProxyId) ||
-                !TryGetMode(settings.Mode, out mode) || mode != DnsRoutingMode.Proxy)
+            if (settings == null || !TryGetMode(settings.Mode, out mode) || mode != DnsRoutingMode.Proxy)
+                return null;
+            return GetNamedProxyId(settings);
+        }
+
+        /// <summary>
+        /// The trimmed dns.proxyId in any mode, or null when it is missing or blank. Direct mode
+        /// keeps the selection so that switching back to Proxy mode does not lose it.
+        /// </summary>
+        public static string GetNamedProxyId(DnsSettings settings)
+        {
+            if (settings == null || string.IsNullOrWhiteSpace(settings.ProxyId))
                 return null;
             return settings.ProxyId.Trim();
         }

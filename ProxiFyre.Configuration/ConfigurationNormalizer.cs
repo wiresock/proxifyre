@@ -32,15 +32,16 @@ namespace ProxiFyre.Configuration
                 ExtensionData = CloneExtensionData(configuration.ExtensionData)
             };
 
-            DropUnusedInvalidProxyIds(result.Proxies, DnsConfiguration.GetReferencedProxyId(configuration.Dns));
+            DropUnusedInvalidProxyIds(result.Proxies, DnsConfiguration.GetNamedProxyId(configuration.Dns));
             return result;
         }
 
         /// <summary>
-        /// Removes ids that the validator reports only as warnings: an invalid id, or a repeat of an
-        /// earlier rule's id, that DNS Proxy mode does not reference. They have no effect, and
-        /// dropping them lets a saved configuration clear the warning. An id DNS references is
-        /// kept, because the validator reports it as an error instead.
+        /// Removes an invalid id, or a repeat of an earlier rule's id, that dns.proxyId does not
+        /// name. Such ids have no effect, and dropping them lets a saved configuration clear the
+        /// warning. An id dns.proxyId names is kept in every mode: in Proxy mode the validator
+        /// reports it as an error, and in Direct mode the selection must survive a later switch
+        /// to Proxy mode.
         /// </summary>
         private static void DropUnusedInvalidProxyIds(IList<ProxyRule> rules, string referencedId)
         {

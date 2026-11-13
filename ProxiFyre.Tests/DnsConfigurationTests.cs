@@ -400,6 +400,65 @@ namespace ProxiFyre.Tests
         }
 
         [Test]
+        public void SavingKeepsTheIdDirectModeStillNames()
+        {
+            // Direct mode keeps the DNS proxy selection for a later switch to Proxy mode.
+            var configuration = TwoProxyConfiguration();
+            configuration.Dns = new DnsSettings { Mode = "Direct", ProxyId = " my proxy " };
+            configuration.Proxies[1].Id = "my proxy";
+
+            var result = _validator.Validate(configuration);
+            Assert.That(result.HasErrors, Is.False);
+            StringAssert.Contains("dns.proxyId names it", HasWarning(result, "PROXY_ID_INVALID", "proxies[1].id").Message);
+
+            var normalized = _normalizer.Normalize(configuration);
+            Assert.That(normalized.Proxies[1].Id, Is.EqualTo("my proxy"));
+            Assert.That(DnsConfiguration.FindProxyRuleIndex(normalized.Proxies, normalized.Dns.ProxyId), Is.EqualTo(1));
+        }
+
+        [Test]
+        public void NormalizingIsIdempotentForIds()
+        {
+            var configuration = TwoProxyConfiguration();
+            configuration.Proxies[0].Id = "VPN";
+            configuration.Proxies.Add(TestModels.ValidRule());
+            configuration.Proxies[2].Id = "bad id";
+
+            var once = _normalizer.Normalize(configuration);
+            var twice = _normalizer.Normalize(once);
+
+            Assert.That(twice.Proxies.Select(rule => rule.Id), Is.EqualTo(once.Proxies.Select(rule => rule.Id)));
+        }
+
+        [Test]
+        public void DateLikeStringsAreReadVerbatim()
+        {
+            var json = "{ \"logLevel\": \"Info\", \"proxies\": [ { \"appNames\": [\"browser\"], " +
+                       "\"socks5ProxyEndpoint\": \"proxy.example.com:1080\", \"username\": \"user\", " +
+                       "\"password\": \"2024-01-15T10:00:00Z\", \"note\": \"2024-01-15T10:00:00+02:00\" } ] }";
+
+            var configuration = _serializer.Deserialize(json);
+
+            Assert.That(configuration.Proxies[0].Password, Is.EqualTo("2024-01-15T10:00:00Z"));
+            StringAssert.Contains("\"2024-01-15T10:00:00+02:00\"",
+                _serializer.Serialize(_normalizer.Normalize(configuration)));
+        }
+
+        [TestCase("{} {}")]
+        [TestCase("{} x")]
+        [TestCase("[]")]
+        public void ContentOtherThanOneObjectIsRejected(string json)
+        {
+            Assert.Throws<ConfigurationFormatException>(() => _serializer.Deserialize(json));
+        }
+
+        [Test]
+        public void CommentsAfterTheObjectAreAccepted()
+        {
+            Assert.That(_serializer.Deserialize("{ \"logLevel\": \"Info\" } // trailing comment"), Is.Not.Null);
+        }
+
+        [Test]
         public void NullDnsMeansDirect()
         {
             var configuration = _serializer.Deserialize("{ \"logLevel\": \"Info\", \"proxies\": [], \"dns\": null }");

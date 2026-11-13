@@ -515,6 +515,7 @@ namespace ProxiFyre.Configuration
             // mode depends on it. Any other invalid or duplicate id is reported as a warning and has
             // no effect. An empty or whitespace id means no id, as the normalizer treats it.
             var referencedId = DnsConfiguration.GetReferencedProxyId(dns);
+            var namedId = DnsConfiguration.GetNamedProxyId(dns);
             var seen = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             for (var index = 0; index < rules.Count; index++)
             {
@@ -525,18 +526,20 @@ namespace ProxiFyre.Configuration
                 var trimmed = id.Trim();
                 var referenced = referencedId != null &&
                                  string.Equals(trimmed, referencedId, StringComparison.OrdinalIgnoreCase);
+                var named = namedId != null &&
+                            string.Equals(trimmed, namedId, StringComparison.OrdinalIgnoreCase);
                 if (!DnsConfiguration.IsValidProxyId(trimmed))
                 {
                     var message = "A proxy id must contain 1 to " + DnsConfiguration.MaximumProxyIdLength +
                                   " letters, digits, '-', '_', or '.' characters.";
                     issues.Add(referenced
                         ? Error("PROXY_ID_INVALID",
-                            message + " dns.proxyId refers to this id; give the rule a valid id and update dns.proxyId.",
+                            message + " dns.proxyId refers to this id. Select the rule as the DNS proxy again in " +
+                            "the GUI, which assigns a valid id, or give the rule a valid id and update dns.proxyId.",
                             RulePath(index) + ".id",
                             index)
                         : Warning("PROXY_ID_INVALID",
-                            message + " No DNS setting uses it, so it has no effect and is removed when the " +
-                            "configuration is saved.",
+                            message + UnusedIdConsequence(named),
                             RulePath(index) + ".id",
                             index));
                     continue;
@@ -549,12 +552,13 @@ namespace ProxiFyre.Configuration
                                   "; proxy ids must be unique (case-insensitive).";
                     issues.Add(referenced
                         ? Error("PROXY_ID_DUPLICATE",
-                            message + " dns.proxyId refers to this id, so the DNS proxy would be ambiguous.",
+                            message + " dns.proxyId refers to this id, so the DNS proxy would be ambiguous. Select " +
+                            "the intended rule as the DNS proxy again in the GUI, which assigns it a new id, or make " +
+                            "the ids unique.",
                             RulePath(index) + ".id",
                             index)
                         : Warning("PROXY_ID_DUPLICATE",
-                            message + " No DNS setting uses it, so it has no effect and is removed from this rule " +
-                            "when the configuration is saved.",
+                            message + UnusedIdConsequence(named),
                             RulePath(index) + ".id",
                             index));
                     continue;
@@ -562,6 +566,14 @@ namespace ProxiFyre.Configuration
 
                 seen.Add(trimmed, index);
             }
+        }
+
+        private static string UnusedIdConsequence(bool namedByDirectModeDns)
+        {
+            return namedByDirectModeDns
+                ? " dns.proxyId names it, so it is kept, but DNS Proxy mode cannot use it as it is; select the rule " +
+                  "as the DNS proxy again in the GUI, which assigns a new id, or fix the id and dns.proxyId."
+                : " No DNS setting uses it, so it has no effect and is removed when the GUI saves the configuration.";
         }
 
         private static void ValidateDns(DnsSettings dns, IList<ProxyRule> rules, ICollection<ValidationIssue> issues)

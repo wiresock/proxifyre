@@ -31,6 +31,12 @@ namespace ProxiFyreUI.Forms
         private EngineLocation _engineLocation;
         private ServiceStatusInfo _serviceStatus = new ServiceStatusInfo(ProxiFyreServiceState.Unknown);
         private bool _suppressChanges;
+        // The rule the DNS proxy selector last gave a new id, with the id it had before. When the
+        // selection moves on (arrow keys, mouse wheel), that rule gets its previous id back, so
+        // passing through the list does not leave an id on every rule.
+        private ProxyRule _dnsIdAssignedRule;
+        private string _dnsIdAssignedRulePreviousId;
+        private string _dnsIdAssigned;
         private bool _operationInProgress;
         private bool _applyWorkflowInProgress;
         private bool _engineStartupFailed;
@@ -239,6 +245,7 @@ namespace ProxiFyreUI.Forms
         private void BindDnsControls()
         {
             var dns = _workspace.Configuration?.Dns;
+            _dnsIdAssignedRule = null;
             var previous = _suppressChanges;
             _suppressChanges = true;
             try
@@ -324,18 +331,7 @@ namespace ProxiFyreUI.Forms
             if (referenceChanged &&
                 dnsProxyComboBox.SelectedItem is DnsProxyChoice choice && choice.Rule != null)
             {
-                // Reference the rule by a stable id; assign a new one when the rule has none, or
-                // its id is invalid or shared with another rule (either would fail validation).
-                var currentId = choice.Rule.Id?.Trim();
-                var idSharedWithAnotherRule = configuration.Proxies.Any(rule =>
-                    rule != null && !ReferenceEquals(rule, choice.Rule) && rule.Id != null &&
-                    string.Equals(rule.Id.Trim(), currentId, StringComparison.OrdinalIgnoreCase));
-                if (!DnsConfiguration.IsValidProxyId(currentId) || idSharedWithAnotherRule)
-                {
-                    choice.Rule.Id = DnsConfiguration.CreateUniqueProxyId(
-                        configuration.Proxies.Where(rule => rule != null).Select(rule => rule.Id));
-                }
-                dns.ProxyId = choice.Rule.Id.Trim();
+                ReferenceDnsProxyRule(configuration, dns, choice.Rule);
             }
 
             var serverOverride = dnsServerOverrideTextBox.Text.Trim();
@@ -348,6 +344,56 @@ namespace ProxiFyreUI.Forms
             // own change event.
             if (ReferenceEquals(sender, dnsProxyComboBox) || ReferenceEquals(sender, dnsModeComboBox))
                 BeginInvoke(new Action(() => RefreshRoutingGrid(SelectedRuleIndex)));
+        }
+
+        /// <summary>
+        /// Points dns.proxyId at <paramref name="rule"/> by its stable id. The rule gets a new id
+        /// when it has none, or its id is invalid or shared with another rule (either would fail
+        /// validation). A rule given an id by an earlier selection gets its previous id back.
+        /// </summary>
+        private void ReferenceDnsProxyRule(ProxiFyreConfiguration configuration, DnsSettings dns, ProxyRule rule)
+        {
+            if (_dnsIdAssignedRule != null && !ReferenceEquals(_dnsIdAssignedRule, rule))
+            {
+                if (string.Equals(_dnsIdAssignedRule.Id, _dnsIdAssigned, StringComparison.Ordinal))
+                    _dnsIdAssignedRule.Id = _dnsIdAssignedRulePreviousId;
+                _dnsIdAssignedRule = null;
+            }
+
+            if (!DnsProxyIdUsable(configuration, rule))
+            {
+                var previousId = rule.Id;
+                rule.Id = DnsConfiguration.CreateUniqueProxyId(
+                    configuration.Proxies.Where(other => other != null).Select(other => other.Id));
+                _dnsIdAssignedRule = rule;
+                _dnsIdAssignedRulePreviousId = previousId;
+                _dnsIdAssigned = rule.Id;
+            }
+            dns.ProxyId = rule.Id.Trim();
+        }
+
+        private static bool DnsProxyIdUsable(ProxiFyreConfiguration configuration, ProxyRule rule)
+        {
+            var id = rule.Id?.Trim();
+            return DnsConfiguration.IsValidProxyId(id) && !configuration.Proxies.Any(other =>
+                other != null && !ReferenceEquals(other, rule) && other.Id != null &&
+                string.Equals(other.Id.Trim(), id, StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
+        /// Choosing the rule already shown raises no SelectedIndexChanged, so closing the list
+        /// repairs a shown rule whose id DNS Proxy mode cannot use (for example a duplicate in a
+        /// loaded file) without making the user pick another rule first.
+        /// </summary>
+        private void DnsProxyDropDownClosed(object sender, EventArgs e)
+        {
+            var configuration = _workspace.Configuration;
+            if (_suppressChanges || ConfigurationMutationBlocked || configuration?.Proxies == null ||
+                dnsModeComboBox.SelectedIndex != 1)
+                return;
+            if (dnsProxyComboBox.SelectedItem is DnsProxyChoice choice && choice.Rule != null &&
+                !DnsProxyIdUsable(configuration, choice.Rule))
+                DnsControlChanged(dnsProxyComboBox, e);
         }
 
         private void UpdateDnsControlStates()

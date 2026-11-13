@@ -57,7 +57,16 @@ namespace ProxiFyre.Configuration
             JObject root;
             try
             {
-                root = JObject.Parse(json);
+                // JObject.Parse would turn ISO date-time strings (a password, for example) into
+                // dates and re-format them; the settings' DateParseHandling does not apply to it.
+                using (var reader = new JsonTextReader(new StringReader(json)) { DateParseHandling = DateParseHandling.None })
+                {
+                    root = JObject.Load(reader);
+                    // Like JObject.Parse: only comments may follow the object.
+                    while (reader.Read())
+                    {
+                    }
+                }
             }
             catch (JsonException ex)
             {
@@ -93,10 +102,6 @@ namespace ProxiFyre.Configuration
             return configuration;
         }
 
-        /// <summary>
-        /// Creates a lossless editable copy, including credentials and unknown extension fields.
-        /// Keeping this operation here prevents UI projects from taking a direct JSON dependency.
-        /// </summary>
         /// <summary>
         /// Earlier releases kept a rule "id" and a top-level "dns" property as unknown data and
         /// ignored them. A rule id that is an object or array is turned into its JSON text, which
@@ -153,6 +158,10 @@ namespace ProxiFyre.Configuration
                 .ToArray();
         }
 
+        /// <summary>
+        /// Creates a lossless editable copy, including credentials and unknown extension fields.
+        /// Keeping this operation here prevents UI projects from taking a direct JSON dependency.
+        /// </summary>
         public ProxyRule CloneRule(ProxyRule rule)
         {
             if (rule == null)
