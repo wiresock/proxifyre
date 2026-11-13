@@ -293,15 +293,16 @@ namespace proxy
         std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v4>> dns_udp_relay_v4_;
         std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v6>> dns_udp_relay_v6_;
 
+        /// Set from the moment the DNS relays start stopping until stop() has stopped the packet
+        /// filter: new UDP DNS is blocked, but the relays' listener ports are still recognized so
+        /// their last answers are translated. Guarded by lock_.
+        bool dns_udp_relays_stopping_{ false };
+
         /**
          * @brief Local source ports of UDP DNS queries redirected to the DNS relay, with the time
          *        of the last one. The relay accepts datagrams only from these ports (refreshed
          *        within udp_mapper_entry_ttl_). Swept by the resolver thread.
          */
-        /// Set while the DNS relays stop: new UDP DNS is blocked, but the relays' listener
-        /// ports are still recognized so their last answers are translated. Guarded by lock_.
-        bool dns_udp_relays_stopping_{ false };
-
         std::unordered_map<uint16_t, std::chrono::steady_clock::time_point> dns_udp_clients_v4_;
         std::unordered_map<uint16_t, std::chrono::steady_clock::time_point> dns_udp_clients_v6_;
         std::mutex dns_udp_clients_lock_;
@@ -845,6 +846,7 @@ namespace proxy
             }
 
             stop_dns_udp_relays();
+            release_dns_udp_relays();
 
             std::vector<std::pair<s5_tcp_proxy_server*, s5_udp_proxy_server*>> proxies_to_stop;
             std::vector<std::pair<s5_tcp_proxy_server_v6*, s5_udp_proxy_server_v6*>> proxies_to_stop_v6;
@@ -1106,13 +1108,15 @@ namespace proxy
 
             // Step 0: Stop the DNS relays while the packet filter still runs, so answers they
             // send while stopping are still translated (or dropped) instead of reaching the
-            // network. Without a relay, UDP DNS is blocked until the filter stops.
+            // network. They stay registered until the filter has stopped (release below), and
+            // new UDP DNS is blocked meanwhile.
             stop_dns_udp_relays();
 
             // Step 1: Stop the packet filter
             // This prevents new packets from being processed and queued
             NETLIB_DEBUG("Stopping packet filter");
             packet_filter_->stop_filter();
+            release_dns_udp_relays();
 
             // Step 2: Signal and join the process resolve thread
             // This ensures no more packets are being queued for processing.
@@ -2460,6 +2464,7 @@ namespace proxy
 
             dns_proxy_target target;
             bool destination_matches_upstream = false;
+            bool relays_stopping = false;
             std::optional<net::ip_endpoint<AddrT>> server_override;
             {
                 std::shared_lock lock(lock_);
@@ -2479,6 +2484,7 @@ namespace proxy
                     target.listener_port = dns_listener_port_locked<AddrT, Transport>();
                 }
 
+                relays_stopping = dns_udp_relays_stopping_;
                 target.override_configured = dns_server_override_v4_.has_value() || dns_server_override_v6_.has_value();
                 target.override_family_matches = dns_server_override_for<AddrT>().has_value();
                 server_override = dns_server_override_for<AddrT>();
@@ -2495,7 +2501,11 @@ namespace proxy
             const auto guard = decide_dns_upstream_guard(exemption_candidate,
                 exemption_candidate ? sender_lookup(postponed) : std::optional<bool>{}, postponed);
 
-            const auto decision = decide_dns_route(dns_routing_mode::proxy, destination_port, guard, target);
+            auto decision = decide_dns_route(dns_routing_mode::proxy, destination_port, guard, target);
+            // While the router stops, the DNS relays are gone on purpose: not worth a warning.
+            if (Transport == dns_transport::udp && relays_stopping &&
+                decision.reason == dns_block_reason::listener_unavailable)
+                decision.reason = dns_block_reason::service_stopping;
             return { decision, decision.action == dns_route_action::proxy ? server_override : std::nullopt };
         }
 
@@ -2507,6 +2517,10 @@ namespace proxy
         template <typename AddrT, dns_transport Transport>
         void note_dns_block(const dns_block_reason reason)
         {
+            // Expected while stopping (stop_dns_udp_relays()): neither counted nor reported.
+            if (reason == dns_block_reason::service_stopping)
+                return;
+
             dns_blocked_packets_.fetch_add(1, std::memory_order_relaxed);
 
             const auto family_index = std::is_same_v<AddrT, net::ip_address_v4> ? 0u : 1u;
@@ -2687,12 +2701,12 @@ namespace proxy
          */
         template <typename AddrT>
         std::unique_ptr<socks5_dns_udp_relay<AddrT>> make_dns_udp_relay(const net::ip_endpoint<AddrT>& upstream,
-            const proxy_session_settings& settings)
+            const proxy_session_settings& settings, const std::optional<net::ip_endpoint<AddrT>>& server_override)
         {
             try
             {
                 auto relay = std::make_unique<socks5_dns_udp_relay<AddrT>>(upstream, settings.credentials,
-                    settings.upstream_options,
+                    settings.upstream_options, server_override,
                     [this](const uint16_t port)
                     {
                         std::scoped_lock lock(dns_udp_clients_lock_);
@@ -2734,6 +2748,8 @@ namespace proxy
         {
             std::optional<net::ip_endpoint<net::ip_address_v4>> upstream;
             proxy_session_settings settings;
+            std::optional<net::ip_endpoint<net::ip_address_v4>> override_v4;
+            std::optional<net::ip_endpoint<net::ip_address_v6>> override_v6;
             bool ipv4 = false;
             bool ipv6 = false;
             {
@@ -2748,6 +2764,8 @@ namespace proxy
 
                 upstream = proxy_upstreams_[id];
                 settings = proxy_session_settings_[id];
+                override_v4 = dns_server_override_v4_;
+                override_v6 = dns_server_override_v6_;
                 const auto families = id < proxy_address_families_.size()
                     ? proxy_address_families_[id]
                     : supported_address_families::all;
@@ -2755,8 +2773,10 @@ namespace proxy
                 ipv6 = family_supports_ipv6(families) && id < proxy_servers_v6_.size() && proxy_servers_v6_[id].second;
             }
 
-            auto relay_v4 = ipv4 ? make_dns_udp_relay<net::ip_address_v4>(*upstream, settings) : nullptr;
-            auto relay_v6 = ipv6 ? make_dns_udp_relay<net::ip_address_v6>(ipv4_mapped(*upstream), settings) : nullptr;
+            auto relay_v4 = ipv4 ? make_dns_udp_relay<net::ip_address_v4>(*upstream, settings, override_v4) : nullptr;
+            auto relay_v6 = ipv6
+                ? make_dns_udp_relay<net::ip_address_v6>(ipv4_mapped(*upstream), settings, override_v6)
+                : nullptr;
 
             std::unique_lock lock(lock_);
             dns_udp_relay_v4_ = std::move(relay_v4);
@@ -2764,11 +2784,11 @@ namespace proxy
         }
 
         /**
-         * @brief Stops and destroys the DNS relays. New UDP DNS is blocked first; the relays stay
-         *        registered while they stop so their listener ports are still recognized and
-         *        answers they send meanwhile are translated rather than passed. Their threads are
-         *        joined without lock_ held. Called under lifecycle_mutex_, which also serializes
-         *        every write of the relay pointers.
+         * @brief Stops the DNS relays. New UDP DNS is blocked first; the relays stay registered
+         *        (until release_dns_udp_relays()) so their listener ports are still recognized and
+         *        answers they send while stopping are translated rather than passed. Their threads
+         *        are joined without lock_ held. Called under lifecycle_mutex_, which also
+         *        serializes every write of the relay pointers.
          */
         void stop_dns_udp_relays()
         {
@@ -2785,13 +2805,20 @@ namespace proxy
                 relay_v4->stop();
             if (relay_v6)
                 relay_v6->stop();
+        }
 
-            std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v4>> stopped_v4;
-            std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v6>> stopped_v6;
+        /**
+         * @brief Destroys the stopped DNS relays and ends the stopping state. Called after the
+         *        packet filter has stopped (or never started), under lifecycle_mutex_.
+         */
+        void release_dns_udp_relays()
+        {
+            std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v4>> released_v4;
+            std::unique_ptr<socks5_dns_udp_relay<net::ip_address_v6>> released_v6;
             {
                 std::unique_lock lock(lock_);
-                stopped_v4 = std::move(dns_udp_relay_v4_);
-                stopped_v6 = std::move(dns_udp_relay_v6_);
+                released_v4 = std::move(dns_udp_relay_v4_);
+                released_v6 = std::move(dns_udp_relay_v6_);
                 dns_udp_relays_stopping_ = false;
             }
         }

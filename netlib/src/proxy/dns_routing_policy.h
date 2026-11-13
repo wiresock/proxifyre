@@ -57,6 +57,7 @@ namespace proxy
         upstream_sender_unknown,  ///< addressed to a SOCKS5 server, and its sender could not be resolved
         fragmented,               ///< the first fragment of a fragmented datagram addressed to port 53
         not_dns_message,          ///< a UDP datagram too short for a DNS header: it cannot be relayed
+        service_stopping,         ///< the DNS proxy is stopping (expected; not reported)
         count
     };
 
@@ -215,6 +216,8 @@ namespace proxy
         case dns_block_reason::fragmented:
             return "the datagram is fragmented and cannot be redirected through the DNS proxy; only its first "
                 "fragment, which carries the port, is dropped";
+        case dns_block_reason::service_stopping:
+            return "the DNS proxy is stopping";
         case dns_block_reason::not_dns_message:
             return "the UDP datagram is too short to be a DNS message, so the DNS proxy cannot relay it";
         case dns_block_reason::upstream_sender_unknown:

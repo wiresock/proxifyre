@@ -55,6 +55,71 @@ namespace proxy
         return static_cast<std::size_t>(view->data - datagram);
     }
 
+    /// Whether @p address (network byte order, 4 or 16 bytes) is a loopback address, including
+    /// an IPv4-mapped IPv6 loopback address.
+    [[nodiscard]] constexpr bool is_loopback_address(const uint8_t* address, const std::size_t size) noexcept
+    {
+        if (address == nullptr)
+            return false;
+        if (size == 4)
+            return address[0] == 127;
+        if (size != 16)
+            return false;
+
+        bool zero_prefix = true;
+        for (std::size_t i = 0; i < 10; ++i)
+            zero_prefix = zero_prefix && address[i] == 0;
+        if (zero_prefix && address[10] == 0xff && address[11] == 0xff)
+            return address[12] == 127; // ::ffff:127.x.y.z
+        if (!zero_prefix || address[10] != 0 || address[11] != 0)
+            return false;
+        for (std::size_t i = 12; i < 15; ++i)
+        {
+            if (address[i] != 0)
+                return false;
+        }
+        return address[15] == 1; // ::1
+    }
+
+    /**
+     * @brief Whether the DNS relay may send a query its listener received.
+     *
+     * Redirected queries reach the listener from the address of the server the client queried,
+     * with a SOCKS5 header the redirect wrote: port 53 of that same address, or the DNS server
+     * override when one is configured. Anything else, and anything from a loopback address
+     * (loopback traffic is never redirected), was sent to the listener directly by a local
+     * process and is refused, so the listener cannot be used to reach other destinations
+     * through the proxy.
+     *
+     * @param query The listener datagram's SOCKS5 header (parse_socks5_udp_datagram()).
+     * @param sender_address The listener's sender address (network byte order).
+     * @param override_address The override address for this family, or nullptr when none is
+     *        configured; @p override_size and @p override_port are then ignored.
+     */
+    [[nodiscard]] constexpr bool dns_relay_destination_allowed(const socks5_udp_datagram_view& query,
+        const uint8_t* sender_address, const std::size_t sender_size, const uint8_t* override_address,
+        const std::size_t override_size, const uint16_t override_port) noexcept
+    {
+        if (sender_address == nullptr || is_loopback_address(sender_address, sender_size))
+            return false;
+
+        const auto same_address = [&query](const uint8_t* address, const std::size_t size) noexcept
+        {
+            if (query.address == nullptr || query.address_size != size)
+                return false;
+            for (std::size_t i = 0; i < size; ++i)
+            {
+                if (query.address[i] != address[i])
+                    return false;
+            }
+            return true;
+        };
+
+        if (override_address != nullptr)
+            return query.port == override_port && same_address(override_address, override_size);
+        return query.port == dns_port && same_address(sender_address, sender_size);
+    }
+
     /**
      * @brief Largest DNS answer the relay returns over UDP: the size that keeps the listener's
      *        reply (IP + UDP + SOCKS5 header + answer) within a 1280-byte packet, the IPv6
@@ -467,8 +532,9 @@ namespace proxy
      * - A failed open is retried after a backoff that doubles from 1 s up to 30 s; queries
      *   arriving meanwhile are dropped (Proxy mode never sends DNS directly). An association that
      *   closes less than @p minimum_age after opening counts as a failed open, so a server that
-     *   accepts UDP ASSOCIATE and then drops the connection is not reconnected in a tight loop.
-     *   The backoff resets once an association has stayed open for @p minimum_age.
+     *   accepts UDP ASSOCIATE and then drops the connection is not reconnected in a tight loop,
+     *   and so does one retired because it stopped answering. The backoff resets once an
+     *   association has stayed open for @p minimum_age.
      * - An open association is reopened when its SOCKS5 control connection closes or its relay
      *   socket fails (reported by the relay), or when it looks silently dead: at least
      *   @p unanswered_limit queries expired unanswered that were sent after the last datagram
@@ -510,10 +576,15 @@ namespace proxy
             last_datagram_.reset();
         }
 
-        /// The association was closed at @p now (for any reason).
-        void on_closed(const time_point now) noexcept
+        /**
+         * @brief The association was closed at @p now.
+         * @param failed The association stopped working (for example it was retired for
+         *        unanswered queries): back off before the next attempt whatever its age. An
+         *        association younger than the minimum age always counts as a failed open.
+         */
+        void on_closed(const time_point now, const bool failed = false) noexcept
         {
-            if (now - opened_at_ < minimum_age_)
+            if (failed || now - opened_at_ < minimum_age_)
                 on_open_failed(now);
             else
                 failures_ = 0;
@@ -681,11 +752,12 @@ namespace proxy
         void on_open_failed(const time_point now) noexcept { health_.on_open_failed(now); }
         void on_opened(const time_point now) noexcept { health_.on_opened(now); }
 
-        /// The association closed: its queries in flight can no longer be answered.
-        void on_closed(const time_point now) noexcept
+        /// The association closed: its queries in flight can no longer be answered. See
+        /// dns_association_health::on_closed() for @p failed.
+        void on_closed(const time_point now, const bool failed = false) noexcept
         {
             queries_.clear();
-            health_.on_closed(now);
+            health_.on_closed(now, failed);
         }
 
         void clear() noexcept { queries_.clear(); }

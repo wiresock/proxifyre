@@ -710,3 +710,72 @@ TEST(DnsRelaySession, ClosingForgetsQueriesInFlightAndBacksOffWhenEarly)
     EXPECT_FALSE(session.may_open(t0 + 2s));
     EXPECT_TRUE(session.may_open(t0 + 3s));
 }
+
+// --- Which destinations the listener relays ---------------------------------------------------
+
+TEST(DnsRelayDestination, LoopbackAddressesAreRecognized)
+{
+    const uint8_t v4_loopback[4]{ 127, 0, 0, 1 };
+    const uint8_t v4_other_loopback[4]{ 127, 1, 2, 3 };
+    const uint8_t v4_public[4]{ 8, 8, 8, 8 };
+    EXPECT_TRUE(proxy::is_loopback_address(v4_loopback, 4));
+    EXPECT_TRUE(proxy::is_loopback_address(v4_other_loopback, 4));
+    EXPECT_FALSE(proxy::is_loopback_address(v4_public, 4));
+
+    uint8_t v6[16]{};
+    v6[15] = 1;
+    EXPECT_TRUE(proxy::is_loopback_address(v6, 16));            // ::1
+    v6[15] = 2;
+    EXPECT_FALSE(proxy::is_loopback_address(v6, 16));           // ::2
+    uint8_t mapped[16]{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1 };
+    EXPECT_TRUE(proxy::is_loopback_address(mapped, 16));        // ::ffff:127.0.0.1
+    mapped[12] = 10;
+    EXPECT_FALSE(proxy::is_loopback_address(mapped, 16));       // ::ffff:10.0.0.1
+    EXPECT_FALSE(proxy::is_loopback_address(v6_relay_source.data(), 16));
+    EXPECT_FALSE(proxy::is_loopback_address(nullptr, 4));
+}
+
+TEST(DnsRelayDestination, QueriesMayNameOnlyPort53OfTheQueriedServerOrTheOverride)
+{
+    const auto check = [](const std::vector<uint8_t>& header_address, const uint16_t header_port,
+        const std::vector<uint8_t>& sender, const std::vector<uint8_t>* override_address, const uint16_t override_port)
+    {
+        const auto datagram = socks_datagram(header_address, header_port, query(1, "example.com"));
+        const auto view = proxy::parse_socks5_udp_datagram(datagram.data(), datagram.size());
+        return view && proxy::dns_relay_destination_allowed(*view, sender.data(), sender.size(),
+            override_address ? override_address->data() : nullptr, override_address ? override_address->size() : 0,
+            override_port);
+    };
+
+    // Without an override: port 53 of the address the query came from (the queried server).
+    EXPECT_TRUE(check(v4_server, 53, v4_server, nullptr, 0));
+    EXPECT_FALSE(check(v4_server, 5353, v4_server, nullptr, 0));
+    EXPECT_FALSE(check(v4_override, 53, v4_server, nullptr, 0));
+
+    // With an override: only the override endpoint, whatever server was queried.
+    EXPECT_TRUE(check(v4_override, 53, v4_server, &v4_override, 53));
+    EXPECT_TRUE(check(v4_override, 5300, v4_server, &v4_override, 5300));
+    EXPECT_FALSE(check(v4_override, 53, v4_server, &v4_override, 5300));
+    EXPECT_FALSE(check(v4_server, 53, v4_server, &v4_override, 53));
+
+    // A local process sending to the listener over loopback is refused.
+    const std::vector<uint8_t> loopback{ 127, 0, 0, 1 };
+    EXPECT_FALSE(check(loopback, 53, loopback, nullptr, 0));
+    EXPECT_FALSE(check(v4_override, 53, loopback, &v4_override, 53));
+}
+
+TEST(DnsAssociationHealth, AssociationRetiredForSilenceBacksOffWhateverItsAge)
+{
+    proxy::dns_association_health<> health{ 3, 30s };
+    health.on_opened(t0);
+    health.on_closed(t0 + 60s, true);
+    EXPECT_EQ(health.consecutive_failures(), 1u);
+    EXPECT_FALSE(health.may_open(t0 + 60s));
+    EXPECT_TRUE(health.may_open(t0 + 61s));
+
+    // A long-lived association closed for another reason reopens at once.
+    health.on_opened(t0 + 61s);
+    health.on_closed(t0 + 200s);
+    EXPECT_EQ(health.consecutive_failures(), 0u);
+    EXPECT_TRUE(health.may_open(t0 + 200s));
+}
