@@ -30,6 +30,13 @@ namespace ProxiFyre.Configuration
         [JsonProperty("excludes")]
         public List<string> Excludes { get; set; }
 
+        /// <summary>
+        /// Global DNS routing. Omitted (null) means Direct, which keeps configurations written
+        /// before DNS routing existed unchanged when they are loaded and saved again.
+        /// </summary>
+        [JsonProperty("dns", NullValueHandling = NullValueHandling.Ignore)]
+        public DnsSettings Dns { get; set; }
+
         [JsonExtensionData]
         public IDictionary<string, JToken> ExtensionData { get; set; }
 
@@ -52,6 +59,14 @@ namespace ProxiFyre.Configuration
             AppNames = new List<string>();
             ExtensionData = new Dictionary<string, JToken>(StringComparer.Ordinal);
         }
+
+        /// <summary>
+        /// Optional stable identifier used to reference this rule's SOCKS5 proxy from other
+        /// settings (for example <see cref="DnsSettings.ProxyId"/>). Unlike the rule position it
+        /// survives reordering. Compared case-insensitively.
+        /// </summary>
+        [JsonProperty("id", NullValueHandling = NullValueHandling.Ignore, Order = -2)]
+        public string Id { get; set; }
 
         [JsonProperty("appNames")]
         public List<string> AppNames { get; set; }
@@ -99,5 +114,38 @@ namespace ProxiFyre.Configuration
                     : TlsServerName.Trim();
             }
         }
+    }
+
+    /// <summary>
+    /// Global DNS routing for conventional DNS (UDP and TCP port 53).
+    /// </summary>
+    public sealed class DnsSettings
+    {
+        public DnsSettings()
+        {
+            ExtensionData = new Dictionary<string, JToken>(StringComparer.Ordinal);
+        }
+
+        /// <summary>
+        /// "Direct" (default when omitted) or "Proxy".
+        /// </summary>
+        [JsonProperty("mode", NullValueHandling = NullValueHandling.Ignore)]
+        public string Mode { get; set; }
+
+        /// <summary>
+        /// The <see cref="ProxyRule.Id"/> of the rule whose SOCKS5 proxy carries DNS in Proxy mode.
+        /// </summary>
+        [JsonProperty("proxyId")]
+        public string ProxyId { get; set; }
+
+        /// <summary>
+        /// Optional IPv4 or IPv6 literal, with an optional port, of the DNS server the SOCKS5
+        /// proxy should query instead of the server the application addressed.
+        /// </summary>
+        [JsonProperty("serverOverride")]
+        public string ServerOverride { get; set; }
+
+        [JsonExtensionData]
+        public IDictionary<string, JToken> ExtensionData { get; set; }
     }
 }

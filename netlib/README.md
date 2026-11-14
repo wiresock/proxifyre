@@ -87,3 +87,33 @@ Device-path conversion (`QueryDosDeviceW` in production) also goes through the `
 completeness rule (`owner_identity::has_complete_device_path`) still decides what is memoized. No
 test depends on which drive letters exist on the host; `OwnerMemoMetadataTest` checks that the
 production source keeps the Windows conversion.
+
+## Portable native tests
+
+`netlib/test/portable/run-portable-tests.sh` builds and runs the platform-independent part of the
+native tests with the host C++20 compiler, GoogleTest, and the Microsoft GSL headers (on Ubuntu:
+`apt-get install g++ libgtest-dev libmsgsl-dev`). It runs on Linux and other non-Windows hosts and
+in the `portable-native-tests` job of `.github/workflows/native-tests.yml`:
+
+```console
+netlib/test/portable/run-portable-tests.sh
+SANITIZE=1 netlib/test/portable/run-portable-tests.sh   # AddressSanitizer + UndefinedBehaviorSanitizer
+CXX=clang++ netlib/test/portable/run-portable-tests.sh
+```
+
+- `netlib/test/proxy/dns_routing_policy_test.cpp` covers the global DNS routing decisions and
+  the DNS server override syntax (`dns_routing_policy.h`). It is also part of `netlib-tests` on
+  Windows.
+- `netlib/test/proxy/dns_udp_multiplexer_test.cpp` covers the DNS proxy's shared UDP
+  association (`dns_udp_multiplexer.h`): relay message IDs, mapping answers back to the client
+  and the server it queried, truncation of oversized answers, and when the association is
+  reopened. It is also part of `netlib-tests` on Windows.
+- `netlib/test/portable/dns_packet_redirect_test.cpp` drives real Ethernet/IP/UDP/TCP frames
+  through the production `socks5_udp_local_redirect.h` and `tcp_local_redirect.h` exactly as the
+  router's DNS handlers do, with the DNS relay's listener step in between, and checks every
+  rewritten field, the SOCKS5 UDP datagram sent through the shared association, the source the
+  client sees on the answer, and independently verified checksums. `winshim/` supplies
+  the few Windows SDK declarations those headers need, and the script extracts the product
+  `CNdisApi` checksum routines verbatim from `external/ndisapi/ndisapi/ndisapi.cpp` (the
+  `wiresock/ndisapi` submodule, which must be checked out). The Windows Packet Filter
+  driver, sockets, and the router class itself are not involved.

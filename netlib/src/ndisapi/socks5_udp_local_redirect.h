@@ -45,6 +45,9 @@ namespace ndisapi
         /// </summary>
         std::atomic_bool terminate_{ false };
 
+        /// How long a client endpoint is kept after its last translated datagram.
+        static constexpr std::chrono::minutes endpoint_timeout{ 15 };
+
         /**
          * @brief Starts the background cleanup thread.
          *
@@ -64,8 +67,7 @@ namespace ndisapi
                             tools::generic::erase_if(endpoints_, endpoints_.begin(), endpoints_.end(),
                                 [&current_time, this](auto&& a)
                                 {
-                                    using namespace std::chrono_literals;
-                                    if (current_time - a.second > 15min)
+                                    if (current_time - a.second > endpoint_timeout)
                                     {
                                         NETLIB_DEBUG(
                                             "DELETE UDP client endpoint (timeout): : {}",
@@ -177,6 +179,22 @@ namespace ndisapi
         }
 
         /**
+         * @brief Whether @p client_port (host byte order) has an endpoint entry that has not
+         *        timed out, i.e. its datagrams are, or were within endpoint_timeout, redirected
+         *        and replies to it are delivered by a local listener.
+         *
+         * Used to recognize an outbound ICMP error about such a reply (decide_icmp_error()):
+         * the entry outlives the client's socket, which is exactly when the stack reports a
+         * late reply with an error addressed to the remote peer.
+         */
+        [[nodiscard]] bool is_active_endpoint(const u_short client_port)
+        {
+            std::scoped_lock lock(lock_);
+            const auto it = endpoints_.find(htons(client_port));
+            return it != endpoints_.cend() && std::chrono::steady_clock::now() - it->second <= endpoint_timeout;
+        }
+
+        /**
          * @brief Checks if the UDP session for the given packet is new.
          *
          * If the session is new, it is recorded and true is returned.
@@ -262,9 +280,13 @@ namespace ndisapi
          *
          * @param packet C2S network packet.
          * @param port Destination port to forward the packet to (network byte order). If 0, uses proxy_port_.
+         * @param socks_destination Optional destination (port in host byte order) written to the
+         *        SOCKS5 UDP header instead of the packet's own destination. The IP header still
+         *        records the original destination. Used for the DNS server override.
          * @return True if the packet was translated, false otherwise.
          */
-        bool process_client_to_server_packet(INTERMEDIATE_BUFFER& packet, uint16_t port = 0)
+        bool process_client_to_server_packet(INTERMEDIATE_BUFFER& packet, uint16_t port = 0,
+            const std::optional<net::ip_endpoint<T>>& socks_destination = std::nullopt)
         {
             if (port == 0)
                 port = proxy_port_;
@@ -339,8 +361,16 @@ namespace ndisapi
                 socks5_udp_header_ptr->reserved = 0;
                 socks5_udp_header_ptr->fragment = 0;
                 socks5_udp_header_ptr->address_type = 1;
-                socks5_udp_header_ptr->dest_address = ip_header->ip_dst;
-                socks5_udp_header_ptr->dest_port = udp_header->th_dport;
+                if (socks_destination)
+                {
+                    socks5_udp_header_ptr->dest_address = socks_destination->ip;
+                    socks5_udp_header_ptr->dest_port = htons(socks_destination->port);
+                }
+                else
+                {
+                    socks5_udp_header_ptr->dest_address = ip_header->ip_dst;
+                    socks5_udp_header_ptr->dest_port = udp_header->th_dport;
+                }
 
                 // Swap Ethernet addresses
                 std::swap(eth_header->h_dest, eth_header->h_source);
@@ -425,8 +455,16 @@ namespace ndisapi
                 socks5_udp_header_ptr->reserved = 0;
                 socks5_udp_header_ptr->fragment = 0;
                 socks5_udp_header_ptr->address_type = 4; // For IPv6 address type is 4
-                socks5_udp_header_ptr->dest_address = ip_header->ip6_dst;
-                socks5_udp_header_ptr->dest_port = udp_header->th_dport;
+                if (socks_destination)
+                {
+                    socks5_udp_header_ptr->dest_address = socks_destination->ip;
+                    socks5_udp_header_ptr->dest_port = htons(socks_destination->port);
+                }
+                else
+                {
+                    socks5_udp_header_ptr->dest_address = ip_header->ip6_dst;
+                    socks5_udp_header_ptr->dest_port = udp_header->th_dport;
+                }
 
                 // Swap Ethernet addresses
                 std::swap(eth_header->h_dest, eth_header->h_source);
@@ -677,6 +715,25 @@ namespace ndisapi
                     cleanup_thread_.join();
                 }
             }
+        }
+
+        /**
+         * @brief Restarts the cleanup thread after stop(), for a router that is started again
+         *        in the same process. Without it, expired entries would never be removed.
+         * @note No effect while the cleanup thread is running. Not to be called concurrently
+         *       with stop().
+         */
+        void restart()
+        {
+            if (bool expected = true; terminate_.compare_exchange_strong(expected, false, std::memory_order_acq_rel))
+                start_cleanup_thread();
+        }
+
+        /// Whether the cleanup thread is running (it is until stop()). For the thread that
+        /// calls stop() and restart().
+        [[nodiscard]] bool cleanup_running() const noexcept
+        {
+            return !terminate_.load(std::memory_order_acquire) && cleanup_thread_.joinable();
         }
     };
 }

@@ -28,10 +28,71 @@ namespace ProxiFyre.Configuration
                 Excludes = configuration.Excludes == null
                     ? new List<string>()
                     : configuration.Excludes.Where(value => !string.IsNullOrWhiteSpace(value)).ToList(),
+                Dns = configuration.Dns == null ? null : NormalizeDns(configuration.Dns),
                 ExtensionData = CloneExtensionData(configuration.ExtensionData)
             };
 
+            DropUnusedInvalidProxyIds(result.Proxies, DnsConfiguration.GetNamedProxyId(configuration.Dns));
             return result;
+        }
+
+        /// <summary>
+        /// Removes an invalid id, or a repeat of an earlier rule's id, that dns.proxyId does not
+        /// name. Such ids have no effect, and dropping them lets a saved configuration clear the
+        /// warning. An id dns.proxyId names is kept in every mode: in Proxy mode the validator
+        /// reports it as an error, and in Direct mode the selection must survive a later switch
+        /// to Proxy mode.
+        /// </summary>
+        private static void DropUnusedInvalidProxyIds(IList<ProxyRule> rules, string referencedId)
+        {
+            if (rules == null)
+                return;
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var rule in rules)
+            {
+                if (rule == null || rule.Id == null)
+                    continue;
+
+                var referenced = referencedId != null &&
+                                 string.Equals(rule.Id, referencedId, StringComparison.OrdinalIgnoreCase);
+                if (!DnsConfiguration.IsValidProxyId(rule.Id))
+                {
+                    if (!referenced)
+                        rule.Id = null;
+                    continue;
+                }
+
+                if (!seen.Add(rule.Id) && !referenced)
+                    rule.Id = null;
+            }
+        }
+
+        public DnsSettings NormalizeDns(DnsSettings dns)
+        {
+            if (dns == null)
+                throw new ArgumentNullException(nameof(dns));
+
+            var mode = dns.Mode == null ? null : dns.Mode.Trim();
+            DnsRoutingMode parsed;
+            if (DnsConfiguration.TryGetMode(mode, out parsed))
+                mode = parsed == DnsRoutingMode.Proxy ? DnsConfiguration.ProxyMode : DnsConfiguration.DirectMode;
+
+            return new DnsSettings
+            {
+                Mode = mode,
+                ProxyId = EmptyToNull(dns.ProxyId),
+                ServerOverride = EmptyToNull(dns.ServerOverride),
+                ExtensionData = CloneExtensionData(dns.ExtensionData)
+            };
+        }
+
+        private static string EmptyToNull(string value)
+        {
+            if (value == null)
+                return null;
+            var trimmed = value.Trim();
+            return trimmed.Length == 0 ? null : trimmed;
         }
 
         public ProxyRule NormalizeRule(ProxyRule rule)
@@ -64,6 +125,7 @@ namespace ProxiFyre.Configuration
             var hasCanonicalTransport = TryGetCanonicalTransport(rule.Socks5Transport, out transport);
             return new ProxyRule
             {
+                Id = EmptyToNull(rule.Id),
                 AppNames = appNames,
                 Socks5ProxyEndpoint = rule.Socks5ProxyEndpoint == null ? null : rule.Socks5ProxyEndpoint.Trim(),
                 Username = rule.Username,

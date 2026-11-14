@@ -23,6 +23,14 @@ namespace
     using proxy::proxy_port_action;
     using proxy::proxy_port_result;
 
+    /// ProxiFyre's own process ID as these tests pass it to the routing rules. The router passes
+    /// ::GetCurrentProcessId(), and its own traffic is never routed. The owners here are fakes
+    /// with fixed PIDs, so the rules get a fixed "own" PID too: with the test runner's real PID,
+    /// any test whose fake PID happened to equal it would see that owner neither proxied nor
+    /// excluded. 2 is never a real Windows process ID (they are multiples of 4), and no fake row
+    /// uses it except the test of this rule.
+    constexpr unsigned long own_process_id = 2;
+
     /// One configured proxy: transports, destination families, and its local listeners.
     struct proxy_offer
     {
@@ -45,7 +53,7 @@ namespace
 
         [[nodiscard]] proxy::owner_match_rules rules() const
         {
-            return { proxy_to_names, excluded, bypass_unresolved, ::GetCurrentProcessId() };
+            return { proxy_to_names, excluded, bypass_unresolved, own_process_id };
         }
 
         template <owner_transport Transport, owner_family Family>
@@ -462,6 +470,29 @@ namespace
         EXPECT_FALSE(tcp4(l4, 1000)->bypass_tcp);
         EXPECT_TRUE(tcp4(l4, 2000)->bypass_tcp);
         EXPECT_FALSE(tcp4(l4, 2000)->excluded);
+    }
+
+    TEST_F(OwnerRoutingPolicyTest, OwnProcessIsNeitherProxiedNorExcluded)
+    {
+        // ProxiFyre's own connections are never matched: not by a catch-all rule, and not by an
+        // exclusion that names its image.
+        os().images[own_process_id] = image(L"BLOCKED.EXE");
+        add_everywhere(own_process_id, 1000);
+        lookup_v4 l4;
+
+        routing_config config;
+        config.proxies.push_back({});
+        config.proxy_to_names.emplace(0, L"");
+        config.excluded.push_back(L"BLOCKED");
+
+        const auto t = tcp4(l4, 1000);
+        const auto u = udp4(l4, 1000);
+        ASSERT_TRUE(t && u);
+        EXPECT_EQ(t->id, own_process_id);
+        expect_route(config.route<tcp, ipv4>(t), proxy_port_action::none);
+        expect_route(config.route<udp, ipv4>(u), proxy_port_action::none);
+        EXPECT_FALSE(t->excluded);
+        EXPECT_FALSE(u->excluded);
     }
 
     TEST_F(OwnerRoutingPolicyTest, RefreshedCaptureStartsWithFreshRoutingState)

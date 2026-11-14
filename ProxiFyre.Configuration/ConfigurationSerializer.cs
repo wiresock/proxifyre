@@ -57,13 +57,24 @@ namespace ProxiFyre.Configuration
             JObject root;
             try
             {
-                root = JObject.Parse(json);
+                // JObject.Parse would turn ISO date-time strings (a password, for example) into
+                // dates and re-format them; the settings' DateParseHandling does not apply to it.
+                using (var reader = new JsonTextReader(new StringReader(json)) { DateParseHandling = DateParseHandling.None })
+                {
+                    root = JObject.Load(reader);
+                    // Like JObject.Parse: only comments may follow the object.
+                    while (reader.Read())
+                    {
+                    }
+                }
             }
             catch (JsonException ex)
             {
                 throw new ConfigurationFormatException(
                     "The configuration is not a valid JSON object.", ex);
             }
+
+            PrepareKeysEarlierReleasesIgnored(root);
 
             ProxiFyreConfiguration configuration;
             try
@@ -89,6 +100,81 @@ namespace ProxiFyre.Configuration
                 configuration.ExtensionData = new System.Collections.Generic.Dictionary<string, JToken>(StringComparer.Ordinal);
 
             return configuration;
+        }
+
+        /// <summary>
+        /// Earlier releases kept a rule "id" and a top-level "dns" property as unknown data and
+        /// ignored them. A rule id that is an object or array is turned into its JSON text, which
+        /// the validator then reports as an invalid id (a warning unless DNS uses it), so such a
+        /// configuration still loads. A "dns" value that is not an object, or a DNS setting that
+        /// is an object or array, is a configuration error that names the property. So are two
+        /// "id" (or "dns") keys that differ only in case: earlier releases kept both, and reading
+        /// one would silently discard the other.
+        /// </summary>
+        private static void PrepareKeysEarlierReleasesIgnored(JObject root)
+        {
+            RejectCaseVariants(root, "dns", "The configuration");
+            foreach (var proxies in PropertiesNamed(root, "proxies"))
+            {
+                var rules = proxies.Value as JArray;
+                if (rules == null)
+                    continue;
+                for (var index = 0; index < rules.Count; index++)
+                {
+                    var rule = rules[index] as JObject;
+                    if (rule == null)
+                        continue;
+                    RejectCaseVariants(rule, "id", "Proxy rule " + (index + 1));
+                    foreach (var id in PropertiesNamed(rule, "id"))
+                    {
+                        if (id.Value.Type == JTokenType.Object || id.Value.Type == JTokenType.Array)
+                            id.Value = new JValue(id.Value.ToString(Formatting.None));
+                    }
+                }
+            }
+
+            foreach (var dns in PropertiesNamed(root, "dns"))
+            {
+                if (dns.Value.Type == JTokenType.Null)
+                    continue;
+                var settings = dns.Value as JObject;
+                if (settings == null)
+                {
+                    throw new ConfigurationFormatException(
+                        "The '" + dns.Name + "' property must be an object such as " +
+                        "{ \"mode\": \"Proxy\", \"proxyId\": \"office\" }, or be removed to keep DNS Direct.");
+                }
+
+                foreach (var setting in settings.Properties())
+                {
+                    var known = new[] { "mode", "proxyId", "serverOverride" }.FirstOrDefault(
+                        name => string.Equals(name, setting.Name, StringComparison.OrdinalIgnoreCase));
+                    if (known != null && (setting.Value.Type == JTokenType.Object || setting.Value.Type == JTokenType.Array))
+                    {
+                        throw new ConfigurationFormatException(
+                            "The '" + dns.Name + "." + setting.Name + "' property must be a string.");
+                    }
+                }
+            }
+        }
+
+        private static void RejectCaseVariants(JObject parent, string name, string owner)
+        {
+            var variants = PropertiesNamed(parent, name);
+            if (variants.Length > 1)
+            {
+                throw new ConfigurationFormatException(
+                    owner + " has more than one '" + name + "' property (" +
+                    string.Join(", ", variants.Select(p => "'" + p.Name + "'")) +
+                    "); names differ only in case. Keep one of them.");
+            }
+        }
+
+        private static JProperty[] PropertiesNamed(JObject parent, string name)
+        {
+            return parent.Properties()
+                .Where(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
         }
 
         /// <summary>

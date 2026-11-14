@@ -15,32 +15,32 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\ndisapi\iphlp.h">
+    <ClInclude Include="..\external\ndisapi\ndisapi\iphlp.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\ndisapi\precomp.h">
+    <ClInclude Include="..\external\ndisapi\ndisapi\precomp.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\include\Common.h">
+    <ClInclude Include="..\external\ndisapi\include\Common.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\include\ndisapi.h">
+    <ClInclude Include="..\external\ndisapi\include\ndisapi.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\ndisapi\resource.h">
+    <ClInclude Include="..\external\ndisapi\ndisapi\resource.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\ndisapi\inet_checksum.h">
+    <ClInclude Include="..\external\ndisapi\ndisapi\inet_checksum.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\ndisapi\ndisapi.cpp">
+    <ClCompile Include="..\external\ndisapi\ndisapi\ndisapi.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="..\ndisapi\ndisapi.rc">
+    <ResourceCompile Include="..\external\ndisapi\ndisapi\ndisapi.rc">
       <Filter>Resource Files</Filter>
     </ResourceCompile>
   </ItemGroup>

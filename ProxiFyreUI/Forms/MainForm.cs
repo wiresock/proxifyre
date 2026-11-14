@@ -31,6 +31,12 @@ namespace ProxiFyreUI.Forms
         private EngineLocation _engineLocation;
         private ServiceStatusInfo _serviceStatus = new ServiceStatusInfo(ProxiFyreServiceState.Unknown);
         private bool _suppressChanges;
+        // The rule the DNS proxy selector last gave a new id, with the id it had before. When the
+        // selection moves on (arrow keys, mouse wheel), that rule gets its previous id back, so
+        // passing through the list does not leave an id on every rule.
+        private ProxyRule _dnsIdAssignedRule;
+        private string _dnsIdAssignedRulePreviousId;
+        private string _dnsIdAssigned;
         private bool _operationInProgress;
         private bool _applyWorkflowInProgress;
         private bool _engineStartupFailed;
@@ -160,6 +166,7 @@ namespace ProxiFyreUI.Forms
                 bypassLanCheckBox.Checked = configuration.BypassLan;
                 RefreshRoutingGrid();
                 RefreshExclusionsList();
+                BindDnsControls();
             }
             finally
             {
@@ -213,6 +220,193 @@ namespace ProxiFyreUI.Forms
                 routingGrid.CurrentCell = routingGrid.Rows[selectIndex].Cells[0];
             }
             UpdateRoutingButtons();
+            RefreshDnsProxyChoices();
+        }
+
+        /// <summary>
+        /// One entry of the DNS proxy selector. The selection is stored as the rule's stable id,
+        /// so it survives reordering, editing, saving, and reloading.
+        /// </summary>
+        private sealed class DnsProxyChoice
+        {
+            public DnsProxyChoice(ProxyRule rule, string text)
+            {
+                Rule = rule;
+                Text = text;
+            }
+
+            public ProxyRule Rule { get; }
+
+            public string Text { get; }
+
+            public override string ToString() => Text;
+        }
+
+        private void BindDnsControls()
+        {
+            var dns = _workspace.Configuration?.Dns;
+            _dnsIdAssignedRule = null;
+            var previous = _suppressChanges;
+            _suppressChanges = true;
+            try
+            {
+                // An unrecognized mode is shown as no selection, never as Direct: validation reports
+                // it, and it is only replaced when the user picks a mode (DnsControlChanged).
+                DnsRoutingMode mode;
+                dnsModeComboBox.SelectedIndex = !DnsConfiguration.TryGetMode(dns?.Mode, out mode)
+                    ? -1
+                    : mode == DnsRoutingMode.Proxy ? 1 : 0;
+                dnsServerOverrideTextBox.Text = dns?.ServerOverride ?? string.Empty;
+                RefreshDnsProxyChoices();
+            }
+            finally
+            {
+                _suppressChanges = previous;
+            }
+            UpdateDnsControlStates();
+        }
+
+        private void RefreshDnsProxyChoices()
+        {
+            var configuration = _workspace.Configuration;
+            var previous = _suppressChanges;
+            _suppressChanges = true;
+            try
+            {
+                dnsProxyComboBox.BeginUpdate();
+                dnsProxyComboBox.Items.Clear();
+                if (configuration?.Proxies == null)
+                    return;
+
+                var selectedId = configuration.Dns?.ProxyId;
+                var selectedIndex = -1;
+                for (var index = 0; index < configuration.Proxies.Count; index++)
+                {
+                    var rule = configuration.Proxies[index];
+                    if (rule == null)
+                        continue;
+                    var text = "Rule " + (index + 1) + ": " + (rule.Socks5ProxyEndpoint ?? "(no endpoint)") +
+                               " — " + FormatApplications(rule.AppNames) +
+                               (string.IsNullOrWhiteSpace(rule.Id) ? string.Empty : " [id: " + rule.Id.Trim() + "]");
+                    var itemIndex = dnsProxyComboBox.Items.Add(new DnsProxyChoice(rule, text));
+                    // The first rule with the id, as validation and the service resolve it.
+                    if (selectedIndex < 0 && !string.IsNullOrWhiteSpace(selectedId) && rule.Id != null &&
+                        string.Equals(rule.Id.Trim(), selectedId.Trim(), StringComparison.OrdinalIgnoreCase))
+                        selectedIndex = itemIndex;
+                }
+
+                if (selectedIndex < 0 && !string.IsNullOrWhiteSpace(selectedId))
+                {
+                    // Keep a dangling reference visible instead of silently selecting another proxy.
+                    selectedIndex = dnsProxyComboBox.Items.Add(new DnsProxyChoice(null,
+                        "Missing proxy id '" + selectedId.Trim() + "' — select an existing rule"));
+                }
+
+                dnsProxyComboBox.SelectedIndex = selectedIndex;
+            }
+            finally
+            {
+                dnsProxyComboBox.EndUpdate();
+                _suppressChanges = previous;
+            }
+        }
+
+        private void DnsControlChanged(object sender, EventArgs e)
+        {
+            UpdateDnsControlStates();
+            var configuration = _workspace.Configuration;
+            if (_suppressChanges || ConfigurationMutationBlocked || configuration == null)
+                return;
+
+            var dns = configuration.Dns ?? new DnsSettings();
+            // Only the mode box changes the mode, so editing another DNS field never turns an
+            // unrecognized mode into Direct.
+            if (ReferenceEquals(sender, dnsModeComboBox) && dnsModeComboBox.SelectedIndex >= 0)
+                dns.Mode = dnsModeComboBox.SelectedIndex == 1 ? DnsConfiguration.ProxyMode : DnsConfiguration.DirectMode;
+
+            // Choosing a rule, or switching to Proxy mode with a rule shown, (re)establishes the
+            // reference, so a shown rule whose id cannot be used is repaired without re-selecting it.
+            var referenceChanged = ReferenceEquals(sender, dnsProxyComboBox) ||
+                                   (ReferenceEquals(sender, dnsModeComboBox) && dnsModeComboBox.SelectedIndex == 1);
+            if (referenceChanged &&
+                dnsProxyComboBox.SelectedItem is DnsProxyChoice choice && choice.Rule != null)
+            {
+                ReferenceDnsProxyRule(configuration, dns, choice.Rule);
+            }
+
+            var serverOverride = dnsServerOverrideTextBox.Text.Trim();
+            dns.ServerOverride = serverOverride.Length == 0 ? null : serverOverride;
+            configuration.Dns = dns;
+            MarkConfigurationChanged();
+
+            // Rule rows show id issues, which depend on the DNS settings; rebuilding the grid also
+            // refreshes the DNS proxy choices. Deferred so the combo box is not rebuilt inside its
+            // own change event.
+            if (ReferenceEquals(sender, dnsProxyComboBox) || ReferenceEquals(sender, dnsModeComboBox))
+                BeginInvoke(new Action(() => RefreshRoutingGrid(SelectedRuleIndex)));
+        }
+
+        /// <summary>
+        /// Points dns.proxyId at <paramref name="rule"/> by its stable id. The rule gets a new id
+        /// when it has none, or its id is invalid or shared with another rule (either would fail
+        /// validation). A rule given an id by an earlier selection gets its previous id back.
+        /// </summary>
+        private void ReferenceDnsProxyRule(ProxiFyreConfiguration configuration, DnsSettings dns, ProxyRule rule)
+        {
+            if (_dnsIdAssignedRule != null && !ReferenceEquals(_dnsIdAssignedRule, rule))
+            {
+                if (string.Equals(_dnsIdAssignedRule.Id, _dnsIdAssigned, StringComparison.Ordinal))
+                    _dnsIdAssignedRule.Id = _dnsIdAssignedRulePreviousId;
+                _dnsIdAssignedRule = null;
+            }
+
+            if (!DnsProxyIdUsable(configuration, rule))
+            {
+                var previousId = rule.Id;
+                rule.Id = DnsConfiguration.CreateUniqueProxyId(
+                    configuration.Proxies.Where(other => other != null).Select(other => other.Id));
+                _dnsIdAssignedRule = rule;
+                _dnsIdAssignedRulePreviousId = previousId;
+                _dnsIdAssigned = rule.Id;
+            }
+            dns.ProxyId = rule.Id.Trim();
+        }
+
+        private static bool DnsProxyIdUsable(ProxiFyreConfiguration configuration, ProxyRule rule)
+        {
+            var id = rule.Id?.Trim();
+            return DnsConfiguration.IsValidProxyId(id) && !configuration.Proxies.Any(other =>
+                other != null && !ReferenceEquals(other, rule) && other.Id != null &&
+                string.Equals(other.Id.Trim(), id, StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
+        /// Choosing the rule already shown raises no SelectedIndexChanged, so closing the list
+        /// repairs a shown rule whose id DNS Proxy mode cannot use (for example a duplicate in a
+        /// loaded file) without making the user pick another rule first.
+        /// </summary>
+        private void DnsProxyDropDownClosed(object sender, EventArgs e)
+        {
+            var configuration = _workspace.Configuration;
+            if (_suppressChanges || ConfigurationMutationBlocked || configuration?.Proxies == null ||
+                dnsModeComboBox.SelectedIndex != 1)
+                return;
+            if (dnsProxyComboBox.SelectedItem is DnsProxyChoice choice && choice.Rule != null &&
+                !DnsProxyIdUsable(configuration, choice.Rule))
+                DnsControlChanged(dnsProxyComboBox, e);
+        }
+
+        private void UpdateDnsControlStates()
+        {
+            var editable = !ConfigurationMutationBlocked && _workspace.Configuration != null;
+            var proxyMode = dnsModeComboBox.SelectedIndex == 1;
+            dnsModeComboBox.Enabled = editable;
+            // Settings that apply only to Proxy mode are disabled, not cleared, in Direct mode.
+            dnsProxyComboBox.Enabled = editable && proxyMode;
+            dnsServerOverrideTextBox.Enabled = editable && proxyMode;
+            dnsProxyLabel.Enabled = proxyMode;
+            dnsServerOverrideLabel.Enabled = proxyMode;
+            dnsServerOverrideHintLabel.Enabled = proxyMode;
         }
 
         private void RefreshExclusionsList(int selectIndex = -1)
@@ -333,6 +527,10 @@ namespace ProxiFyreUI.Forms
                     return;
                 if (!CanCommitDialogMutation(configuration))
                     return;
+                // The editor returns a copy (with the same id); keep following the rule if the DNS
+                // proxy selector gave it its id, so moving the selection on still restores it.
+                if (ReferenceEquals(_dnsIdAssignedRule, configuration.Proxies[index]))
+                    _dnsIdAssignedRule = editor.ResultRule;
                 configuration.Proxies[index] = editor.ResultRule;
                 MarkConfigurationChanged();
                 RefreshRoutingGrid(index);
@@ -348,6 +546,8 @@ namespace ProxiFyreUI.Forms
                 return;
             var clone = new ConfigurationSerializer().CloneRule(
                 _workspace.Configuration.Proxies[index]);
+            // Proxy ids are unique; the copy is a different proxy rule that DNS does not reference.
+            clone.Id = null;
             _workspace.Configuration.Proxies.Insert(index + 1, clone);
             MarkConfigurationChanged();
             RefreshRoutingGrid(index + 1);
@@ -366,6 +566,8 @@ namespace ProxiFyreUI.Forms
                 return;
             if (!CanCommitDialogMutation(configuration))
                 return;
+            if (ReferenceEquals(_dnsIdAssignedRule, configuration.Proxies[index]))
+                _dnsIdAssignedRule = null;
             configuration.Proxies.RemoveAt(index);
             MarkConfigurationChanged();
             RefreshRoutingGrid(Math.Min(index, configuration.Proxies.Count - 1));
@@ -1759,6 +1961,7 @@ namespace ProxiFyreUI.Forms
             validateButton.Enabled = !_operationInProgress && _workspace.Configuration != null;
             logLevelComboBox.Enabled = !ConfigurationMutationBlocked && _workspace.Configuration != null;
             bypassLanCheckBox.Enabled = !ConfigurationMutationBlocked && _workspace.Configuration != null;
+            UpdateDnsControlStates();
             trayExitMenuItem.Enabled = !_exitRequested && _configurationDialogDepth == 0;
             UpdateRoutingButtons();
             UpdateExclusionButtons();

@@ -231,6 +231,7 @@ Build prerequisites are Visual Studio 2022 with the C++ desktop and .NET Framewo
 From a Visual Studio developer shell:
 
 ```powershell
+git submodule update --init   # external/ndisapi (Windows Packet Filter API)
 nuget restore .\ProxiFyre.Configuration\packages.config -PackagesDirectory .\packages -NonInteractive
 nuget restore .\ProxiFyre\packages.config -PackagesDirectory .\packages -NonInteractive
 nuget restore .\ProxiFyre.Tests\packages.config -PackagesDirectory .\packages -NonInteractive

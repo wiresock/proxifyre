@@ -268,6 +268,10 @@
     <ClInclude Include="..\netlib\src\proxy\socks5_tcp_proxy_socket.h" />
     <ClInclude Include="..\netlib\src\proxy\socks5_udp_proxy_socket.h" />
     <ClInclude Include="..\netlib\src\proxy\process_routing_policy.h" />
+    <ClInclude Include="..\netlib\src\proxy\dns_routing_policy.h" />
+    <ClInclude Include="..\netlib\src\proxy\dns_udp_multiplexer.h" />
+    <ClInclude Include="..\netlib\src\proxy\socks5_dns_udp_relay.h" />
+    <ClInclude Include="..\netlib\src\proxy\socks5_udp_association.h" />
     <ClInclude Include="..\netlib\src\proxy\socks5_common.h" />
     <ClInclude Include="..\netlib\src\proxy\socks_local_router.h" />
     <ClInclude Include="..\netlib\src\proxy\tcp_proxy_server.h" />

@@ -111,6 +111,8 @@
     <ClCompile Include="..\netlib\test\iphelper\process_lookup_publication_test.cpp" />
     <ClCompile Include="..\netlib\test\iphelper\process_lookup_test.cpp" />
     <ClCompile Include="..\netlib\test\proxy\owner_routing_policy_test.cpp" />
+    <ClCompile Include="..\netlib\test\proxy\dns_routing_policy_test.cpp" />
+    <ClCompile Include="..\netlib\test\proxy\dns_udp_multiplexer_test.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

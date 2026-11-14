@@ -73,6 +73,17 @@ enum class socks5_transport_mx : uint8_t
 };
 
 /**
+ * @brief Specifies the global DNS routing mode.
+ */
+enum class dns_routing_mode_mx : uint8_t
+{
+    /// <summary>UDP/TCP port 53 traffic bypasses the SOCKS5 proxies.</summary>
+    direct = 0,
+    /// <summary>UDP/TCP port 53 traffic is sent through one selected SOCKS5 proxy or dropped.</summary>
+    proxy = 1
+};
+
+/**
  * @brief Enumerates the types of events that can occur in the proxy gateway.
  */
 enum class event_type_mx : uint32_t

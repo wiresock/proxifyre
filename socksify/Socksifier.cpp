@@ -400,3 +400,29 @@ bool Socksifier::Socksifier::ExcludeProcessName(String^ excludedEntry)
     }
     return unmanaged_ptr_->exclude_process_name(msclr::interop::marshal_as<std::wstring>(excludedEntry));
 }
+
+/// <summary>
+/// Configures global DNS routing via the unmanaged core.
+/// </summary>
+/// <param name="mode">Direct or Proxy.</param>
+/// <param name="proxy">Handle of the DNS proxy, or -1 when it is unavailable.</param>
+/// <param name="serverOverride">Optional upstream DNS server literal.</param>
+/// <returns>True when the configuration was applied as requested, otherwise false.</returns>
+bool Socksifier::Socksifier::SetDnsRouting(const DnsRoutingModeEnum mode, IntPtr proxy, String^ serverOverride)
+{
+    if (!unmanaged_ptr_)
+        return false;
+
+    const auto mode_mx = mode == DnsRoutingModeEnum::Proxy
+        ? dns_routing_mode_mx::proxy
+        : dns_routing_mode_mx::direct;
+    const auto server_override_mx = String::IsNullOrWhiteSpace(serverOverride)
+        ? std::string{}
+        : msclr::interop::marshal_as<std::string>(serverOverride->Trim());
+
+#if _WIN64
+    return unmanaged_ptr_->set_dns_routing(mode_mx, static_cast<LONG_PTR>(proxy.ToInt64()), server_override_mx);
+#else
+    return unmanaged_ptr_->set_dns_routing(mode_mx, static_cast<LONG_PTR>(proxy.ToInt32()), server_override_mx);
+#endif //_WIN64
+}

@@ -35,8 +35,8 @@
 #include <cassert>
 #include <gsl/gsl>
 
-#include "../include/common.h"
-#include "../include/ndisapi.h"
+#include "../external/ndisapi/include/Common.h"
+#include "../external/ndisapi/include/ndisapi.h"
 #include "../netlib/src/tools/generic.h"
 #include "../netlib/src/tools/strings.h"
 #include "../netlib/src/log/log.h"
@@ -69,7 +69,9 @@
 #include "../netlib/src/proxy/socks5_tcp_proxy_socket.h"
 #include "../netlib/src/proxy/tcp_proxy_server.h"
 #include "../netlib/src/proxy/socks5_udp_proxy_socket.h"
+#include "../netlib/src/proxy/socks5_udp_association.h"
 #include "../netlib/src/proxy/socks5_local_udp_proxy_server.h"
+#include "../netlib/src/proxy/socks5_dns_udp_relay.h"
 #include "../netlib/src/iphelper/network_adapter_info.h"
 #include "../netlib/src/iphelper/process_lookup.h"
 #include "../netlib/src/proxy/socks_local_router.h"
