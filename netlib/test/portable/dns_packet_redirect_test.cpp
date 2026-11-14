@@ -1065,3 +1065,112 @@ TEST(DnsPacketRedirect, OversizedUdpAnswerIsDeliveredTruncatedSoTheResolverRetri
         EXPECT_TRUE(reply->l4_checksum_valid());
     }
 }
+
+// ------------------------------------------------------------------ ICMP errors about proxied UDP replies
+//
+// Application UDP that a rule proxies: the per-port UDP proxy's reply is translated by the
+// production socks5_udp_local_redirect so that it reaches the client from the remote peer. If the
+// client's socket has closed, the stack answers it with an ICMP (or ICMPv6) error addressed to
+// that peer which quotes the translated reply. The router recognizes such an error from the quote
+// and the redirect's endpoint table (decide_icmp_error(), socks_local_router's
+// handle_outbound_icmp()) and drops it, in either DNS mode.
+
+namespace
+{
+    /// The stack's ICMP or ICMPv6 error about @p delivered: the 8-byte header, then the
+    /// datagram from its IP header on (Windows quotes as much of it as fits).
+    std::vector<uint8_t> icmp_error_about(const uint8_t type, const uint8_t code, const frame& delivered)
+    {
+        std::vector<uint8_t> message{ type, code, 0, 0, 0, 0, 0, 0 };
+        message.insert(message.end(), delivered.buffer.m_IBuffer + ETHER_HEADER_LENGTH,
+            delivered.buffer.m_IBuffer + delivered.buffer.m_Length);
+        return message;
+    }
+
+    /// The router's decision for an outbound ICMP message of @p redirect's family.
+    template <typename Addr>
+    proxy::icmp_error_action router_decision(ndisapi::socks5_udp_local_redirect<Addr>& redirect,
+        const proxy::dns_routing_mode mode, const std::vector<uint8_t>& message)
+    {
+        const auto quote = std::is_same_v<Addr, v4>
+            ? proxy::icmpv4_error_quote(message.data(), message.size())
+            : proxy::icmpv6_error_quote(message.data(), message.size());
+        return proxy::decide_icmp_error(mode, quote,
+            [&redirect](const uint16_t port) { return redirect.is_active_endpoint(port); });
+    }
+
+    constexpr uint16_t peer_port = 3478;
+}
+
+TEST(ProxiedUdpIcmpError, Ipv4ErrorAboutAReplyToAClosedSocketIsDropped)
+{
+    using proxy::icmp_error_action;
+    ndisapi::socks5_udp_local_redirect<v4> redirect{ log_level::error };
+    EXPECT_FALSE(redirect.is_active_endpoint(client_port));
+
+    // The application's datagram to the peer is redirected to the UDP proxy's listener.
+    auto request = frame::udp4("192.168.1.10", "203.0.113.7", client_port, peer_port, std::vector<uint8_t>(48, 0xa5));
+    EXPECT_TRUE(redirect.is_new_endpoint(request.buffer));
+    ASSERT_TRUE(redirect.process_client_to_server_packet(request.buffer, htons(udp_listener)));
+    EXPECT_TRUE(redirect.is_active_endpoint(client_port));
+
+    // The listener's reply, carrying the peer in the SOCKS5 header, reaches the client from the peer.
+    const std::vector<uint8_t> response(64, 0x5a);
+    auto reply = local_proxy_reply("192.168.1.10", "203.0.113.7", v4{ std::string{ "203.0.113.7" } }, peer_port, response);
+    ASSERT_TRUE(redirect.process_server_to_client_packet(reply.buffer));
+    ASSERT_EQ(v4{ reply.ip4()->ip_src }, v4{ std::string{ "203.0.113.7" } });
+    ASSERT_EQ(ntohs(reply.udp()->th_sport), peer_port);
+    ASSERT_EQ(ntohs(reply.udp()->th_dport), client_port);
+    ASSERT_EQ(reply.payload(), response);
+
+    // The socket has closed: the port-unreachable error the stack would send to the peer quotes
+    // the reply, so it is dropped whatever the DNS mode. So is any other error type about it.
+    const auto unreachable = icmp_error_about(3, 3, reply);
+    const auto quote = proxy::icmpv4_error_quote(unreachable.data(), unreachable.size());
+    ASSERT_TRUE(quote.has_value());
+    EXPECT_EQ(quote->source_port, peer_port);
+    EXPECT_EQ(quote->destination_port, std::optional<uint16_t>{ client_port });
+    EXPECT_EQ(router_decision(redirect, proxy::dns_routing_mode::direct, unreachable), icmp_error_action::drop_proxied_udp_reply);
+    EXPECT_EQ(router_decision(redirect, proxy::dns_routing_mode::proxy, unreachable), icmp_error_action::drop_proxied_udp_reply);
+    EXPECT_EQ(router_decision(redirect, proxy::dns_routing_mode::direct, icmp_error_about(12, 0, reply)),
+        icmp_error_action::drop_proxied_udp_reply);
+
+    // A datagram the computer received directly on a port that was never redirected, and a
+    // ping, are left alone.
+    auto unproxied = frame::udp4("203.0.113.7", "192.168.1.10", peer_port, client_port + 1, response);
+    EXPECT_EQ(router_decision(redirect, proxy::dns_routing_mode::direct, icmp_error_about(3, 3, unproxied)),
+        icmp_error_action::pass);
+    EXPECT_EQ(router_decision(redirect, proxy::dns_routing_mode::direct, icmp_error_about(8, 0, reply)),
+        icmp_error_action::pass);
+}
+
+TEST(ProxiedUdpIcmpError, Ipv6ErrorAboutAReplyToAClosedSocketIsDropped)
+{
+    using proxy::icmp_error_action;
+    ndisapi::socks5_udp_local_redirect<v6> redirect{ log_level::error };
+
+    auto request = frame::udp6("2001:db8::10", "2001:db8:1::7", client_port, peer_port, std::vector<uint8_t>(48, 0xa5));
+    EXPECT_TRUE(redirect.is_new_endpoint(request.buffer));
+    ASSERT_TRUE(redirect.process_client_to_server_packet(request.buffer, htons(udp_listener)));
+
+    const std::vector<uint8_t> response(200, 0x5a);
+    auto reply = local_proxy_reply("2001:db8::10", "2001:db8:1::7", v6{ std::string{ "2001:db8:1::7" } }, peer_port, response);
+    ASSERT_TRUE(redirect.process_server_to_client_packet(reply.buffer));
+    ASSERT_EQ(v6{ reply.ip6()->ip6_src }, v6{ std::string{ "2001:db8:1::7" } });
+    ASSERT_EQ(ntohs(reply.udp()->th_dport), client_port);
+
+    // ICMPv6 destination unreachable, port unreachable (type 1, code 4).
+    const auto unreachable = icmp_error_about(1, 4, reply);
+    EXPECT_EQ(router_decision(redirect, proxy::dns_routing_mode::direct, unreachable), icmp_error_action::drop_proxied_udp_reply);
+    EXPECT_EQ(router_decision(redirect, proxy::dns_routing_mode::proxy, unreachable), icmp_error_action::drop_proxied_udp_reply);
+
+    // Echo request and neighbor solicitation are informational and pass, as does an error about
+    // a port that was never redirected.
+    EXPECT_EQ(router_decision(redirect, proxy::dns_routing_mode::direct, icmp_error_about(128, 0, reply)),
+        icmp_error_action::pass);
+    EXPECT_EQ(router_decision(redirect, proxy::dns_routing_mode::direct, icmp_error_about(135, 0, reply)),
+        icmp_error_action::pass);
+    auto unproxied = frame::udp6("2001:db8:1::7", "2001:db8::10", peer_port, client_port + 1, response);
+    EXPECT_EQ(router_decision(redirect, proxy::dns_routing_mode::direct, icmp_error_about(1, 4, unproxied)),
+        icmp_error_action::pass);
+}
