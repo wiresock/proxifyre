@@ -346,6 +346,25 @@ namespace proxy
         std::atomic_flag dns_answer_icmp_error_logged_{};
 
         /**
+         * @brief Count of outbound ICMP errors about replies the per-port UDP proxy delivered,
+         *        dropped since the last throttled report (see decide_icmp_error()).
+         */
+        std::atomic<std::uint64_t> proxied_udp_icmp_errors_{ 0 };
+
+        /**
+         * @brief Set once the first dropped ICMP error about a proxied UDP reply of this run has
+         *        been reported at info level; later ones are only counted. Reset by start().
+         */
+        std::atomic_flag proxied_udp_icmp_error_logged_{};
+
+        /**
+         * @brief Whether the IPv4 and the IPv6 REDIRECT filter for outbound ICMP errors are in
+         *        the driver table (install_icmp_error_filters(); cleared by
+         *        remove_dns_filters()). Under lifecycle_mutex_.
+         */
+        std::array<bool, 2> icmp_error_filter_installed_{ false, false };
+
+        /**
          * @brief One-shot flags so that each (family, transport, reason) block cause is
          *        described once in the log instead of once per packet.
          */
@@ -771,15 +790,16 @@ namespace proxy
 
                     if (ip_header->ip_p == IPPROTO_ICMP)
                     {
-                        // Seen here only in DNS Proxy mode (install_dns_filters()); otherwise
-                        // the driver passes ICMP itself.
+                        // Seen here only while install_icmp_error_filters() has installed the
+                        // IPv4 filter (DNS Proxy mode, or an IPv4 UDP listener); otherwise the
+                        // driver passes ICMP itself.
                         const auto ip_header_size = static_cast<std::size_t>(ip_header->ip_hl) * sizeof(DWORD);
                         const auto fragment = classify_ipv4_fragment(ntohs(ip_header->ip_off));
                         if (fragment != ipv4_fragment::later &&
                             buffer.m_Length > ETHER_HEADER_LENGTH + ip_header_size)
                         {
                             const auto* const icmp_message = reinterpret_cast<const uint8_t*>(ip_header) + ip_header_size;
-                            return handle_outbound_icmp(icmpv4_error_quoted_source_port(icmp_message,
+                            return handle_outbound_icmp<net::ip_address_v4>(icmpv4_error_quote(icmp_message,
                                 buffer.m_Length - ETHER_HEADER_LENGTH - ip_header_size));
                         }
                     }
@@ -1067,6 +1087,8 @@ namespace proxy
             listener_segments_after_reset_.store(0, std::memory_order_relaxed);
             dns_answer_icmp_errors_.store(0, std::memory_order_relaxed);
             dns_answer_icmp_error_logged_.clear(std::memory_order_relaxed);
+            proxied_udp_icmp_errors_.store(0, std::memory_order_relaxed);
+            proxied_udp_icmp_error_logged_.clear(std::memory_order_relaxed);
             for (auto& flag : dns_block_reason_logged_)
                 flag.clear(std::memory_order_relaxed);
 
@@ -1760,6 +1782,27 @@ namespace proxy
                 const bool has_ipv4_listeners = socks_tcp_proxy_server || socks_udp_proxy_server;
                 const bool has_ipv6_listeners = socks_tcp_proxy_server_v6 || socks_udp_proxy_server_v6;
 
+                // A running router installed its ICMP error filters for the UDP listeners it had
+                // at start(); one added now needs them as well (install_icmp_error_filters()).
+                // Done before the upstream PASS filters: a failure here leaves nothing to roll
+                // back, and a surplus ICMP filter only passes the messages through user mode.
+                if ((socks_udp_proxy_server || socks_udp_proxy_server_v6) && is_active_.load(std::memory_order_acquire))
+                {
+                    dns_routing_mode mode;
+                    {
+                        std::shared_lock lock(lock_);
+                        mode = dns_mode_;
+                    }
+                    if (!install_icmp_error_filters(mode, socks_udp_proxy_server != nullptr,
+                            socks_udp_proxy_server_v6 != nullptr))
+                    {
+                        NETLIB_LOG(log_level::error,
+                            "Failed to add SOCKS5 proxy {}: the outbound ICMP filters for its UDP listeners could "
+                            "not be installed.", endpoint);
+                        return {};
+                    }
+                }
+
                 if ((has_ipv4_listeners || has_ipv6_listeners) && proxy_endpoint->ipv4)
                 {
                     if (!install_upstream_filters(*proxy_endpoint->ipv4))
@@ -2396,32 +2439,58 @@ namespace proxy
         /**
          * @brief Applies decide_icmp_error() to an outbound ICMP or ICMPv6 message.
          *
-         * In Proxy mode a DNS answer is written by the DNS proxy's listener and presented as
-         * coming from the server the client queried. If the client's socket has closed, the
-         * stack reports the answer to that server with an ICMP error that quotes it; passing the
-         * error would send the answer to the DNS server in clear, so it is dropped. The lock is
-         * taken only for a message that quotes a packet from port 53.
+         * A reply delivered by a local listener is presented as coming from the remote endpoint:
+         * a DNS answer in Proxy mode, or a datagram on a UDP flow the per-port UDP proxy
+         * redirected. If the client's socket has closed, the stack reports the reply to that
+         * endpoint with an ICMP error that quotes it; passing the error would send the reply to
+         * it in clear, from the computer's own address, so it is dropped. The DNS mode lock is
+         * taken only for a message that quotes a packet from port 53, and the redirect's lock
+         * only for one that quotes a UDP datagram.
          *
-         * @param quoted_source_port Source port of the packet the message quotes, if it is an
-         *        error about a UDP datagram or TCP segment.
+         * @tparam AddrT Address type of the message's family; selects the UDP redirect.
+         * @param quote The transport ports of the packet the message quotes, if it is an error
+         *        about a UDP datagram or TCP segment.
          */
-        packet_filter::packet_action handle_outbound_icmp(const std::optional<uint16_t> quoted_source_port)
+        template <typename AddrT>
+        packet_filter::packet_action handle_outbound_icmp(const std::optional<icmp_error_quote>& quote)
         {
-            if (decide_icmp_error(dns_routing_mode::proxy, quoted_source_port) == icmp_error_action::pass ||
-                !dns_proxy_mode())
+            const auto mode = quote && quote->source_port == dns_port && dns_proxy_mode()
+                ? dns_routing_mode::proxy
+                : dns_routing_mode::direct;
+
+            const auto action = decide_icmp_error(mode, quote,
+                [this](const uint16_t client_port) { return udp_redirect_for<AddrT>().is_active_endpoint(client_port); });
+
+            switch (action)
             {
-                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+            case icmp_error_action::drop_dns_answer:
+                dns_answer_icmp_errors_.fetch_add(1, std::memory_order_relaxed);
+                if (!dns_answer_icmp_error_logged_.test_and_set(std::memory_order_relaxed))
+                {
+                    NETLIB_LOG(log_level::info,
+                        "DNS routing: dropped an ICMP error about a DNS answer instead of sending it to the DNS server "
+                        "(the client's socket had closed before the answer from the DNS proxy arrived, and the error "
+                        "quotes the answer). Further occurrences are counted.");
+                }
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+
+            case icmp_error_action::drop_proxied_udp_reply:
+                proxied_udp_icmp_errors_.fetch_add(1, std::memory_order_relaxed);
+                if (!proxied_udp_icmp_error_logged_.test_and_set(std::memory_order_relaxed))
+                {
+                    NETLIB_LOG(log_level::info,
+                        "Dropped an ICMP error about a proxied UDP reply instead of sending it to the remote peer "
+                        "(the application's socket on port {} had closed before the reply from the proxy arrived, "
+                        "and the error quotes the reply). Further occurrences are counted.",
+                        quote->destination_port.value_or(0));
+                }
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+
+            case icmp_error_action::pass:
+                break;
             }
 
-            dns_answer_icmp_errors_.fetch_add(1, std::memory_order_relaxed);
-            if (!dns_answer_icmp_error_logged_.test_and_set(std::memory_order_relaxed))
-            {
-                NETLIB_LOG(log_level::info,
-                    "DNS routing: dropped an ICMP error about a DNS answer instead of sending it to the DNS server "
-                    "(the client's socket had closed before the answer from the DNS proxy arrived, and the error "
-                    "quotes the answer). Further occurrences are counted.");
-            }
-            return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+            return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
         }
 
         /// Maps tcp_local_redirect's result for a listener segment to the policy's outcome.
@@ -2893,8 +2962,9 @@ namespace proxy
         }
 
         /**
-         * @brief Removes the DNS policy's driver filters from an earlier start(). They are the
-         *        only REDIRECT filters this router installs; every other static filter is PASS.
+         * @brief Removes the DNS policy's driver filters from an earlier start(), and the ICMP
+         *        error filters (install_icmp_error_filters()). They are the only REDIRECT filters
+         *        this router installs; every other static filter is PASS.
          */
         void remove_dns_filters()
         {
@@ -2903,6 +2973,76 @@ namespace proxy
                 [&is_dns_filter](const ndisapi::filter<net::ip_address_v4>& filter) { return is_dns_filter(filter); });
             static_filters_.remove_filters_if<net::ip_address_v6>(
                 [&is_dns_filter](const ndisapi::filter<net::ip_address_v6>& filter) { return is_dns_filter(filter); });
+            icmp_error_filter_installed_ = { false, false };
+        }
+
+        /// Whether an IPv4 and an IPv6 UDP listener of a proxy exist. Caller holds lock_.
+        [[nodiscard]] std::pair<bool, bool> udp_listeners_present_locked() const
+        {
+            const auto has_udp = [](const auto& servers)
+            {
+                return std::ranges::any_of(servers, [](const auto& proxy) { return proxy.second != nullptr; });
+            };
+            return { has_udp(proxy_servers_), has_udp(proxy_servers_v6_) };
+        }
+
+        /**
+         * @brief Installs the REDIRECT driver filters for outbound ICMP and ICMPv6 that
+         *        plan_icmp_error_filters() asks for and that are not installed yet, at the front
+         *        of the table.
+         *
+         * They are ahead of the ICMP PASS filter and the LAN-bypass PASS filters, so an ICMP
+         * error about a reply a listener delivered reaches handle_outbound_icmp() whatever its
+         * destination. Called from install_dns_filters() on start(), after remove_dns_filters()
+         * removed the filters of an earlier run, and from add_socks5_proxy() when a UDP listener
+         * is added to a running router; a filter already installed is kept, so there is no
+         * moment without it. Called under lifecycle_mutex_.
+         *
+         * @param mode The DNS routing mode the router runs with.
+         * @param extra_ipv4_udp, extra_ipv6_udp UDP listeners about to be added that are not in
+         *        proxy_servers_ yet.
+         * @return false when a filter could not be installed.
+         */
+        bool install_icmp_error_filters(const dns_routing_mode mode, const bool extra_ipv4_udp = false,
+            const bool extra_ipv6_udp = false)
+        {
+            std::pair<bool, bool> udp_listeners{};
+            {
+                std::shared_lock lock(lock_);
+                udp_listeners = udp_listeners_present_locked();
+            }
+
+            for (const auto family : plan_icmp_error_filters(mode, udp_listeners.first || extra_ipv4_udp,
+                     udp_listeners.second || extra_ipv6_udp))
+            {
+                auto& installed = icmp_error_filter_installed_[family == dns_family::ipv4 ? 0 : 1];
+                if (installed)
+                    continue;
+
+                const auto add = [this](auto filter, const uint8_t protocol) -> bool
+                {
+                    filter.set_direction(ndisapi::direction_t::out)
+                        .set_action(ndisapi::action_t::redirect)
+                        .set_protocol(protocol);
+                    return static_filters_.add_filter_front(filter);
+                };
+
+                const bool added = family == dns_family::ipv4
+                    ? add(ndisapi::filter<net::ip_address_v4>{}, static_cast<uint8_t>(IPPROTO_ICMP))
+                    : add(ndisapi::filter<net::ip_address_v6>{}, static_cast<uint8_t>(IPPROTO_ICMPV6));
+
+                if (!added)
+                {
+                    NETLIB_LOG(log_level::error,
+                        "Failed to install the {} driver filter for outbound ICMP errors; refusing to continue so a "
+                        "DNS answer or a proxied UDP reply cannot leave the computer inside an ICMP error.",
+                        family == dns_family::ipv4 ? "IPv4" : "IPv6");
+                    return false;
+                }
+                installed = true;
+            }
+
+            return true;
         }
 
         /**
@@ -2911,11 +3051,14 @@ namespace proxy
          * Runs on every start(): the filters from an earlier run are removed and the current plan
          * is inserted at the front of the table, so the filters stay ahead of LAN-bypass PASS
          * filters added between runs and use the current listener ports and proxy selection. In
-         * Direct mode the plan is empty, so earlier filters are only removed.
+         * Direct mode the plan is empty, so earlier filters are only removed. The ICMP error
+         * filters (install_icmp_error_filters()) are installed here too: in Proxy mode, and in
+         * either mode for each address family with a UDP listener.
          * Called from start() under lifecycle_mutex_.
          *
-         * @return false when a filter needed by Proxy mode could not be installed; the caller
-         *         then fails start() rather than running with DNS able to bypass the policy.
+         * @return false when a filter could not be installed; the caller then fails start()
+         *         rather than running with DNS, or a proxied UDP reply inside an ICMP error, able
+         *         to bypass the proxy.
          */
         bool install_dns_filters()
         {
@@ -2966,31 +3109,11 @@ namespace proxy
             }
 
             // Outbound ICMP has to reach handle_outbound_icmp(): an ICMP error about a DNS answer
-            // quotes the answer and is addressed to the DNS server. Ahead of the ICMP PASS filter
-            // and the LAN-bypass PASS filters, like the filters above.
-            for (const auto family : plan_dns_icmp_filters(mode))
+            // or a proxied UDP reply quotes it and is addressed to the remote endpoint.
+            if (!install_icmp_error_filters(mode))
             {
-                const auto add = [this](auto filter, const uint8_t protocol) -> bool
-                {
-                    filter.set_direction(ndisapi::direction_t::out)
-                        .set_action(ndisapi::action_t::redirect)
-                        .set_protocol(protocol);
-                    return static_filters_.add_filter_front(filter);
-                };
-
-                const bool added = family == dns_family::ipv4
-                    ? add(ndisapi::filter<net::ip_address_v4>{}, static_cast<uint8_t>(IPPROTO_ICMP))
-                    : add(ndisapi::filter<net::ip_address_v6>{}, static_cast<uint8_t>(IPPROTO_ICMPV6));
-
-                if (!added)
-                {
-                    NETLIB_LOG(log_level::error,
-                        "DNS routing: failed to install the {} driver filter for outbound ICMP errors; refusing to "
-                        "start so a DNS answer cannot leave the computer inside an ICMP error.",
-                        family == dns_family::ipv4 ? "IPv4" : "IPv6");
-                    remove_dns_filters();
-                    return false;
-                }
+                remove_dns_filters();
+                return false;
             }
 
             return true;
@@ -3375,7 +3498,7 @@ namespace proxy
                 const auto* const packet_end = reinterpret_cast<const uint8_t*>(ethernet_header) + buffer.m_Length;
                 if (icmp_message < packet_end)
                 {
-                    return handle_outbound_icmp(icmpv6_error_quoted_source_port(icmp_message,
+                    return handle_outbound_icmp<net::ip_address_v6>(icmpv6_error_quote(icmp_message,
                         static_cast<std::size_t>(packet_end - icmp_message)));
                 }
             }
@@ -3717,6 +3840,14 @@ namespace proxy
                 reported = true;
                 NETLIB_LOG(log_level::debug,
                     "DNS routing: dropped {} ICMP error(s) about DNS answers delivered to sockets that had closed; "
+                    "they were not sent to the network.", icmp_errors);
+            }
+            if (const auto icmp_errors = proxied_udp_icmp_errors_.exchange(0, std::memory_order_relaxed);
+                icmp_errors != 0)
+            {
+                reported = true;
+                NETLIB_LOG(log_level::debug,
+                    "Dropped {} ICMP error(s) about proxied UDP replies delivered to sockets that had closed; "
                     "they were not sent to the network.", icmp_errors);
             }
             return reported;

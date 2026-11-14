@@ -449,14 +449,17 @@ namespace proxy
     }
 
     // ---------------------------------------------------------------------------------------
-    // ICMP errors about DNS answers
+    // ICMP errors about datagrams the proxies delivered
     //
-    // In Proxy mode an answer from port 53 that reaches a client was written by the DNS proxy's
-    // local listener and only presented as coming from the server the client queried. When the
-    // client's socket has closed by then (the answer to a retransmitted query, a client that
-    // gave up), the TCP/IP stack reports the datagram with an ICMP error addressed to that
-    // server, which never sent it. The error quotes the datagram, so the DNS answer would leave
-    // the adapter in clear and from the computer's own address. Such errors are dropped.
+    // A reply that reaches a client through a proxy was written by a local listener and only
+    // presented as coming from the remote endpoint: in Proxy mode a DNS answer from the server
+    // the client queried, and for application UDP that a rule proxies, a datagram from the
+    // remote peer (socks5_udp_local_redirect restores the peer named in the SOCKS5 UDP header).
+    // When the client's socket has closed by then (the answer to a retransmitted query, a
+    // client that gave up or exited), the TCP/IP stack reports the datagram with an ICMP error
+    // addressed to that remote endpoint, which never sent it to this address. The error quotes
+    // the datagram, so it would tell the remote endpoint the computer's own address and carry
+    // the reply in clear. Such errors are dropped.
     // ---------------------------------------------------------------------------------------
 
     /// Whether an ICMP (IPv4) message type is an error message, which quotes the packet it is about.
@@ -472,16 +475,40 @@ namespace proxy
         return type < 128;
     }
 
+    /// The transport header of the UDP datagram or TCP segment an ICMP or ICMPv6 error quotes.
+    struct icmp_error_quote
+    {
+        uint8_t protocol{};                       ///< 6 (TCP) or 17 (UDP)
+        uint16_t source_port{};                   ///< host byte order
+        std::optional<uint16_t> destination_port; ///< host byte order; absent when the quote ends before it
+    };
+
+    namespace detail
+    {
+        /// Reads the ports at @p offset of the quoted packet, if at least the source port is there.
+        [[nodiscard]] constexpr std::optional<icmp_error_quote> quoted_ports(const uint8_t protocol,
+            const uint8_t* quoted, const std::size_t quoted_size, const std::size_t offset) noexcept
+        {
+            if (offset + 2 > quoted_size)
+                return std::nullopt;
+
+            icmp_error_quote quote{ protocol, static_cast<uint16_t>((quoted[offset] << 8) | quoted[offset + 1]), std::nullopt };
+            if (offset + 4 <= quoted_size)
+                quote.destination_port = static_cast<uint16_t>((quoted[offset + 2] << 8) | quoted[offset + 3]);
+            return quote;
+        }
+    }
+
     /**
-     * @brief The source port of the UDP datagram or TCP segment an ICMP (IPv4) error quotes.
+     * @brief The transport ports of the UDP datagram or TCP segment an ICMP (IPv4) error quotes.
      *
      * Returns std::nullopt when the message is not an error, quotes another protocol or a later
      * fragment (whose first bytes are not ports), or is truncated before the quoted source port.
+     * The destination port is absent when the quote ends between the two ports.
      *
      * @param icmp_message The ICMP header followed by the quoted packet.
-     * @return The quoted source port in host byte order.
      */
-    [[nodiscard]] constexpr std::optional<uint16_t> icmpv4_error_quoted_source_port(
+    [[nodiscard]] constexpr std::optional<icmp_error_quote> icmpv4_error_quote(
         const uint8_t* icmp_message, const std::size_t size) noexcept
     {
         constexpr std::size_t icmp_header_size = 8, minimum_ipv4_header_size = 20;
@@ -497,7 +524,7 @@ namespace proxy
             return std::nullopt;
 
         const auto header_size = static_cast<std::size_t>(quoted[0] & 0x0f) * 4;
-        if (header_size < minimum_ipv4_header_size || header_size + 2 > quoted_size)
+        if (header_size < minimum_ipv4_header_size)
             return std::nullopt;
 
         if (quoted[9] != udp && quoted[9] != tcp)
@@ -507,20 +534,20 @@ namespace proxy
         if (classify_ipv4_fragment(flags_and_offset) == ipv4_fragment::later)
             return std::nullopt;
 
-        return static_cast<uint16_t>((quoted[header_size] << 8) | quoted[header_size + 1]);
+        return detail::quoted_ports(quoted[9], quoted, quoted_size, header_size);
     }
 
     /**
-     * @brief The source port of the UDP datagram or TCP segment an ICMPv6 error quotes.
+     * @brief The transport ports of the UDP datagram or TCP segment an ICMPv6 error quotes.
      *
      * Walks the quoted packet's hop-by-hop, routing, destination-options and fragment headers.
      * Returns std::nullopt when the message is not an error, quotes another upper-layer protocol
-     * or a later fragment, or is truncated before the quoted source port.
+     * or a later fragment, or is truncated before the quoted source port. The destination port
+     * is absent when the quote ends between the two ports.
      *
      * @param icmp_message The ICMPv6 header followed by the quoted packet.
-     * @return The quoted source port in host byte order.
      */
-    [[nodiscard]] constexpr std::optional<uint16_t> icmpv6_error_quoted_source_port(
+    [[nodiscard]] constexpr std::optional<icmp_error_quote> icmpv6_error_quote(
         const uint8_t* icmp_message, const std::size_t size) noexcept
     {
         constexpr std::size_t icmp_header_size = 8, ipv6_header_size = 40;
@@ -563,54 +590,96 @@ namespace proxy
                 continue;
             }
 
-            if ((next != udp && next != tcp) || offset + 2 > quoted_size)
+            if (next != udp && next != tcp)
                 return std::nullopt;
 
-            return static_cast<uint16_t>((quoted[offset] << 8) | quoted[offset + 1]);
+            return detail::quoted_ports(next, quoted, quoted_size, offset);
         }
 
         return std::nullopt;
     }
 
+    /// The source port of the packet an ICMP (IPv4) error quotes (icmpv4_error_quote()).
+    [[nodiscard]] constexpr std::optional<uint16_t> icmpv4_error_quoted_source_port(
+        const uint8_t* icmp_message, const std::size_t size) noexcept
+    {
+        const auto quote = icmpv4_error_quote(icmp_message, size);
+        return quote ? std::optional<uint16_t>{ quote->source_port } : std::nullopt;
+    }
+
+    /// The source port of the packet an ICMPv6 error quotes (icmpv6_error_quote()).
+    [[nodiscard]] constexpr std::optional<uint16_t> icmpv6_error_quoted_source_port(
+        const uint8_t* icmp_message, const std::size_t size) noexcept
+    {
+        const auto quote = icmpv6_error_quote(icmp_message, size);
+        return quote ? std::optional<uint16_t>{ quote->source_port } : std::nullopt;
+    }
+
     /// What a packet handler does with an outbound ICMP or ICMPv6 message.
     enum class icmp_error_action : uint8_t
     {
-        pass, ///< not about a DNS answer, or not in Proxy mode: left alone
-        drop  ///< reports a DNS answer in Proxy mode: it would carry the answer to the DNS server
+        pass,                  ///< about nothing a proxy delivered: left alone
+        drop_dns_answer,       ///< reports a DNS answer in Proxy mode: it would carry the answer to the DNS server
+        drop_proxied_udp_reply ///< reports a reply the per-port UDP proxy delivered: it would carry it to the peer
     };
 
     /**
      * @brief Decides what to do with an outbound ICMP or ICMPv6 message.
      *
-     * Only the quoted source port is used, like the destination port for queries: in Proxy mode
-     * no query leaves the adapter, so a quoted packet from port 53 is an answer the DNS proxy
-     * delivered. The few DNS packets the policy passes in Proxy mode (broadcast or multicast
-     * destinations, ProxiFyre's own traffic to a SOCKS5 server on port 53) lose at most the
-     * error report for an answer nobody was waiting for.
+     * - DNS answers: only the quoted source port is used, like the destination port for
+     *   queries: in Proxy mode no query leaves the adapter, so a quoted packet from port 53 is
+     *   an answer the DNS proxy delivered. The few DNS packets the policy passes in Proxy mode
+     *   (broadcast or multicast destinations, ProxiFyre's own traffic to a SOCKS5 server on
+     *   port 53) lose at most the error report for an answer nobody was waiting for.
+     * - Proxied UDP: a quoted UDP datagram whose destination port is a client port with an
+     *   active entry in the UDP redirect (@p is_redirected_client_port, consulted only for
+     *   such a datagram). Its source is the remote endpoint the reply was presented as coming
+     *   from. The redirect is keyed by the client port, so a datagram the same port received
+     *   directly from the network is matched too; that sender already knows the computer's
+     *   address, and only its error report is lost.
      *
-     * @param quoted_source_port icmpv4_error_quoted_source_port() or
-     *        icmpv6_error_quoted_source_port() of the message.
+     * @param quote icmpv4_error_quote() or icmpv6_error_quote() of the message.
+     * @param is_redirected_client_port Callable taking a port in host byte order.
      */
+    template <typename IsRedirectedClientPort>
     [[nodiscard]] constexpr icmp_error_action decide_icmp_error(const dns_routing_mode mode,
-        const std::optional<uint16_t> quoted_source_port) noexcept
+        const std::optional<icmp_error_quote>& quote, IsRedirectedClientPort&& is_redirected_client_port)
     {
-        return mode == dns_routing_mode::proxy && quoted_source_port && *quoted_source_port == dns_port
-            ? icmp_error_action::drop
-            : icmp_error_action::pass;
+        constexpr uint8_t udp = 17;
+
+        if (!quote)
+            return icmp_error_action::pass;
+        if (mode == dns_routing_mode::proxy && quote->source_port == dns_port)
+            return icmp_error_action::drop_dns_answer;
+        if (quote->protocol == udp && quote->destination_port &&
+            std::forward<IsRedirectedClientPort>(is_redirected_client_port)(*quote->destination_port))
+            return icmp_error_action::drop_proxied_udp_reply;
+        return icmp_error_action::pass;
     }
 
     /**
-     * @brief The address families whose outbound ICMP messages the DNS policy has to see in
-     *        @p mode, as a REDIRECT driver filter at the front of the table.
+     * @brief The address families whose outbound ICMP messages have to be seen in user mode,
+     *        as a REDIRECT driver filter at the front of the table.
      *
      * Without one, ICMP is passed by the driver (the router's ICMP PASS filter, LAN bypass)
-     * and decide_icmp_error() is never consulted. Direct mode needs none.
+     * and decide_icmp_error() is never consulted. A family needs it in DNS Proxy mode, and
+     * whenever a UDP listener of that family exists: replies on a proxied UDP flow are
+     * delivered by the listener whatever the DNS mode. A reply arrives in the packet family of
+     * its flow, so an IPv4-mapped destination of a dual-stack socket counts as IPv4.
+     *
+     * @param ipv4_udp_proxied Whether an IPv4 UDP listener of a proxy exists.
+     * @param ipv6_udp_proxied Whether an IPv6 UDP listener of a proxy exists.
      */
-    [[nodiscard]] inline std::vector<dns_family> plan_dns_icmp_filters(const dns_routing_mode mode)
+    [[nodiscard]] inline std::vector<dns_family> plan_icmp_error_filters(const dns_routing_mode mode,
+        const bool ipv4_udp_proxied, const bool ipv6_udp_proxied)
     {
-        if (mode != dns_routing_mode::proxy)
-            return {};
-        return { dns_family::ipv4, dns_family::ipv6 };
+        const bool dns_proxy = mode == dns_routing_mode::proxy;
+        std::vector<dns_family> families;
+        if (dns_proxy || ipv4_udp_proxied)
+            families.push_back(dns_family::ipv4);
+        if (dns_proxy || ipv6_udp_proxied)
+            families.push_back(dns_family::ipv6);
+        return families;
     }
 
     /// What tcp_local_redirect reported for a segment from a local TCP listener.

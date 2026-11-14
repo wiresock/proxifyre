@@ -45,6 +45,9 @@ namespace ndisapi
         /// </summary>
         std::atomic_bool terminate_{ false };
 
+        /// How long a client endpoint is kept after its last translated datagram.
+        static constexpr std::chrono::minutes endpoint_timeout{ 15 };
+
         /**
          * @brief Starts the background cleanup thread.
          *
@@ -64,8 +67,7 @@ namespace ndisapi
                             tools::generic::erase_if(endpoints_, endpoints_.begin(), endpoints_.end(),
                                 [&current_time, this](auto&& a)
                                 {
-                                    using namespace std::chrono_literals;
-                                    if (current_time - a.second > 15min)
+                                    if (current_time - a.second > endpoint_timeout)
                                     {
                                         NETLIB_DEBUG(
                                             "DELETE UDP client endpoint (timeout): : {}",
@@ -174,6 +176,22 @@ namespace ndisapi
         void set_proxy_port(const u_short proxy_port)
         {
             proxy_port_ = htons(proxy_port);
+        }
+
+        /**
+         * @brief Whether @p client_port (host byte order) has an endpoint entry that has not
+         *        timed out, i.e. its datagrams are, or were within endpoint_timeout, redirected
+         *        and replies to it are delivered by a local listener.
+         *
+         * Used to recognize an outbound ICMP error about such a reply (decide_icmp_error()):
+         * the entry outlives the client's socket, which is exactly when the stack reports a
+         * late reply with an error addressed to the remote peer.
+         */
+        [[nodiscard]] bool is_active_endpoint(const u_short client_port)
+        {
+            std::scoped_lock lock(lock_);
+            const auto it = endpoints_.find(htons(client_port));
+            return it != endpoints_.cend() && std::chrono::steady_clock::now() - it->second <= endpoint_timeout;
         }
 
         /**

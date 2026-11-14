@@ -13,6 +13,8 @@
 #include "pch.h"
 #include "../../src/proxy/dns_routing_policy.h"
 
+#include <algorithm>
+#include <functional>
 #include <set>
 #include <vector>
 
@@ -808,36 +810,192 @@ TEST(DnsAnswerIcmpPolicy, Icmpv6MessagesWithoutAQuotedSourcePortAreNotReported)
     EXPECT_FALSE(proxy::icmpv6_error_quoted_source_port(nullptr, 100).has_value());
 }
 
+namespace
+{
+    std::optional<proxy::icmp_error_quote> quote_v4(const std::vector<uint8_t>& message)
+    {
+        return proxy::icmpv4_error_quote(message.data(), message.size());
+    }
+
+    std::optional<proxy::icmp_error_quote> quote_v6(const std::vector<uint8_t>& message)
+    {
+        return proxy::icmpv6_error_quote(message.data(), message.size());
+    }
+
+    /// A quoted UDP datagram from @p source to @p destination, both ports present.
+    std::optional<proxy::icmp_error_quote> udp_quote(const uint16_t source, const uint16_t destination)
+    {
+        return proxy::icmp_error_quote{ udp_proto, source, destination };
+    }
+
+    /// The UDP redirect's view: which client ports have an active endpoint entry. Records the
+    /// ports it was asked about, so a test can check that it is consulted only when needed.
+    struct redirected_ports
+    {
+        std::vector<uint16_t> active;
+        mutable std::vector<uint16_t> asked;
+
+        bool operator()(const uint16_t port) const
+        {
+            asked.push_back(port);
+            return std::ranges::find(active, port) != active.end();
+        }
+    };
+
+    proxy::icmp_error_action decide(const proxy::dns_routing_mode mode,
+        const std::optional<proxy::icmp_error_quote>& quote, const redirected_ports& redirect = {})
+    {
+        return proxy::decide_icmp_error(mode, quote, std::cref(redirect));
+    }
+}
+
 TEST(DnsAnswerIcmpPolicy, OnlyErrorsAboutPort53AnswersAreDroppedAndOnlyInProxyMode)
 {
-    using proxy::decide_icmp_error;
     using proxy::icmp_error_action;
 
-    EXPECT_EQ(decide_icmp_error(proxy_mode, uint16_t{ 53 }), icmp_error_action::drop);
+    EXPECT_EQ(decide(proxy_mode, udp_quote(53, 58440)), icmp_error_action::drop_dns_answer);
+    EXPECT_EQ(decide(proxy_mode, proxy::icmp_error_quote{ tcp_proto, 53, 58440 }), icmp_error_action::drop_dns_answer);
     // Direct mode: the answer came from the real server, which may be told.
-    EXPECT_EQ(decide_icmp_error(direct, uint16_t{ 53 }), icmp_error_action::pass);
+    EXPECT_EQ(decide(direct, udp_quote(53, 58440)), icmp_error_action::pass);
     // Other traffic, and messages that quote nothing usable, are never touched.
-    EXPECT_EQ(decide_icmp_error(proxy_mode, uint16_t{ 443 }), icmp_error_action::pass);
-    EXPECT_EQ(decide_icmp_error(proxy_mode, uint16_t{ 5353 }), icmp_error_action::pass);
-    EXPECT_EQ(decide_icmp_error(proxy_mode, std::nullopt), icmp_error_action::pass);
-    EXPECT_EQ(decide_icmp_error(direct, std::nullopt), icmp_error_action::pass);
+    EXPECT_EQ(decide(proxy_mode, udp_quote(443, 58440)), icmp_error_action::pass);
+    EXPECT_EQ(decide(proxy_mode, udp_quote(5353, 58440)), icmp_error_action::pass);
+    EXPECT_EQ(decide(proxy_mode, std::nullopt), icmp_error_action::pass);
+    EXPECT_EQ(decide(direct, std::nullopt), icmp_error_action::pass);
 
     // End to end: a port-unreachable error about an answer, for both families.
-    EXPECT_EQ(decide_icmp_error(proxy_mode,
-        quoted_v4(icmp_message(icmpv4_unreachable, icmpv4_port_unreachable, ipv4_packet(udp_proto, 0, ports(53, 58440))))),
-        icmp_error_action::drop);
-    EXPECT_EQ(decide_icmp_error(proxy_mode,
-        quoted_v6(icmp_message(icmpv6_unreachable, icmpv6_port_unreachable, ipv6_packet(udp_proto, ports(53, 58440))))),
-        icmp_error_action::drop);
+    EXPECT_EQ(decide(proxy_mode,
+        quote_v4(icmp_message(icmpv4_unreachable, icmpv4_port_unreachable, ipv4_packet(udp_proto, 0, ports(53, 58440))))),
+        icmp_error_action::drop_dns_answer);
+    EXPECT_EQ(decide(proxy_mode,
+        quote_v6(icmp_message(icmpv6_unreachable, icmpv6_port_unreachable, ipv6_packet(udp_proto, ports(53, 58440))))),
+        icmp_error_action::drop_dns_answer);
     // A ping whose data happens to look like a packet from port 53 is passed.
-    EXPECT_EQ(decide_icmp_error(proxy_mode,
-        quoted_v4(icmp_message(icmpv4_echo_request, 0, ipv4_packet(udp_proto, 0, ports(53, 1))))),
+    EXPECT_EQ(decide(proxy_mode,
+        quote_v4(icmp_message(icmpv4_echo_request, 0, ipv4_packet(udp_proto, 0, ports(53, 1))))),
         icmp_error_action::pass);
 }
 
-TEST(DnsFilterPlan, OutboundIcmpIsKeptInUserModeOnlyInProxyMode)
+// ------------------------------------------------------------------ ICMP errors about proxied UDP replies
+//
+// A reply on a UDP flow the per-port UDP proxy redirected reaches the client presented as coming
+// from the remote peer. If the client's socket has closed, the stack's ICMP error about it quotes
+// the reply and is addressed to that peer, from the computer's own address. It must not leave the
+// adapter, in either DNS mode.
+
+TEST(ProxiedUdpIcmpPolicy, QuoteExposesBothPortsOfTheQuotedPacket)
 {
-    EXPECT_TRUE(proxy::plan_dns_icmp_filters(direct).empty());
-    const std::vector<dns_family> both{ dns_family::ipv4, dns_family::ipv6 };
-    EXPECT_EQ(proxy::plan_dns_icmp_filters(proxy_mode), both);
+    const auto v4 = quote_v4(icmp_message(icmpv4_unreachable, icmpv4_port_unreachable,
+        ipv4_packet(udp_proto, 0, ports(443, 50001), { 1, 1, 1, 1 })));
+    ASSERT_TRUE(v4.has_value());
+    EXPECT_EQ(v4->protocol, udp_proto);
+    EXPECT_EQ(v4->source_port, 443);
+    EXPECT_EQ(v4->destination_port, std::optional<uint16_t>{ 50001 });
+
+    const auto v6 = quote_v6(icmp_message(icmpv6_unreachable, icmpv6_port_unreachable,
+        ipv6_packet(fragment_proto, concat({ fragment_header(udp_proto, 0, true), ports(3478, 50002) }))));
+    ASSERT_TRUE(v6.has_value());
+    EXPECT_EQ(v6->protocol, udp_proto);
+    EXPECT_EQ(v6->source_port, 3478);
+    EXPECT_EQ(v6->destination_port, std::optional<uint16_t>{ 50002 });
+
+    const auto tcp = quote_v4(icmp_message(icmpv4_unreachable, 0, ipv4_packet(tcp_proto, 0, ports(80, 50003))));
+    ASSERT_TRUE(tcp.has_value());
+    EXPECT_EQ(tcp->protocol, tcp_proto);
+
+    // A quote that ends between the ports has the source port only (it was enough for the DNS
+    // rule before); the destination port is not guessed.
+    const auto cut_v4 = quote_v4(icmp_message(icmpv4_unreachable, 0, ipv4_packet(udp_proto, 0, { 0x01, 0xbb })));
+    ASSERT_TRUE(cut_v4.has_value());
+    EXPECT_EQ(cut_v4->source_port, 443);
+    EXPECT_FALSE(cut_v4->destination_port.has_value());
+    const auto cut_v6 = quote_v6(icmp_message(icmpv6_unreachable, 0, ipv6_packet(udp_proto, { 0x01, 0xbb, 0xc3 })));
+    ASSERT_TRUE(cut_v6.has_value());
+    EXPECT_FALSE(cut_v6->destination_port.has_value());
+
+    // The source-port helpers agree with the quote.
+    const auto message = icmp_message(icmpv4_unreachable, 0, ipv4_packet(udp_proto, 0, ports(443, 50001)));
+    EXPECT_EQ(proxy::icmpv4_error_quoted_source_port(message.data(), message.size()), std::optional<uint16_t>{ 443 });
+}
+
+TEST(ProxiedUdpIcmpPolicy, ErrorsAboutRepliesToRedirectedClientPortsAreDroppedInEitherMode)
+{
+    using proxy::icmp_error_action;
+    const redirected_ports redirect{ { 50001, 50002 }, {} };
+
+    for (const auto mode : { direct, proxy_mode })
+    {
+        EXPECT_EQ(decide(mode, udp_quote(443, 50001), redirect), icmp_error_action::drop_proxied_udp_reply);
+        EXPECT_EQ(decide(mode, udp_quote(3478, 50002), redirect), icmp_error_action::drop_proxied_udp_reply);
+        // A client port without an active redirect entry: its traffic was not proxied.
+        EXPECT_EQ(decide(mode, udp_quote(443, 50003), redirect), icmp_error_action::pass);
+    }
+
+    // End to end, for both families, with any error type (not only port unreachable).
+    EXPECT_EQ(decide(direct, quote_v4(icmp_message(icmpv4_unreachable, icmpv4_port_unreachable,
+        ipv4_packet(udp_proto, 0, ports(443, 50001)))), redirect), icmp_error_action::drop_proxied_udp_reply);
+    EXPECT_EQ(decide(direct, quote_v4(icmp_message(12, 0, ipv4_packet(udp_proto, 0, ports(443, 50001)))), redirect),
+        icmp_error_action::drop_proxied_udp_reply);
+    EXPECT_EQ(decide(direct, quote_v6(icmp_message(icmpv6_unreachable, icmpv6_port_unreachable,
+        ipv6_packet(udp_proto, ports(443, 50002)))), redirect), icmp_error_action::drop_proxied_udp_reply);
+    EXPECT_EQ(decide(direct, quote_v6(icmp_message(4, 0, ipv6_packet(udp_proto, ports(443, 50002)))), redirect),
+        icmp_error_action::drop_proxied_udp_reply);
+
+    // In Proxy mode an answer from port 53 is reported as a DNS answer whatever the redirect says.
+    EXPECT_EQ(decide(proxy_mode, udp_quote(53, 50001), redirect), icmp_error_action::drop_dns_answer);
+    // In Direct mode a proxied flow's reply from port 53 is still a proxied UDP reply.
+    EXPECT_EQ(decide(direct, udp_quote(53, 50001), redirect), icmp_error_action::drop_proxied_udp_reply);
+}
+
+TEST(ProxiedUdpIcmpPolicy, OtherIcmpIsPassedAndTheRedirectIsConsultedOnlyForQuotedUdp)
+{
+    using proxy::icmp_error_action;
+    const redirected_ports redirect{ { 50001 }, {} };
+
+    // Ping and neighbor discovery whose data looks like a reply to a redirected port.
+    EXPECT_EQ(decide(direct, quote_v4(icmp_message(icmpv4_echo_request, 0, ipv4_packet(udp_proto, 0, ports(443, 50001)))),
+        redirect), icmp_error_action::pass);
+    EXPECT_EQ(decide(direct, quote_v4(icmp_message(icmpv4_echo_reply, 0, ipv4_packet(udp_proto, 0, ports(443, 50001)))),
+        redirect), icmp_error_action::pass);
+    EXPECT_EQ(decide(direct, quote_v6(icmp_message(icmpv6_echo_request, 0, ipv6_packet(udp_proto, ports(443, 50001)))),
+        redirect), icmp_error_action::pass);
+    EXPECT_EQ(decide(direct, quote_v6(icmp_message(135, 0, ipv6_packet(udp_proto, ports(443, 50001)))), redirect),
+        icmp_error_action::pass);
+    // A TCP segment to the same port: the UDP redirect does not describe it (proxied TCP is
+    // answered with a reset, not an ICMP error).
+    EXPECT_EQ(decide(direct, proxy::icmp_error_quote{ tcp_proto, 443, 50001 }, redirect), icmp_error_action::pass);
+    // A later fragment, or a quote cut before the destination port.
+    EXPECT_EQ(decide(direct, quote_v4(icmp_message(icmpv4_unreachable, 0, ipv4_packet(udp_proto, 185, ports(443, 50001)))),
+        redirect), icmp_error_action::pass);
+    EXPECT_EQ(decide(direct, quote_v4(icmp_message(icmpv4_unreachable, 0, ipv4_packet(udp_proto, 0, { 0x01, 0xbb }))),
+        redirect), icmp_error_action::pass);
+    EXPECT_EQ(decide(direct, proxy::icmp_error_quote{ udp_proto, 443, std::nullopt }, redirect), icmp_error_action::pass);
+    // A quoted datagram that the redirected port sent rather than received: the port to look up
+    // is the quoted destination (here the peer's 443), not the source.
+    EXPECT_EQ(decide(direct, udp_quote(50001, 443), redirect), icmp_error_action::pass);
+
+    // Only that last quote, UDP with both ports, consulted the redirect; ping, neighbor
+    // discovery, TCP and cut quotes never take its lock.
+    EXPECT_EQ(redirect.asked, (std::vector<uint16_t>{ 443 }));
+
+    // The DNS rule decides without consulting the redirect.
+    const redirected_ports untouched{ { 50001 }, {} };
+    EXPECT_EQ(decide(proxy_mode, udp_quote(53, 50001), untouched), icmp_error_action::drop_dns_answer);
+    EXPECT_TRUE(untouched.asked.empty());
+}
+
+TEST(IcmpErrorFilterPlan, OutboundIcmpIsKeptInUserModeForDnsProxyModeAndForEachFamilyWithProxiedUdp)
+{
+    const std::vector<dns_family> none, v4_only{ dns_family::ipv4 }, v6_only{ dns_family::ipv6 },
+        both{ dns_family::ipv4, dns_family::ipv6 };
+
+    // No UDP is proxied: only DNS Proxy mode needs ICMP in user mode, for both families.
+    EXPECT_EQ(proxy::plan_icmp_error_filters(direct, false, false), none);
+    EXPECT_EQ(proxy::plan_icmp_error_filters(proxy_mode, false, false), both);
+    // A UDP listener of a family needs that family's ICMP in either mode.
+    EXPECT_EQ(proxy::plan_icmp_error_filters(direct, true, false), v4_only);
+    EXPECT_EQ(proxy::plan_icmp_error_filters(direct, false, true), v6_only);
+    EXPECT_EQ(proxy::plan_icmp_error_filters(direct, true, true), both);
+    EXPECT_EQ(proxy::plan_icmp_error_filters(proxy_mode, true, false), both);
+    EXPECT_EQ(proxy::plan_icmp_error_filters(proxy_mode, false, true), both);
 }
