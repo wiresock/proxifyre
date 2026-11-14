@@ -334,6 +334,18 @@ namespace proxy
         std::atomic<std::uint64_t> listener_segments_after_reset_{ 0 };
 
         /**
+         * @brief Count of outbound ICMP errors about DNS answers dropped in Proxy mode since the
+         *        last throttled report (see decide_icmp_error()).
+         */
+        std::atomic<std::uint64_t> dns_answer_icmp_errors_{ 0 };
+
+        /**
+         * @brief Set once the first dropped ICMP error about a DNS answer of this run has been
+         *        reported at info level; later ones are only counted. Reset by start().
+         */
+        std::atomic_flag dns_answer_icmp_error_logged_{};
+
+        /**
          * @brief One-shot flags so that each (family, transport, reason) block cause is
          *        described once in the log instead of once per packet.
          */
@@ -757,6 +769,21 @@ namespace proxy
                         return enqueue_for_deferred_resolve(buffer);
                     }
 
+                    if (ip_header->ip_p == IPPROTO_ICMP)
+                    {
+                        // Seen here only in DNS Proxy mode (install_dns_filters()); otherwise
+                        // the driver passes ICMP itself.
+                        const auto ip_header_size = static_cast<std::size_t>(ip_header->ip_hl) * sizeof(DWORD);
+                        const auto fragment = classify_ipv4_fragment(ntohs(ip_header->ip_off));
+                        if (fragment != ipv4_fragment::later &&
+                            buffer.m_Length > ETHER_HEADER_LENGTH + ip_header_size)
+                        {
+                            const auto* const icmp_message = reinterpret_cast<const uint8_t*>(ip_header) + ip_header_size;
+                            return handle_outbound_icmp(icmpv4_error_quoted_source_port(icmp_message,
+                                buffer.m_Length - ETHER_HEADER_LENGTH - ip_header_size));
+                        }
+                    }
+
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
                 });
 
@@ -1038,6 +1065,8 @@ namespace proxy
             untranslated_listener_replies_.store(0, std::memory_order_relaxed);
             untranslated_listener_reply_logged_.clear(std::memory_order_relaxed);
             listener_segments_after_reset_.store(0, std::memory_order_relaxed);
+            dns_answer_icmp_errors_.store(0, std::memory_order_relaxed);
+            dns_answer_icmp_error_logged_.clear(std::memory_order_relaxed);
             for (auto& flag : dns_block_reason_logged_)
                 flag.clear(std::memory_order_relaxed);
 
@@ -2364,6 +2393,37 @@ namespace proxy
             }
         }
 
+        /**
+         * @brief Applies decide_icmp_error() to an outbound ICMP or ICMPv6 message.
+         *
+         * In Proxy mode a DNS answer is written by the DNS proxy's listener and presented as
+         * coming from the server the client queried. If the client's socket has closed, the
+         * stack reports the answer to that server with an ICMP error that quotes it; passing the
+         * error would send the answer to the DNS server in clear, so it is dropped. The lock is
+         * taken only for a message that quotes a packet from port 53.
+         *
+         * @param quoted_source_port Source port of the packet the message quotes, if it is an
+         *        error about a UDP datagram or TCP segment.
+         */
+        packet_filter::packet_action handle_outbound_icmp(const std::optional<uint16_t> quoted_source_port)
+        {
+            if (decide_icmp_error(dns_routing_mode::proxy, quoted_source_port) == icmp_error_action::pass ||
+                !dns_proxy_mode())
+            {
+                return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
+            }
+
+            dns_answer_icmp_errors_.fetch_add(1, std::memory_order_relaxed);
+            if (!dns_answer_icmp_error_logged_.test_and_set(std::memory_order_relaxed))
+            {
+                NETLIB_LOG(log_level::info,
+                    "DNS routing: dropped an ICMP error about a DNS answer instead of sending it to the DNS server "
+                    "(the client's socket had closed before the answer from the DNS proxy arrived, and the error "
+                    "quotes the answer). Further occurrences are counted.");
+            }
+            return packet_filter::packet_action{ packet_filter::packet_action::action_type::drop };
+        }
+
         /// Maps tcp_local_redirect's result for a listener segment to the policy's outcome.
         template <typename Result>
         static listener_segment_outcome to_listener_segment_outcome(const Result result) noexcept
@@ -2905,6 +2965,34 @@ namespace proxy
                 }
             }
 
+            // Outbound ICMP has to reach handle_outbound_icmp(): an ICMP error about a DNS answer
+            // quotes the answer and is addressed to the DNS server. Ahead of the ICMP PASS filter
+            // and the LAN-bypass PASS filters, like the filters above.
+            for (const auto family : plan_dns_icmp_filters(mode))
+            {
+                const auto add = [this](auto filter, const uint8_t protocol) -> bool
+                {
+                    filter.set_direction(ndisapi::direction_t::out)
+                        .set_action(ndisapi::action_t::redirect)
+                        .set_protocol(protocol);
+                    return static_filters_.add_filter_front(filter);
+                };
+
+                const bool added = family == dns_family::ipv4
+                    ? add(ndisapi::filter<net::ip_address_v4>{}, static_cast<uint8_t>(IPPROTO_ICMP))
+                    : add(ndisapi::filter<net::ip_address_v6>{}, static_cast<uint8_t>(IPPROTO_ICMPV6));
+
+                if (!added)
+                {
+                    NETLIB_LOG(log_level::error,
+                        "DNS routing: failed to install the {} driver filter for outbound ICMP errors; refusing to "
+                        "start so a DNS answer cannot leave the computer inside an ICMP error.",
+                        family == dns_family::ipv4 ? "IPv4" : "IPv6");
+                    remove_dns_filters();
+                    return false;
+                }
+            }
+
             return true;
         }
 
@@ -3281,6 +3369,17 @@ namespace proxy
                 return enqueue_for_deferred_resolve(buffer);
             }
 
+            if (protocol == IPPROTO_ICMPV6)
+            {
+                const auto* const icmp_message = static_cast<const uint8_t*>(transport);
+                const auto* const packet_end = reinterpret_cast<const uint8_t*>(ethernet_header) + buffer.m_Length;
+                if (icmp_message < packet_end)
+                {
+                    return handle_outbound_icmp(icmpv6_error_quoted_source_port(icmp_message,
+                        static_cast<std::size_t>(packet_end - icmp_message)));
+                }
+            }
+
             return packet_filter::packet_action{ packet_filter::packet_action::action_type::pass };
         }
 
@@ -3611,6 +3710,14 @@ namespace proxy
                 NETLIB_LOG(log_level::debug,
                     "Dropped {} segment(s) from local TCP listeners for connections that had just been reset "
                     "(expected during aborts).", after_reset);
+            }
+            if (const auto icmp_errors = dns_answer_icmp_errors_.exchange(0, std::memory_order_relaxed);
+                icmp_errors != 0)
+            {
+                reported = true;
+                NETLIB_LOG(log_level::debug,
+                    "DNS routing: dropped {} ICMP error(s) about DNS answers delivered to sockets that had closed; "
+                    "they were not sent to the network.", icmp_errors);
             }
             return reported;
         }

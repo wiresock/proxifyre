@@ -681,3 +681,163 @@ TEST(ListenerFragmentPolicy, Ipv4ListenerFirstFragmentsAreNotTranslated)
     EXPECT_FALSE(ipv4_listener_packet_translatable(classify_ipv4_fragment(0x2000)));
     EXPECT_FALSE(ipv4_listener_packet_translatable(classify_ipv4_fragment(0x2001)));
 }
+
+// ------------------------------------------------------------------ ICMP errors about DNS answers
+//
+// In Proxy mode a DNS answer delivered to a socket that has closed makes the stack send an ICMP
+// error, which quotes the answer, to the server the client queried. It must not leave the adapter.
+
+namespace
+{
+    /// Builds an IPv4 packet: a 20-byte header plus @p options, followed by @p payload.
+    std::vector<uint8_t> ipv4_packet(const uint8_t protocol, const uint16_t flags_and_offset,
+        const std::vector<uint8_t>& payload, const std::vector<uint8_t>& options = {})
+    {
+        std::vector<uint8_t> packet(20, 0);
+        packet[0] = static_cast<uint8_t>(0x40 | ((20 + options.size()) / 4));
+        packet[6] = static_cast<uint8_t>(flags_and_offset >> 8);
+        packet[7] = static_cast<uint8_t>(flags_and_offset & 0xff);
+        packet[8] = 64;
+        packet[9] = protocol;
+        packet.insert(packet.end(), options.begin(), options.end());
+        packet.insert(packet.end(), payload.begin(), payload.end());
+        return packet;
+    }
+
+    /// Builds an ICMP or ICMPv6 message: an 8-byte header followed by the quoted packet.
+    std::vector<uint8_t> icmp_message(const uint8_t type, const uint8_t code, const std::vector<uint8_t>& quoted)
+    {
+        std::vector<uint8_t> message{ type, code, 0, 0, 0, 0, 0, 0 };
+        message.insert(message.end(), quoted.begin(), quoted.end());
+        return message;
+    }
+
+    std::optional<uint16_t> quoted_v4(const std::vector<uint8_t>& message)
+    {
+        return proxy::icmpv4_error_quoted_source_port(message.data(), message.size());
+    }
+
+    std::optional<uint16_t> quoted_v6(const std::vector<uint8_t>& message)
+    {
+        return proxy::icmpv6_error_quoted_source_port(message.data(), message.size());
+    }
+
+    constexpr uint8_t icmpv4_unreachable = 3, icmpv4_port_unreachable = 3, icmpv4_echo_request = 8, icmpv4_echo_reply = 0;
+    constexpr uint8_t icmpv6_unreachable = 1, icmpv6_port_unreachable = 4, icmpv6_echo_request = 128;
+    constexpr uint8_t icmpv6_proto = 58, icmp_proto = 1;
+}
+
+TEST(DnsAnswerIcmpPolicy, Icmpv4ErrorExposesTheQuotedSourcePort)
+{
+    // Port unreachable about a UDP answer from port 53 to a closed client port.
+    EXPECT_EQ(quoted_v4(icmp_message(icmpv4_unreachable, icmpv4_port_unreachable, ipv4_packet(udp_proto, 0, ports(53, 58440)))),
+        std::optional<uint16_t>{ 53 });
+    // The quoted header length is honoured (IP options), and TCP is read the same way.
+    EXPECT_EQ(quoted_v4(icmp_message(icmpv4_unreachable, icmpv4_port_unreachable,
+        ipv4_packet(tcp_proto, 0, ports(53, 58440), { 1, 1, 1, 1 }))), std::optional<uint16_t>{ 53 });
+    // Every error type quotes the packet; the first fragment of a datagram still carries ports.
+    for (const uint8_t type : { uint8_t{ 3 }, uint8_t{ 4 }, uint8_t{ 5 }, uint8_t{ 11 }, uint8_t{ 12 } })
+    {
+        EXPECT_EQ(quoted_v4(icmp_message(type, 0, ipv4_packet(udp_proto, 0x2000, ports(443, 50000)))),
+            std::optional<uint16_t>{ 443 });
+    }
+    // The eight bytes RFC 792 requires after the quoted header are enough.
+    EXPECT_EQ(icmp_message(icmpv4_unreachable, icmpv4_port_unreachable, ipv4_packet(udp_proto, 0, ports(53, 1))).size(), 36u);
+}
+
+TEST(DnsAnswerIcmpPolicy, Icmpv4MessagesWithoutAQuotedSourcePortAreNotReported)
+{
+    // Echo request and reply carry data, not a quoted packet, even if the data looks like one.
+    EXPECT_FALSE(quoted_v4(icmp_message(icmpv4_echo_request, 0, ipv4_packet(udp_proto, 0, ports(53, 1)))).has_value());
+    EXPECT_FALSE(quoted_v4(icmp_message(icmpv4_echo_reply, 0, ipv4_packet(udp_proto, 0, ports(53, 1)))).has_value());
+    // Another quoted protocol (ICMP).
+    EXPECT_FALSE(quoted_v4(icmp_message(icmpv4_unreachable, 0, ipv4_packet(icmp_proto, 0, ports(53, 1)))).has_value());
+    // A later fragment has no transport header: its leading bytes must not be read as ports.
+    EXPECT_FALSE(quoted_v4(icmp_message(icmpv4_unreachable, 0, ipv4_packet(udp_proto, 185, ports(53, 1)))).has_value());
+    // Truncated before the quoted ports, with and without IP options.
+    EXPECT_FALSE(quoted_v4(icmp_message(icmpv4_unreachable, 0, ipv4_packet(udp_proto, 0, {}))).has_value());
+    EXPECT_FALSE(quoted_v4(icmp_message(icmpv4_unreachable, 0, ipv4_packet(udp_proto, 0, {}, { 1, 1, 1, 1 }))).has_value());
+    // A quoted header that is not IPv4, or whose length field is too small.
+    auto not_v4 = icmp_message(icmpv4_unreachable, 0, ipv4_packet(udp_proto, 0, ports(53, 1)));
+    not_v4[8] = 0x65;
+    EXPECT_FALSE(quoted_v4(not_v4).has_value());
+    auto short_header = icmp_message(icmpv4_unreachable, 0, ipv4_packet(udp_proto, 0, ports(53, 1)));
+    short_header[8] = 0x44;
+    EXPECT_FALSE(quoted_v4(short_header).has_value());
+    // No data at all.
+    EXPECT_FALSE(proxy::icmpv4_error_quoted_source_port(nullptr, 100).has_value());
+    EXPECT_FALSE(quoted_v4({ icmpv4_unreachable, icmpv4_port_unreachable, 0, 0 }).has_value());
+}
+
+TEST(DnsAnswerIcmpPolicy, Icmpv6ErrorExposesTheQuotedSourcePort)
+{
+    EXPECT_EQ(quoted_v6(icmp_message(icmpv6_unreachable, icmpv6_port_unreachable, ipv6_packet(udp_proto, ports(53, 58440)))),
+        std::optional<uint16_t>{ 53 });
+    EXPECT_EQ(quoted_v6(icmp_message(icmpv6_unreachable, icmpv6_port_unreachable, ipv6_packet(tcp_proto, ports(53, 58440)))),
+        std::optional<uint16_t>{ 53 });
+    // Extension headers and a first-fragment header in the quoted packet are skipped.
+    const std::vector<uint8_t> hop_by_hop{ fragment_proto, 0, 1, 4, 0, 0, 0, 0 };
+    const std::vector<uint8_t> destination_options{ udp_proto, 0, 1, 4, 0, 0, 0, 0 };
+    EXPECT_EQ(quoted_v6(icmp_message(3, 0, ipv6_packet(hop_proto,
+        concat({ hop_by_hop, fragment_header(dest_opts_proto, 0, true), destination_options, ports(53, 50001) })))),
+        std::optional<uint16_t>{ 53 });
+    // Every type below 128 is an error.
+    for (const uint8_t type : { uint8_t{ 1 }, uint8_t{ 2 }, uint8_t{ 3 }, uint8_t{ 4 }, uint8_t{ 127 } })
+    {
+        EXPECT_EQ(quoted_v6(icmp_message(type, 0, ipv6_packet(udp_proto, ports(5353, 50000)))),
+            std::optional<uint16_t>{ 5353 });
+    }
+}
+
+TEST(DnsAnswerIcmpPolicy, Icmpv6MessagesWithoutAQuotedSourcePortAreNotReported)
+{
+    // Informational messages (echo, neighbor discovery) are not errors.
+    EXPECT_FALSE(quoted_v6(icmp_message(icmpv6_echo_request, 0, ipv6_packet(udp_proto, ports(53, 1)))).has_value());
+    EXPECT_FALSE(quoted_v6(icmp_message(135, 0, ipv6_packet(udp_proto, ports(53, 1)))).has_value());
+    // Another upper-layer protocol, a later fragment, a truncated chain.
+    EXPECT_FALSE(quoted_v6(icmp_message(icmpv6_unreachable, 0, ipv6_packet(icmpv6_proto, ports(53, 1)))).has_value());
+    EXPECT_FALSE(quoted_v6(icmp_message(icmpv6_unreachable, 0,
+        ipv6_packet(fragment_proto, concat({ fragment_header(udp_proto, 185, false), ports(53, 1) })))).has_value());
+    EXPECT_FALSE(quoted_v6(icmp_message(icmpv6_unreachable, 0, ipv6_packet(udp_proto, {}))).has_value());
+    EXPECT_FALSE(quoted_v6(icmp_message(icmpv6_unreachable, 0,
+        ipv6_packet(fragment_proto, fragment_header(udp_proto, 0, true)))).has_value());
+    // Not IPv6, or no data at all.
+    auto not_v6 = icmp_message(icmpv6_unreachable, 0, ipv6_packet(udp_proto, ports(53, 1)));
+    not_v6[8] = 0x45;
+    EXPECT_FALSE(quoted_v6(not_v6).has_value());
+    EXPECT_FALSE(proxy::icmpv6_error_quoted_source_port(nullptr, 100).has_value());
+}
+
+TEST(DnsAnswerIcmpPolicy, OnlyErrorsAboutPort53AnswersAreDroppedAndOnlyInProxyMode)
+{
+    using proxy::decide_icmp_error;
+    using proxy::icmp_error_action;
+
+    EXPECT_EQ(decide_icmp_error(proxy_mode, uint16_t{ 53 }), icmp_error_action::drop);
+    // Direct mode: the answer came from the real server, which may be told.
+    EXPECT_EQ(decide_icmp_error(direct, uint16_t{ 53 }), icmp_error_action::pass);
+    // Other traffic, and messages that quote nothing usable, are never touched.
+    EXPECT_EQ(decide_icmp_error(proxy_mode, uint16_t{ 443 }), icmp_error_action::pass);
+    EXPECT_EQ(decide_icmp_error(proxy_mode, uint16_t{ 5353 }), icmp_error_action::pass);
+    EXPECT_EQ(decide_icmp_error(proxy_mode, std::nullopt), icmp_error_action::pass);
+    EXPECT_EQ(decide_icmp_error(direct, std::nullopt), icmp_error_action::pass);
+
+    // End to end: a port-unreachable error about an answer, for both families.
+    EXPECT_EQ(decide_icmp_error(proxy_mode,
+        quoted_v4(icmp_message(icmpv4_unreachable, icmpv4_port_unreachable, ipv4_packet(udp_proto, 0, ports(53, 58440))))),
+        icmp_error_action::drop);
+    EXPECT_EQ(decide_icmp_error(proxy_mode,
+        quoted_v6(icmp_message(icmpv6_unreachable, icmpv6_port_unreachable, ipv6_packet(udp_proto, ports(53, 58440))))),
+        icmp_error_action::drop);
+    // A ping whose data happens to look like a packet from port 53 is passed.
+    EXPECT_EQ(decide_icmp_error(proxy_mode,
+        quoted_v4(icmp_message(icmpv4_echo_request, 0, ipv4_packet(udp_proto, 0, ports(53, 1))))),
+        icmp_error_action::pass);
+}
+
+TEST(DnsFilterPlan, OutboundIcmpIsKeptInUserModeOnlyInProxyMode)
+{
+    EXPECT_TRUE(proxy::plan_dns_icmp_filters(direct).empty());
+    const std::vector<dns_family> both{ dns_family::ipv4, dns_family::ipv6 };
+    EXPECT_EQ(proxy::plan_dns_icmp_filters(proxy_mode), both);
+}

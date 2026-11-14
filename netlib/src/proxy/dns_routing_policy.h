@@ -448,6 +448,171 @@ namespace proxy
         return translated ? listener_reply_action::revert : listener_reply_action::drop;
     }
 
+    // ---------------------------------------------------------------------------------------
+    // ICMP errors about DNS answers
+    //
+    // In Proxy mode an answer from port 53 that reaches a client was written by the DNS proxy's
+    // local listener and only presented as coming from the server the client queried. When the
+    // client's socket has closed by then (the answer to a retransmitted query, a client that
+    // gave up), the TCP/IP stack reports the datagram with an ICMP error addressed to that
+    // server, which never sent it. The error quotes the datagram, so the DNS answer would leave
+    // the adapter in clear and from the computer's own address. Such errors are dropped.
+    // ---------------------------------------------------------------------------------------
+
+    /// Whether an ICMP (IPv4) message type is an error message, which quotes the packet it is about.
+    [[nodiscard]] constexpr bool is_icmpv4_error(const uint8_t type) noexcept
+    {
+        // Destination unreachable, source quench, redirect, time exceeded, parameter problem.
+        return type == 3 || type == 4 || type == 5 || type == 11 || type == 12;
+    }
+
+    /// Whether an ICMPv6 message type is an error message (RFC 4443: types below 128).
+    [[nodiscard]] constexpr bool is_icmpv6_error(const uint8_t type) noexcept
+    {
+        return type < 128;
+    }
+
+    /**
+     * @brief The source port of the UDP datagram or TCP segment an ICMP (IPv4) error quotes.
+     *
+     * Returns std::nullopt when the message is not an error, quotes another protocol or a later
+     * fragment (whose first bytes are not ports), or is truncated before the quoted source port.
+     *
+     * @param icmp_message The ICMP header followed by the quoted packet.
+     * @return The quoted source port in host byte order.
+     */
+    [[nodiscard]] constexpr std::optional<uint16_t> icmpv4_error_quoted_source_port(
+        const uint8_t* icmp_message, const std::size_t size) noexcept
+    {
+        constexpr std::size_t icmp_header_size = 8, minimum_ipv4_header_size = 20;
+        constexpr uint8_t tcp = 6, udp = 17;
+
+        if (icmp_message == nullptr || size < icmp_header_size + minimum_ipv4_header_size ||
+            !is_icmpv4_error(icmp_message[0]))
+            return std::nullopt;
+
+        const auto* const quoted = icmp_message + icmp_header_size;
+        const auto quoted_size = size - icmp_header_size;
+        if ((quoted[0] >> 4) != 4)
+            return std::nullopt;
+
+        const auto header_size = static_cast<std::size_t>(quoted[0] & 0x0f) * 4;
+        if (header_size < minimum_ipv4_header_size || header_size + 2 > quoted_size)
+            return std::nullopt;
+
+        if (quoted[9] != udp && quoted[9] != tcp)
+            return std::nullopt;
+
+        const auto flags_and_offset = static_cast<uint16_t>((quoted[6] << 8) | quoted[7]);
+        if (classify_ipv4_fragment(flags_and_offset) == ipv4_fragment::later)
+            return std::nullopt;
+
+        return static_cast<uint16_t>((quoted[header_size] << 8) | quoted[header_size + 1]);
+    }
+
+    /**
+     * @brief The source port of the UDP datagram or TCP segment an ICMPv6 error quotes.
+     *
+     * Walks the quoted packet's hop-by-hop, routing, destination-options and fragment headers.
+     * Returns std::nullopt when the message is not an error, quotes another upper-layer protocol
+     * or a later fragment, or is truncated before the quoted source port.
+     *
+     * @param icmp_message The ICMPv6 header followed by the quoted packet.
+     * @return The quoted source port in host byte order.
+     */
+    [[nodiscard]] constexpr std::optional<uint16_t> icmpv6_error_quoted_source_port(
+        const uint8_t* icmp_message, const std::size_t size) noexcept
+    {
+        constexpr std::size_t icmp_header_size = 8, ipv6_header_size = 40;
+        constexpr uint8_t hop_by_hop = 0, tcp = 6, udp = 17, routing = 43, fragment = 44, destination_options = 60;
+
+        if (icmp_message == nullptr || size < icmp_header_size + ipv6_header_size ||
+            !is_icmpv6_error(icmp_message[0]))
+            return std::nullopt;
+
+        const auto* const quoted = icmp_message + icmp_header_size;
+        const auto quoted_size = size - icmp_header_size;
+        if ((quoted[0] >> 4) != 6)
+            return std::nullopt;
+
+        uint8_t next = quoted[6];
+        std::size_t offset = ipv6_header_size;
+
+        // A bound on the chain length keeps a malformed chain from looping.
+        for (int headers = 0; headers < 16; ++headers)
+        {
+            if (next == hop_by_hop || next == routing || next == destination_options)
+            {
+                if (offset + 2 > quoted_size)
+                    return std::nullopt;
+                const auto length = (static_cast<std::size_t>(quoted[offset + 1]) + 1) * 8;
+                next = quoted[offset];
+                offset += length;
+                continue;
+            }
+
+            if (next == fragment)
+            {
+                if (offset + 8 > quoted_size)
+                    return std::nullopt;
+                const auto offset_and_flags = static_cast<uint16_t>((quoted[offset + 2] << 8) | quoted[offset + 3]);
+                if ((offset_and_flags >> 3) != 0)
+                    return std::nullopt; // a later fragment: no upper-layer header
+                next = quoted[offset];
+                offset += 8;
+                continue;
+            }
+
+            if ((next != udp && next != tcp) || offset + 2 > quoted_size)
+                return std::nullopt;
+
+            return static_cast<uint16_t>((quoted[offset] << 8) | quoted[offset + 1]);
+        }
+
+        return std::nullopt;
+    }
+
+    /// What a packet handler does with an outbound ICMP or ICMPv6 message.
+    enum class icmp_error_action : uint8_t
+    {
+        pass, ///< not about a DNS answer, or not in Proxy mode: left alone
+        drop  ///< reports a DNS answer in Proxy mode: it would carry the answer to the DNS server
+    };
+
+    /**
+     * @brief Decides what to do with an outbound ICMP or ICMPv6 message.
+     *
+     * Only the quoted source port is used, like the destination port for queries: in Proxy mode
+     * no query leaves the adapter, so a quoted packet from port 53 is an answer the DNS proxy
+     * delivered. The few DNS packets the policy passes in Proxy mode (broadcast or multicast
+     * destinations, ProxiFyre's own traffic to a SOCKS5 server on port 53) lose at most the
+     * error report for an answer nobody was waiting for.
+     *
+     * @param quoted_source_port icmpv4_error_quoted_source_port() or
+     *        icmpv6_error_quoted_source_port() of the message.
+     */
+    [[nodiscard]] constexpr icmp_error_action decide_icmp_error(const dns_routing_mode mode,
+        const std::optional<uint16_t> quoted_source_port) noexcept
+    {
+        return mode == dns_routing_mode::proxy && quoted_source_port && *quoted_source_port == dns_port
+            ? icmp_error_action::drop
+            : icmp_error_action::pass;
+    }
+
+    /**
+     * @brief The address families whose outbound ICMP messages the DNS policy has to see in
+     *        @p mode, as a REDIRECT driver filter at the front of the table.
+     *
+     * Without one, ICMP is passed by the driver (the router's ICMP PASS filter, LAN bypass)
+     * and decide_icmp_error() is never consulted. Direct mode needs none.
+     */
+    [[nodiscard]] inline std::vector<dns_family> plan_dns_icmp_filters(const dns_routing_mode mode)
+    {
+        if (mode != dns_routing_mode::proxy)
+            return {};
+        return { dns_family::ipv4, dns_family::ipv6 };
+    }
+
     /// What tcp_local_redirect reported for a segment from a local TCP listener.
     enum class listener_segment_outcome : uint8_t
     {
